@@ -3,6 +3,8 @@
 #include <cstdlib>
 #include <cstring>
 #include "Engine/Source/Gx/CGxDeviceD3d11/CGxDeviceD3d11.h"
+#include "Engine/Source/ConsoleBase/ConsoleVar.h"
+#include "Engine/Source/Gx/CGxDeviceD3d11/FfShaders.h"
 #include "Engine/Source/Gx/Blit.h"
 #include "Engine/Source/Gx/CGxBuf.h"
 #include "Engine/Source/Gx/CGxPool.h"
@@ -12,14 +14,15 @@
 #include "Engine/Source/Storm/H/storm.h"
 
 // Phase status (see README.md): device, swap chain, back buffer, readable depth, clear/present/resize, buffer pools,
-// textures and draw submission are real. Render states, the cbuffer flush, input layouts, fixed function and shader
-// objects are stubs marked TODO(phase N).
+// textures, draw submission, render-state objects, cbuffers, input layouts, fixed function and translated shaders
+// are real. What is left is marked TODO(phase N).
 
 typedef HRESULT (WINAPI* CreateDXGIFactory1Proc)(REFIID riid, void** factory);
 
-// cbuffer b0 per stage: 256 float4 registers, then the int/bool/alpha-test slots (layout: shader-xlate README).
-// TODO(phase 2): size the tail to the translator's final layout.
-static const uint32_t kConstantBufferBytes = (256 + 32) * 16;
+// cbuffer b0 per stage: the 256 float4 registers. The device block b1 is separate (shader-xlate README):
+// int4 i[16], float4 alphaRef, float4 clipPlane[6].
+static const uint32_t kConstantBufferBytes = 256 * 16;
+static const uint32_t kDeviceConstantBytes = 23 * 16;
 
 static const uint32_t s_gxAttribToD3dAttribSize[7] = { 4, 4, 4, 8, 12, 4, 4 };
 
@@ -103,6 +106,12 @@ CGxDeviceD3d11::CGxDeviceD3d11() {
     this->m_resolveTexture = nullptr;
     this->m_constantBuffers[0] = nullptr;
     this->m_constantBuffers[1] = nullptr;
+    this->m_ffConstantBuffers[0] = nullptr;
+    this->m_ffConstantBuffers[1] = nullptr;
+    this->m_devConstantBuffer = nullptr;
+    this->m_reserved397C = nullptr;
+    memset(this->m_ffVs, 0, sizeof(this->m_ffVs));
+    memset(this->m_ffPs, 0, sizeof(this->m_ffPs));
     this->m_fanIndexBuffer = nullptr;
     this->m_fanIndexBufferSize = 0;
     this->m_curRtv = nullptr;
@@ -645,23 +654,30 @@ int32_t CGxDeviceD3d11::ICreateD3dDevice(const CGxFormat& format) {
         return 0;
     }
 
-    for (uint32_t i = 0; i < 2; i++) {
+    // b0 for app and FF stages (4 KB each, the size every shader declares), b1 shared by both stages. Zero-filled so
+    // registers nobody set read 0, as on D3D9.
+    static const float s_zeroConstants[256 * 4] = {};
+    ID3D11Buffer** cbuffers[5] = { &this->m_constantBuffers[0], &this->m_constantBuffers[1], &this->m_ffConstantBuffers[0], &this->m_ffConstantBuffers[1], &this->m_devConstantBuffer };
+
+    for (uint32_t i = 0; i < 5; i++) {
         D3D11_BUFFER_DESC cbDesc;
         memset(&cbDesc, 0, sizeof(cbDesc));
-        cbDesc.ByteWidth = kConstantBufferBytes;
+        cbDesc.ByteWidth = i == 4 ? kDeviceConstantBytes : kConstantBufferBytes;
         cbDesc.Usage = D3D11_USAGE_DYNAMIC;
         cbDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         cbDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        D3D11_SUBRESOURCE_DATA init = { s_zeroConstants, 0, 0 };
 
-        if (FAILED(this->m_d3dDevice->CreateBuffer(&cbDesc, nullptr, &this->m_constantBuffers[i]))) {
+        if (FAILED(this->m_d3dDevice->CreateBuffer(&cbDesc, &init, cbuffers[i]))) {
             return 0;
         }
     }
 
-    this->m_d3dContext->VSSetConstantBuffers(0, 1, &this->m_constantBuffers[0]);
-    this->m_d3dContext->PSSetConstantBuffers(0, 1, &this->m_constantBuffers[1]);
+    this->m_d3dContext->VSSetConstantBuffers(1, 1, &this->m_devConstantBuffer);
+    this->m_d3dContext->PSSetConstantBuffers(1, 1, &this->m_devConstantBuffer);
 
     this->m_context = 1;
+    this->IStateReset();
 
     this->ISetCaps(format);
     this->Log(this->m_caps);
@@ -698,6 +714,7 @@ void CGxDeviceD3d11::IDestroyD3d() {
     this->IReleaseBackBuffer();
     SafeRelease(this->m_constantBuffers[0]);
     SafeRelease(this->m_constantBuffers[1]);
+    this->IStateRelease();
     SafeRelease(this->m_fanIndexBuffer);
     this->m_fanIndexBufferSize = 0;
 
@@ -770,8 +787,8 @@ void CGxDeviceD3d11::ISetCaps(const CGxFormat& format) {
 
     this->m_caps.m_colorWrite = 1;
     this->m_caps.m_hwCursor = 0;
-    // TODO(phase 3): user clip planes become SV_ClipDistance in the FF/translated vertex shaders.
-    this->m_caps.m_maxClipPlanes = 0;
+    // Every VS (translated and FF) writes SV_ClipDistance0/1 from the planes in cb1.
+    this->m_caps.m_maxClipPlanes = 6;
     this->m_caps.m_texTarget[GxTex_2d] = 1;
     this->m_caps.m_texTarget[GxTex_CubeMap] = 1;
     this->m_caps.m_texTarget[GxTex_Rectangle] = 0;
@@ -931,6 +948,12 @@ void CGxDeviceD3d11::IBindRenderTargets() {
     if (this->m_textureTarget[GxBuffers_Depth].m_apiSpecific) {
         dsv = static_cast<ID3D11DepthStencilView*>(this->m_textureTarget[GxBuffers_Depth].m_apiSpecific);
     }
+
+    // Drop every PS SRV first: a texture becoming the target would otherwise be bound twice (the runtime nulls it
+    // behind our back). IStateSyncTextures rebinds on the next draw.
+    ID3D11ShaderResourceView* noSrvs[16] = {};
+    this->m_d3dContext->PSSetShaderResources(0, 16, noSrvs);
+    memset(this->m_curSrv, 0, sizeof(this->m_curSrv));
 
     this->m_curRtv = rtv;
     this->m_curDsv = dsv;
@@ -1429,29 +1452,883 @@ void CGxDeviceD3d11::IStateSyncVertexPtrs() {
     }
 }
 
-// TODO(phase 2): build the D3D11_INPUT_ELEMENT_DESC list from m_primVertexFormat / m_primVertexFormatAttrib, hash it
-// with the bound VS input signature (PLAN contract) and IASetInputLayout. Nothing is drawn visibly until then.
+// ---------------------------------------------------------------------------------------------------------------
+// Pipeline state (phase 2) and fixed function (FfShaders.h, /root/d3d11-port/ffshaders)
+
+enum {
+    Dirty_Raster = 0x1,
+    Dirty_Blend = 0x2,
+    Dirty_Depth = 0x4,
+};
+
+enum {
+    State_Raster,
+    State_Blend,
+    State_Depth,
+    State_Sampler,
+    State_InputLayout,
+};
+
+// D3D9 s_srcBlend / s_dstBlend per GxBlend mode. Alpha uses the same factors, colour ones swapped for alpha ones
+// (D3D11 rejects colour factors in the alpha slots).
+static const D3D11_BLEND s_srcBlend11[12] = { D3D11_BLEND_ONE, D3D11_BLEND_ONE, D3D11_BLEND_SRC_ALPHA, D3D11_BLEND_SRC_ALPHA, D3D11_BLEND_DEST_COLOR, D3D11_BLEND_DEST_COLOR, D3D11_BLEND_DEST_COLOR, D3D11_BLEND_INV_SRC_ALPHA, D3D11_BLEND_INV_SRC_ALPHA, D3D11_BLEND_SRC_ALPHA, D3D11_BLEND_ONE, D3D11_BLEND_BLEND_FACTOR };
+static const D3D11_BLEND s_dstBlend11[12] = { D3D11_BLEND_ZERO, D3D11_BLEND_ZERO, D3D11_BLEND_INV_SRC_ALPHA, D3D11_BLEND_ONE, D3D11_BLEND_ZERO, D3D11_BLEND_SRC_COLOR, D3D11_BLEND_ONE, D3D11_BLEND_ONE, D3D11_BLEND_ZERO, D3D11_BLEND_ZERO, D3D11_BLEND_ONE, D3D11_BLEND_INV_BLEND_FACTOR };
+static const D3D11_COMPARISON_FUNC s_cmpFunc11[4] = { D3D11_COMPARISON_LESS_EQUAL, D3D11_COMPARISON_EQUAL, D3D11_COMPARISON_GREATER_EQUAL, D3D11_COMPARISON_LESS };
+// D3D9 NONE / CW / CCW, with clockwise front faces (FrontCounterClockwise = FALSE).
+static const D3D11_CULL_MODE s_cullMode11[3] = { D3D11_CULL_NONE, D3D11_CULL_FRONT, D3D11_CULL_BACK };
+// Index = CGxVertexAttrib::m_type (D3D9 s_gxAttribToD3dAttribType), formats from the shader-xlate README.
+static const DXGI_FORMAT s_gxAttribToDxgiFormat[7] = { DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UINT, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R32G32_FLOAT, DXGI_FORMAT_R32G32B32_FLOAT, DXGI_FORMAT_R16G16_SINT, DXGI_FORMAT_R32_FLOAT };
+static const char* s_gxAttribSemantic[GxVAs_Last] = { "POSITION", "BLENDWEIGHT", "BLENDINDICES", "NORMAL", "COLOR", "COLOR", "TEXCOORD", "TEXCOORD", "TEXCOORD", "TEXCOORD", "TEXCOORD", "TEXCOORD", "TEXCOORD", "TEXCOORD" };
+static const UINT s_gxAttribSemanticIndex[GxVAs_Last] = { 0, 0, 0, 0, 0, 1, 0, 1, 2, 3, 4, 5, 6, 7 };
+// D3D9 s_filterModes; Nearest/Linear have no mip filter there, so they get MaxLOD 0 here.
+static const D3D11_FILTER s_filter11[GxTexFilters_Last] = { D3D11_FILTER_MIN_MAG_MIP_POINT, D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT, D3D11_FILTER_MIN_MAG_MIP_POINT, D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT, D3D11_FILTER_MIN_MAG_MIP_LINEAR, D3D11_FILTER_ANISOTROPIC };
+
+static D3D11_BLEND AlphaBlend11(D3D11_BLEND blend) {
+    switch (blend) {
+        case D3D11_BLEND_SRC_COLOR:
+            return D3D11_BLEND_SRC_ALPHA;
+        case D3D11_BLEND_INV_SRC_COLOR:
+            return D3D11_BLEND_INV_SRC_ALPHA;
+        case D3D11_BLEND_DEST_COLOR:
+            return D3D11_BLEND_DEST_ALPHA;
+        case D3D11_BLEND_INV_DEST_COLOR:
+            return D3D11_BLEND_INV_DEST_ALPHA;
+        default:
+            return blend;
+    }
+}
+
+static uint64_t Fnv64(const void* data, size_t size, uint64_t hash = 0xCBF29CE484222325ull) {
+    const uint8_t* bytes = static_cast<const uint8_t*>(data);
+
+    for (size_t i = 0; i < size; i++) {
+        hash = (hash ^ bytes[i]) * 0x100000001B3ull;
+    }
+
+    return hash;
+}
+
+// Hash of the DXBC input signature (ISGN chunk), so input layouts are shared by every VS with the same inputs.
+static uint64_t DxbcInputSignatureHash(const void* code, uint32_t size) {
+    const uint8_t* bytes = static_cast<const uint8_t*>(code);
+
+    if (size >= 32 && !memcmp(bytes, "DXBC", 4)) {
+        uint32_t chunks;
+        memcpy(&chunks, bytes + 28, 4);
+
+        for (uint32_t i = 0; i < chunks && 32 + i * 4 + 4 <= size; i++) {
+            uint32_t offset;
+            memcpy(&offset, bytes + 32 + i * 4, 4);
+
+            if (offset + 8 <= size && !memcmp(bytes + offset, "ISGN", 4)) {
+                uint32_t chunkSize;
+                memcpy(&chunkSize, bytes + offset + 4, 4);
+
+                if (offset + 8 + chunkSize <= size) {
+                    return Fnv64(bytes + offset + 8, chunkSize);
+                }
+            }
+        }
+    }
+
+    return Fnv64(code, size);
+}
+
+static void ColorToFloat4(uint32_t value, float* out, float alpha = -1.0f) {
+    CImVector color;
+    memcpy(&color, &value, sizeof(color));
+    out[0] = color.r * (1.0f / 255.0f);
+    out[1] = color.g * (1.0f / 255.0f);
+    out[2] = color.b * (1.0f / 255.0f);
+    out[3] = alpha < 0.0f ? color.a * (1.0f / 255.0f) : alpha;
+}
+
+// The client's own texLodBias setting (WorldParam), applied in the samplers: the D3D9 path ignores it in 12340.
+static float TexLodBias() {
+    static CVar* cvar;
+
+    if (!cvar) {
+        cvar = CVar::Lookup("texLodBias");
+    }
+
+    return cvar ? cvar->m_floatValue : 0.0f;
+}
+
+static void UploadConstants(ID3D11DeviceContext* context, ID3D11Buffer* buffer, const void* data, uint32_t size) {
+    D3D11_MAPPED_SUBRESOURCE mapped;
+
+    if (buffer && SUCCEEDED(context->Map(buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+        memcpy(mapped.pData, data, size);
+        context->Unmap(buffer, 0);
+    }
+}
+
+// D3D9 defaults (IStateSetD3DDefaults) and every render state re-sent, after device creation.
+void CGxDeviceD3d11::IStateReset() {
+    memset(&this->m_rsDesc, 0, sizeof(this->m_rsDesc));
+    this->m_rsDesc.FillMode = D3D11_FILL_SOLID;
+    this->m_rsDesc.CullMode = D3D11_CULL_NONE;
+    this->m_rsDesc.DepthClipEnable = TRUE;
+
+    memset(&this->m_blendDesc, 0, sizeof(this->m_blendDesc));
+    D3D11_RENDER_TARGET_BLEND_DESC& rt = this->m_blendDesc.RenderTarget[0];
+    rt.SrcBlend = D3D11_BLEND_ONE;
+    rt.DestBlend = D3D11_BLEND_ZERO;
+    rt.BlendOp = D3D11_BLEND_OP_ADD;
+    rt.SrcBlendAlpha = D3D11_BLEND_ONE;
+    rt.DestBlendAlpha = D3D11_BLEND_ZERO;
+    rt.BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    rt.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+
+    memset(&this->m_dsDesc, 0, sizeof(this->m_dsDesc));
+    this->m_dsDesc.DepthEnable = TRUE;
+    this->m_dsDesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+    this->m_dsDesc.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
+    this->m_dsDesc.StencilReadMask = 0xFF;
+    this->m_dsDesc.StencilWriteMask = 0xFF;
+    D3D11_DEPTH_STENCILOP_DESC stencilOp = { D3D11_STENCIL_OP_KEEP, D3D11_STENCIL_OP_KEEP, D3D11_STENCIL_OP_KEEP, D3D11_COMPARISON_ALWAYS };
+    this->m_dsDesc.FrontFace = stencilOp;
+    this->m_dsDesc.BackFace = stencilOp;
+
+    for (uint32_t i = 0; i < 4; i++) {
+        this->m_blendFactor[i] = 1.0f;
+    }
+
+    this->m_stateDirty = Dirty_Raster | Dirty_Blend | Dirty_Depth;
+    this->m_samplerDirty = 0xFFFF;
+    memset(this->m_curSrv, 0, sizeof(this->m_curSrv));
+    memset(this->m_curCb, 0, sizeof(this->m_curCb));
+    this->m_curVs = nullptr;
+    this->m_curPs = nullptr;
+    this->m_curVsCode = nullptr;
+    this->m_curVsCodeSize = 0;
+    this->m_curVsSig = 0;
+    this->m_curLayoutKey = 0;
+    // NaN never compares equal, so the first draw uploads b1 and the FF blocks.
+    memset(this->m_devConstants, 0xFF, sizeof(this->m_devConstants));
+    memset(this->m_ffConstants, 0xFF, sizeof(this->m_ffConstants));
+    this->m_hwMasterEnables = ~this->m_appMasterEnables;
+
+    this->IRsForceUpdate();
+}
+
+void CGxDeviceD3d11::IStateRelease() {
+    for (auto& entry : this->m_stateCache) {
+        SafeRelease(entry.second);
+    }
+
+    this->m_stateCache.clear();
+
+    for (uint32_t i = 0; i < 48; i++) {
+        SafeRelease(this->m_ffVs[i]);
+    }
+
+    for (uint32_t i = 0; i < 3; i++) {
+        SafeRelease(this->m_ffPs[i]);
+    }
+
+    SafeRelease(this->m_ffConstantBuffers[0]);
+    SafeRelease(this->m_ffConstantBuffers[1]);
+    SafeRelease(this->m_devConstantBuffer);
+}
+
+// ponytail: 64-bit FNV keys without a desc compare; a collision would hand back the wrong state object. Store and
+// memcmp the desc if that ever shows up.
+ID3D11DeviceChild* CGxDeviceD3d11::IStateGet(uint32_t kind, const void* desc, uint32_t size) {
+    uint64_t key = Fnv64(desc, size, Fnv64(&kind, sizeof(kind)));
+    auto found = this->m_stateCache.find(key);
+
+    if (found != this->m_stateCache.end()) {
+        return found->second;
+    }
+
+    ID3D11DeviceChild* object = nullptr;
+    HRESULT hr = E_FAIL;
+
+    switch (kind) {
+        case State_Raster:
+            hr = this->m_d3dDevice->CreateRasterizerState(static_cast<const D3D11_RASTERIZER_DESC*>(desc), reinterpret_cast<ID3D11RasterizerState**>(&object));
+            break;
+
+        case State_Blend:
+            hr = this->m_d3dDevice->CreateBlendState(static_cast<const D3D11_BLEND_DESC*>(desc), reinterpret_cast<ID3D11BlendState**>(&object));
+            break;
+
+        case State_Depth:
+            hr = this->m_d3dDevice->CreateDepthStencilState(static_cast<const D3D11_DEPTH_STENCIL_DESC*>(desc), reinterpret_cast<ID3D11DepthStencilState**>(&object));
+            break;
+
+        case State_Sampler:
+            hr = this->m_d3dDevice->CreateSamplerState(static_cast<const D3D11_SAMPLER_DESC*>(desc), reinterpret_cast<ID3D11SamplerState**>(&object));
+            break;
+
+        default:
+            break;
+    }
+
+    if (FAILED(hr)) {
+        CGxDevice::Log("CGxDeviceD3d11: state object %u creation failed (0x%08X)", kind, static_cast<uint32_t>(hr));
+        object = nullptr;
+    }
+
+    this->m_stateCache[key] = object;
+
+    return object;
+}
+
+// Same element list as CGxDeviceD3d::IStateSyncVertexPtrs builds for its vertex declaration (predefined formats use
+// stream 0 only), named by the shader-xlate semantic table, hashed with the bound VS input signature.
 void CGxDeviceD3d11::IStateSyncInputLayout() {
+    D3D11_INPUT_ELEMENT_DESC elements[GxVAs_Last];
+    CGxBuf* streamBufs[GxVAs_Last] = {};
+    uint32_t streamCount = 0;
+    uint32_t count = 0;
+    uint64_t key = Fnv64(&this->m_curVsSig, sizeof(this->m_curVsSig));
+    bool predefined = this->m_primVertexFormat < GxVertexBufferFormats_Last;
+
+    for (uint32_t i = 0; i < GxVAs_Last; i++) {
+        if (!(this->m_primVertexMask & (1 << i))) {
+            continue;
+        }
+
+        uint32_t stream = 0;
+
+        if (!predefined) {
+            for (stream = 0; stream < streamCount; stream++) {
+                if (streamBufs[stream] == this->m_primVertexFormatBuf[i]) {
+                    break;
+                }
+            }
+
+            if (stream == streamCount) {
+                streamBufs[streamCount++] = this->m_primVertexFormatBuf[i];
+            }
+        }
+
+        const CGxVertexAttrib& attrib = this->m_primVertexFormatAttrib[i];
+        D3D11_INPUT_ELEMENT_DESC& element = elements[count++];
+        element.SemanticName = s_gxAttribSemantic[i];
+        element.SemanticIndex = s_gxAttribSemanticIndex[i];
+        element.Format = s_gxAttribToDxgiFormat[attrib.m_type < 7 ? attrib.m_type : 0];
+        element.InputSlot = stream;
+        element.AlignedByteOffset = attrib.m_offset;
+        element.InputSlotClass = D3D11_INPUT_PER_VERTEX_DATA;
+        element.InstanceDataStepRate = 0;
+
+        uint32_t words[4] = { i, attrib.m_type, attrib.m_offset, stream };
+        key = Fnv64(words, sizeof(words), key);
+    }
+
+    if (key == this->m_curLayoutKey) {
+        return;
+    }
+
+    this->m_curLayoutKey = key;
+    uint64_t cacheKey = Fnv64(&key, sizeof(key), State_InputLayout);
+    auto found = this->m_stateCache.find(cacheKey);
+    ID3D11InputLayout* layout = nullptr;
+
+    if (found != this->m_stateCache.end()) {
+        layout = static_cast<ID3D11InputLayout*>(found->second);
+    } else {
+        // A VS reading an attribute the decl lacks fails here (D3D9 fed it defaults); the failure is cached as null.
+        if (!this->m_curVsCode || FAILED(this->m_d3dDevice->CreateInputLayout(elements, count, this->m_curVsCode, this->m_curVsCodeSize, &layout))) {
+            CGxDevice::Log("CGxDeviceD3d11: CreateInputLayout failed (mask 0x%X)", this->m_primVertexMask);
+            layout = nullptr;
+        }
+
+        this->m_stateCache[cacheKey] = layout;
+    }
+
+    this->m_d3dContext->IASetInputLayout(layout);
 }
 
-// TODO(phase 2): copy the dirty ranges of CGxDevice::s_shadowConstants into m_constantBuffers (Map DISCARD), as 4.3.4
-// FUN_00871570 does, plus the int/bool/alpha-test tail.
+// Whole register file per dirty stage: a DISCARD map leaves the rest of the buffer undefined. (4.3.4 FUN_00871570
+// copies the bound shader's used range; ours are all 256 registers.)
 void CGxDeviceD3d11::IShaderConstantsFlush() {
+    for (uint32_t stage = 0; stage < 2; stage++) {
+        ShadowConstants& shadow = CGxDevice::s_shadowConstants[stage == 0 ? 1 : 0];
+
+        if (shadow.dirtyMin <= shadow.dirtyMax) {
+            UploadConstants(this->m_d3dContext, this->m_constantBuffers[stage], shadow.constants, sizeof(shadow.constants));
+        }
+
+        shadow.dirtyMin = 255;
+        shadow.dirtyMax = 0;
+    }
 }
 
-// TODO(phase 2): set dirty bits only and resolve them into the 5 hashed state objects (rasterizer / blend /
-// depth-stencil / sampler / input layout) at draw time, like 4.3.4 IRsSendToHw 0x0086FF70. Textures (PS SRVs),
-// shaders and the scissor rect are bound from here too.
+// cb1: int constants (none: stock shaders only use defi), alpha-test ref, user clip planes in clip space. D3D9 takes
+// planes in clip space for shader draws and in world space for fixed function, so FF planes go through inv(view*proj).
+void CGxDeviceD3d11::IStateSyncDeviceConstants(bool ffVs) {
+    float dev[23 * 4];
+    memset(dev, 0, sizeof(dev));
+
+    int32_t alphaRef = this->m_appRenderStates[GxRs_AlphaRef].m_value.m_data.i[0];
+    dev[16 * 4] = alphaRef > 0 ? alphaRef * (1.0f / 255.0f) : 0.0f;
+
+    uint32_t mask = this->m_appRenderStates[GxRs_ClipPlaneMask].m_value.m_data.u[0] & 0x3F;
+
+    if (mask) {
+        C44Matrix toClip;
+
+        if (ffVs) {
+            CGxMatrixStack& view = this->m_xforms[GxXform_View];
+            toClip = (view.m_mtx[view.m_level] * this->m_projNative).Inverse().Transpose();
+        }
+
+        for (uint32_t i = 0; i < 6; i++) {
+            if (!(mask & (1 << i))) {
+                continue;
+            }
+
+            const C4Plane& plane = this->m_clipPlane[i];
+            C4Vector p;
+            p.x = plane.n.x;
+            p.y = plane.n.y;
+            p.z = plane.n.z;
+            p.w = plane.d;
+
+            if (ffVs) {
+                p = p * toClip;
+            }
+
+            memcpy(&dev[(17 + i) * 4], &p, sizeof(p));
+        }
+    }
+
+    this->m_clipPlaneMask = 0;
+
+    if (memcmp(dev, this->m_devConstants, sizeof(dev))) {
+        memcpy(this->m_devConstants, dev, sizeof(dev));
+        UploadConstants(this->m_d3dContext, this->m_devConstantBuffer, dev, sizeof(dev));
+    }
+}
+
+// The FF register maps of ffshaders/ff_common.hlsli, filled as CGxDeviceD3d's IStateSyncLights / Material / Xforms
+// and IXformSetTex would program D3D9.
+void CGxDeviceD3d11::IStateSyncFixedFunction(bool vs, bool ps, bool lighting, bool ambientOnly) {
+    const CGxAppRenderState* rs = this->m_appRenderStates.m_data;
+    bool fog = rs[GxRs_Fog].m_value.m_data.i[0] && (this->m_appMasterEnables & 0x2);
+    bool specular = rs[GxRs_MatSpecularExp].m_value.m_data.f[0] > 0.0f && rs[GxRs_MatSpecular].m_value.m_data.i[0];
+
+    if (vs) {
+        float c[53 * 4];
+        memset(c, 0, sizeof(c));
+
+        CGxMatrixStack& world = this->m_xforms[GxXform_World];
+        CGxMatrixStack& view = this->m_xforms[GxXform_View];
+        const C44Matrix& viewMtx = view.m_mtx[view.m_level];
+        C44Matrix worldView = world.m_mtx[world.m_level] * viewMtx;
+        memcpy(&c[0 * 4], &worldView, sizeof(C44Matrix));
+        memcpy(&c[4 * 4], &this->m_projNative, sizeof(C44Matrix));
+
+        for (uint32_t tmu = 0; tmu < 2; tmu++) {
+            CGxMatrixStack& texGen = this->m_texGen[tmu];
+            CGxMatrixStack& xform = this->m_xforms[tmu];
+            int32_t gen = rs[GxRs_TexGen0 + tmu].m_value.m_data.i[0];
+            C44Matrix matrix = texGen.m_mtx[texGen.m_level];
+            float mode = 0.0f;
+
+            switch (rs[GxRs_TextureShader0 + tmu].m_value.m_data.i[0]) {
+                case 0:
+                    mode = (texGen.m_flags[texGen.m_level] & CGxMatrixStack::F_Identity) ? 0.0f : 1.0f;
+                    break;
+
+                case 1: {
+                    C44Matrix product = texGen.m_mtx[texGen.m_level] * xform.m_mtx[xform.m_level];
+                    matrix = product;
+
+                    if (!gen) {
+                        matrix.c0 = product.d0;
+                        matrix.c1 = product.d1;
+                    }
+
+                    mode = 1.0f;
+                    break;
+                }
+
+                case 2:
+                    matrix = texGen.m_mtx[texGen.m_level] * xform.m_mtx[xform.m_level];
+                    mode = 2.0f;
+                    break;
+
+                default:
+                    break;
+            }
+
+            float source;
+
+            switch (gen) {
+                case GxTexGen_ObjectLinear:
+                case GxTexGen_EyeLinear:
+                case GxTexGen_Unk3:
+                    source = 8.0f;
+                    break;
+
+                case GxTexGen_ReflectionMap:
+                case GxTexGen_SphereMap:
+                    source = 10.0f;
+                    break;
+
+                case GxTexGen_Normal:
+                    source = 9.0f;
+                    break;
+
+                default:
+                    source = static_cast<float>(rs[GxRs_TextureCoord0 + tmu].m_value.m_data.u[0] & 7);
+                    break;
+            }
+
+            memcpy(&c[(8 + tmu * 4) * 4], &matrix, sizeof(C44Matrix));
+            c[(21 + tmu) * 4 + 0] = source;
+            c[(21 + tmu) * 4 + 1] = mode;
+        }
+
+        // Material (ISetMaterial: ambient = diffuse).
+        ColorToFloat4(rs[GxRs_MatEmissive].m_value.m_data.u[0], &c[16 * 4]);
+        ColorToFloat4(rs[GxRs_MatDiffuse].m_value.m_data.u[0], &c[17 * 4]);
+        ColorToFloat4(rs[GxRs_MatSpecular].m_value.m_data.u[0], &c[18 * 4], rs[GxRs_MatSpecularExp].m_value.m_data.f[0]);
+
+        if (ambientOnly) {
+            c[19 * 4 + 0] = c[19 * 4 + 1] = c[19 * 4 + 2] = c[19 * 4 + 3] = 1.0f;
+        }
+
+        if (fog) {
+            float start = rs[GxRs_FogStart].m_value.m_data.f[0];
+            float end = rs[GxRs_FogEnd].m_value.m_data.f[0];
+            float range = end - start != 0.0f ? end - start : 1.0f;
+            c[20 * 4 + 0] = -1.0f / range;
+            c[20 * 4 + 1] = end / range;
+        } else {
+            c[20 * 4 + 1] = 1.0f;
+        }
+
+        if (this->m_primVertexMask & (1 << GxVA_Color0)) {
+            int32_t colorMaterial = rs[GxRs_ColorMaterial].m_value.m_data.i[0];
+            c[23 * 4 + 0] = colorMaterial == 0;
+            c[23 * 4 + 1] = colorMaterial == 1;
+            c[23 * 4 + 2] = colorMaterial == 2;
+        }
+
+        c[23 * 4 + 3] = specular;
+
+        for (uint32_t i = 0; lighting && !ambientOnly && i < 4; i++) {
+            const CGxApiLight& light = this->m_lights[i];
+
+            if (!light.m_enable) {
+                continue;
+            }
+
+            float* l = &c[(24 + 5 * i) * 4];
+            bool point = light.m_dir.w == 1.0f;
+            C4Vector dir;
+            dir.x = light.m_dir.x;
+            dir.y = light.m_dir.y;
+            dir.z = light.m_dir.z;
+            dir.w = point ? 1.0f : 0.0f;
+            dir = dir * viewMtx;
+
+            l[0] = dir.x;
+            l[1] = dir.y;
+            l[2] = dir.z;
+            l[3] = point ? 2.0f : 1.0f;
+            l[4] = light.m_dirColor.x;
+            l[5] = light.m_dirColor.y;
+            l[6] = light.m_dirColor.z;
+            l[7] = 1.0f;
+            l[8] = light.m_ambColor.x;
+            l[9] = light.m_ambColor.y;
+            l[10] = light.m_ambColor.z;
+            l[12] = light.m_specColor.x;
+            l[13] = light.m_specColor.y;
+            l[14] = light.m_specColor.z;
+            l[16] = light.m_constantAttenuation;
+            l[17] = light.m_linearAttenuation;
+            l[18] = light.m_quadraticAttenuation;
+            l[19] = 10000.0f;
+        }
+
+        c[50 * 4] = rs[GxRs_NormalizeNormals].m_value.m_data.u[0] != 0;
+
+        const float* attenuation = rs[GxRs_PointScaleAttenuation].m_value.m_data.f;
+        c[51 * 4 + 0] = rs[GxRs_PointScale].m_value.m_data.f[0];
+        c[51 * 4 + 1] = *reinterpret_cast<const C3Vector*>(attenuation) != CGxDevice::s_pointScaleAttenuation;
+        c[52 * 4 + 0] = attenuation[0];
+        c[52 * 4 + 1] = attenuation[1];
+        c[52 * 4 + 2] = attenuation[2];
+        c[52 * 4 + 3] = (this->m_viewport.m_y.m_h - this->m_viewport.m_y.m_l) * this->DeviceCurWindow().maxY;
+
+        if (memcmp(c, this->m_ffConstants[0], sizeof(c))) {
+            memcpy(this->m_ffConstants[0], c, sizeof(c));
+            UploadConstants(this->m_d3dContext, this->m_ffConstantBuffers[0], c, sizeof(c));
+        }
+    }
+
+    if (ps) {
+        float c[3 * 4];
+        memset(c, 0, sizeof(c));
+
+        ColorToFloat4(rs[GxRs_FogColor].m_value.m_data.u[0], &c[0], fog ? 1.0f : 0.0f);
+
+        for (uint32_t tmu = 0; tmu < 2; tmu++) {
+            bool enabled = rs[GxRs_Texture0 + tmu].m_value.m_data.p != nullptr;
+            c[4 + tmu * 2 + 0] = enabled ? static_cast<float>(rs[GxRs_ColorOp0 + tmu].m_value.m_data.u[0]) : 6.0f;
+            c[4 + tmu * 2 + 1] = enabled ? static_cast<float>(rs[GxRs_AlphaOp0 + tmu].m_value.m_data.u[0]) : 6.0f;
+        }
+
+        c[8] = specular;
+
+        if (memcmp(c, this->m_ffConstants[1], sizeof(c))) {
+            memcpy(this->m_ffConstants[1], c, sizeof(c));
+            UploadConstants(this->m_d3dContext, this->m_ffConstantBuffers[1], c, sizeof(c));
+        }
+    }
+}
+
+// App shaders when bound and valid, otherwise the FF permutation for the current vertex format, lighting and
+// textures. Returns whether the VS is fixed function.
+bool CGxDeviceD3d11::IStateSyncShaders() {
+    const CGxAppRenderState* rs = this->m_appRenderStates.m_data;
+    CGxShader* vs = static_cast<CGxShader*>(rs[GxRs_VertexShader].m_value.m_data.p);
+    CGxShader* ps = static_cast<CGxShader*>(rs[GxRs_PixelShader].m_value.m_data.p);
+    bool ffVs = !vs || !vs->m_valid || !vs->m_apiSpecific;
+    bool ffPs = !ps || !ps->m_valid || !ps->m_apiSpecific;
+
+    // IStateSyncLights: lighting as D3D9 would set Ds_Lighting, plus ambient-only mode.
+    bool lighting = rs[GxRs_Lighting].m_value.m_data.i[0] && (this->m_appMasterEnables & 0x1);
+    bool ambientOnly = !rs[GxRs_Lighting].m_value.m_data.i[0] && !(this->m_primVertexMask & (1 << GxVA_Color0)) && rs[GxRs_MatDiffuse].m_value.m_data.u[0] != 0xFFFFFFFF;
+
+    void* vsObject;
+    const void* vsCode;
+    uint32_t vsCodeSize;
+
+    if (ffVs) {
+        uint32_t index = FfSelectVs(this->m_primVertexMask, lighting || ambientOnly);
+
+        if (!this->m_ffVs[index]) {
+            this->m_d3dDevice->CreateVertexShader(g_ffVs[index].data, g_ffVs[index].size, nullptr, &this->m_ffVs[index]);
+        }
+
+        vsObject = this->m_ffVs[index];
+        vsCode = g_ffVs[index].data;
+        vsCodeSize = static_cast<uint32_t>(g_ffVs[index].size);
+    } else {
+        vsObject = vs->m_apiSpecific;
+        vsCode = vs->m_code.m_data;
+        vsCodeSize = vs->m_code.Count();
+    }
+
+    if (vsObject != this->m_curVs) {
+        this->m_d3dContext->VSSetShader(static_cast<ID3D11VertexShader*>(vsObject), nullptr, 0);
+        this->m_curVs = vsObject;
+    }
+
+    if (vsCode != this->m_curVsCode || vsCodeSize != this->m_curVsCodeSize) {
+        this->m_curVsCode = vsCode;
+        this->m_curVsCodeSize = vsCodeSize;
+        this->m_curVsSig = DxbcInputSignatureHash(vsCode, vsCodeSize);
+    }
+
+    void* psObject;
+
+    if (ffPs) {
+        uint32_t index = FfSelectPs(rs[GxRs_Texture0].m_value.m_data.p != nullptr, rs[GxRs_Texture1].m_value.m_data.p != nullptr);
+
+        if (!this->m_ffPs[index]) {
+            this->m_d3dDevice->CreatePixelShader(g_ffPs[index].data, g_ffPs[index].size, nullptr, &this->m_ffPs[index]);
+        }
+
+        psObject = this->m_ffPs[index];
+    } else {
+        psObject = ps->m_apiSpecific;
+    }
+
+    if (psObject != this->m_curPs) {
+        this->m_d3dContext->PSSetShader(static_cast<ID3D11PixelShader*>(psObject), nullptr, 0);
+        this->m_curPs = psObject;
+    }
+
+    ID3D11Buffer* cb[2] = { ffVs ? this->m_ffConstantBuffers[0] : this->m_constantBuffers[0], ffPs ? this->m_ffConstantBuffers[1] : this->m_constantBuffers[1] };
+
+    if (cb[0] != this->m_curCb[0]) {
+        this->m_d3dContext->VSSetConstantBuffers(0, 1, &cb[0]);
+        this->m_curCb[0] = cb[0];
+    }
+
+    if (cb[1] != this->m_curCb[1]) {
+        this->m_d3dContext->PSSetConstantBuffers(0, 1, &cb[1]);
+        this->m_curCb[1] = cb[1];
+    }
+
+    if (ffVs || ffPs) {
+        this->IStateSyncFixedFunction(ffVs, ffPs, lighting || ambientOnly, ambientOnly);
+    }
+
+    return ffVs;
+}
+
+// PS SRVs every draw (cheap, and survives texture recreation behind an unchanged CGxTex*), samplers when the texture
+// or its flags changed. Filtering follows the client's own settings: the texture's filter and anisotropy
+// (textureFilteringMode) and texLodBias, which is what wxl-texfilter forced onto D3D9.
+void CGxDeviceD3d11::IStateSyncTextures() {
+    static float s_lodBias;
+    float lodBias = TexLodBias();
+
+    if (lodBias != s_lodBias) {
+        s_lodBias = lodBias;
+        this->m_samplerDirty = 0xFFFF;
+    }
+
+    for (uint32_t i = 0; i < 16; i++) {
+        CGxTex* texture = static_cast<CGxTex*>(this->m_appRenderStates[GxRs_Texture0 + i].m_value.m_data.p);
+        TexApi* api = texture && !texture->m_needsCreation ? static_cast<TexApi*>(texture->m_apiSpecificData) : nullptr;
+        ID3D11ShaderResourceView* srv = api ? api->m_srv : nullptr;
+
+        if (srv != this->m_curSrv[i]) {
+            this->m_d3dContext->PSSetShaderResources(i, 1, &srv);
+            this->m_curSrv[i] = srv;
+        }
+
+        if (!texture || !(this->m_samplerDirty & (1 << i))) {
+            continue;
+        }
+
+        const CGxTexFlags& flags = texture->m_flags;
+        uint32_t anisotropy = flags.m_maxAnisotropy < 1 ? 1 : (flags.m_maxAnisotropy > 16 ? 16 : flags.m_maxAnisotropy);
+
+        D3D11_SAMPLER_DESC desc;
+        memset(&desc, 0, sizeof(desc));
+        desc.Filter = s_filter11[flags.m_filter < GxTexFilters_Last ? flags.m_filter : GxTex_Linear];
+
+        if (flags.m_filter == GxTex_Anisotropic && anisotropy == 1) {
+            desc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+        }
+
+        desc.AddressU = flags.m_wrapU ? D3D11_TEXTURE_ADDRESS_WRAP : D3D11_TEXTURE_ADDRESS_CLAMP;
+        desc.AddressV = flags.m_wrapV ? D3D11_TEXTURE_ADDRESS_WRAP : D3D11_TEXTURE_ADDRESS_CLAMP;
+        desc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+        desc.MipLODBias = lodBias;
+        desc.MaxAnisotropy = anisotropy;
+        desc.ComparisonFunc = D3D11_COMPARISON_NEVER;
+        desc.MaxLOD = flags.m_filter <= GxTex_Linear ? 0.0f : D3D11_FLOAT32_MAX;
+
+        ID3D11SamplerState* sampler = static_cast<ID3D11SamplerState*>(this->IStateGet(State_Sampler, &desc, sizeof(desc)));
+        this->m_d3dContext->PSSetSamplers(i, 1, &sampler);
+    }
+
+    this->m_samplerDirty = 0;
+}
+
+// CGxDeviceD3d::IStateSyncScissorRect.
+void CGxDeviceD3d11::IStateSyncScissorRect() {
+    if (!this->m_scissorRectDirty) {
+        return;
+    }
+
+    const CRect& window = this->DeviceCurWindow();
+    D3D11_RECT rect;
+
+    rect.left = static_cast<LONG>(this->m_scissorRect.minX * window.maxX + 0.5f);
+    rect.right = static_cast<LONG>(this->m_scissorRect.maxX * window.maxX + 1.0f);
+
+    if (this->m_textureTarget[0].m_apiSpecific || this->m_textureTarget[1].m_apiSpecific) {
+        rect.top = static_cast<LONG>(this->m_scissorRect.minY * window.maxY + 0.5f);
+        rect.bottom = static_cast<LONG>(1.0f + this->m_scissorRect.maxY * window.maxY);
+    } else {
+        rect.top = static_cast<LONG>((1.0f - this->m_scissorRect.maxY) * window.maxY + 0.5f);
+        rect.bottom = static_cast<LONG>(1.0f + (1.0f - this->m_scissorRect.minY) * window.maxY);
+    }
+
+    rect.left = rect.left < 0 ? 0 : rect.left;
+    rect.top = rect.top < 0 ? 0 : rect.top;
+    rect.right = rect.right > window.maxX ? static_cast<LONG>(window.maxX) : rect.right;
+    rect.bottom = rect.bottom > window.maxY ? static_cast<LONG>(window.maxY) : rect.bottom;
+
+    this->m_d3dContext->RSSetScissorRects(1, &rect);
+    this->m_scissorRectDirty = 0;
+}
+
+// CGxDeviceD3d::ISetTexGen: the texgen matrix is taken from the view (and world) current when the state changes.
+void CGxDeviceD3d11::ISetTexGen(uint32_t tmu, int32_t texGen) {
+    C44Matrix matrix;
+
+    if (texGen == GxTexGen_ObjectLinear || texGen == GxTexGen_EyeLinear) {
+        CGxMatrixStack& view = this->m_xforms[GxXform_View];
+        matrix = view.m_mtx[view.m_level];
+        matrix = matrix.AffineInverse();
+
+        if (texGen == GxTexGen_ObjectLinear) {
+            CGxMatrixStack& world = this->m_xforms[GxXform_World];
+            matrix = matrix * world.m_mtx[world.m_level].Inverse();
+        }
+    } else if (texGen == GxTexGen_SphereMap) {
+        matrix.a0 = 0.5f;
+        matrix.b1 = 0.5f;
+        matrix.d0 = 0.5f;
+        matrix.d1 = 0.5f;
+    } else {
+        this->m_texGen[tmu].Identity();
+        return;
+    }
+
+    CGxMatrixStack& stack = this->m_texGen[tmu];
+    stack.m_dirty = 1;
+    stack.m_flags[stack.m_level] &= ~CGxMatrixStack::F_Identity;
+    stack.m_mtx[stack.m_level] = matrix;
+}
+
+// 4.3.4 IRsSendToHw (0x0086FF70) model: only descs and dirty bits change here, IStateSync resolves them. Fixed-function,
+// fog, alpha-ref and clip-plane states are read straight from m_appRenderStates at draw time.
 void CGxDeviceD3d11::IRsSendToHw(EGxRenderState which) {
+    const CGxStateBom& value = this->m_appRenderStates[which].m_value;
+    uint32_t master = this->m_appMasterEnables;
+
+    switch (which) {
+        case GxRs_PolygonOffset:
+            // ponytail: D3D9 DEPTHBIAS is in depth units, D3D11 counts steps of a 24-bit depth buffer; D16/D32 targets
+            // get a bias off by their own step size.
+            this->m_rsDesc.DepthBias = static_cast<INT>(-value.m_data.f[0] * 16777216.0f);
+            this->m_stateDirty |= Dirty_Raster;
+            break;
+
+        case GxRs_BlendingMode: {
+            uint32_t mode = value.m_data.u[0] < 12 ? value.m_data.u[0] : 0;
+            D3D11_RENDER_TARGET_BLEND_DESC& rt = this->m_blendDesc.RenderTarget[0];
+            rt.BlendEnable = mode >= 2;
+            rt.SrcBlend = mode >= 2 ? s_srcBlend11[mode] : D3D11_BLEND_ONE;
+            rt.DestBlend = mode >= 2 ? s_dstBlend11[mode] : D3D11_BLEND_ZERO;
+            rt.SrcBlendAlpha = AlphaBlend11(rt.SrcBlend);
+            rt.DestBlendAlpha = AlphaBlend11(rt.DestBlend);
+            this->m_stateDirty |= Dirty_Blend;
+            break;
+        }
+
+        case GxRs_DepthTest:
+        case GxRs_DepthFunc:
+            if ((master & 0x4) && this->m_appRenderStates[GxRs_DepthTest].m_value.m_data.i[0]) {
+                this->m_dsDesc.DepthFunc = s_cmpFunc11[this->m_appRenderStates[GxRs_DepthFunc].m_value.m_data.u[0] & 3];
+            } else {
+                this->m_dsDesc.DepthFunc = D3D11_COMPARISON_ALWAYS;
+            }
+
+            this->m_stateDirty |= Dirty_Depth;
+            break;
+
+        case GxRs_DepthWrite:
+            this->m_dsDesc.DepthWriteMask = (master & 0x8) && value.m_data.i[0] ? D3D11_DEPTH_WRITE_MASK_ALL : D3D11_DEPTH_WRITE_MASK_ZERO;
+            this->m_stateDirty |= Dirty_Depth;
+            break;
+
+        case GxRs_ColorWrite:
+            this->m_blendDesc.RenderTarget[0].RenderTargetWriteMask = static_cast<UINT8>((master & 0x10) ? value.m_data.u[0] & 0xF : 0);
+            this->m_stateDirty |= Dirty_Blend;
+            break;
+
+        case GxRs_Culling: {
+            int32_t cull = (master & 0x20) ? value.m_data.i[0] : 0;
+            this->m_rsDesc.CullMode = s_cullMode11[cull < 0 ? 0 : (cull > 2 ? 2 : cull)];
+            this->m_stateDirty |= Dirty_Raster;
+            break;
+        }
+
+        case GxRs_Multisample:
+            this->m_rsDesc.MultisampleEnable = value.m_data.i[0] != 0;
+            this->m_stateDirty |= Dirty_Raster;
+            break;
+
+        case GxRs_ScissorTest:
+            this->m_rsDesc.ScissorEnable = value.m_data.i[0] != 0;
+            this->m_stateDirty |= Dirty_Raster;
+            break;
+
+        case GxRs_Texture0:
+        case GxRs_Texture1:
+        case GxRs_Texture2:
+        case GxRs_Texture3:
+        case GxRs_Texture4:
+        case GxRs_Texture5:
+        case GxRs_Texture6:
+        case GxRs_Texture7:
+        case GxRs_Texture8:
+        case GxRs_Texture9:
+        case GxRs_Texture10:
+        case GxRs_Texture11:
+        case GxRs_Texture12:
+        case GxRs_Texture13:
+        case GxRs_Texture14:
+        case GxRs_Texture15:
+            if (value.m_data.p) {
+                this->ITexMarkAsUpdated(static_cast<CGxTex*>(value.m_data.p));
+            }
+
+            this->m_samplerDirty |= 1 << (which - GxRs_Texture0);
+            break;
+
+        case GxRs_TexGen0:
+        case GxRs_TexGen1:
+        case GxRs_TexGen2:
+        case GxRs_TexGen3:
+        case GxRs_TexGen4:
+        case GxRs_TexGen5:
+        case GxRs_TexGen6:
+        case GxRs_TexGen7:
+            this->ISetTexGen(which - GxRs_TexGen0, value.m_data.i[0]);
+            break;
+
+        case GxRs_VertexShader:
+        case GxRs_PixelShader: {
+            CGxShader* shader = static_cast<CGxShader*>(value.m_data.p);
+
+            if (shader && !shader->m_loaded) {
+                this->IShaderCreate(shader);
+            }
+
+            break;
+        }
+
+        case Unk84:
+            for (uint32_t i = 0; i < 4; i++) {
+                this->m_blendFactor[i] = value.m_data.f[0];
+            }
+
+            this->m_stateDirty |= Dirty_Blend;
+            break;
+
+        default:
+            break;
+    }
 }
 
 void CGxDeviceD3d11::IStateSync() {
-    this->IShaderConstantsFlush();
     this->IRsSync(0);
 
-    // TODO(phase 3): when no vertex shader is bound, feed lights / material / transforms to the FF shaders
-    // (the CGxDeviceD3d::IStateSyncLights / Material / Xforms equivalents).
+    if (this->m_appMasterEnables != this->m_hwMasterEnables) {
+        this->m_rsDesc.FillMode = (this->m_appMasterEnables & (1 << GxMasterEnable_PolygonFill)) ? D3D11_FILL_SOLID : D3D11_FILL_WIREFRAME;
+        this->m_hwMasterEnables = this->m_appMasterEnables;
+        this->m_stateDirty |= Dirty_Raster;
+    }
 
+    bool ffVs = this->IStateSyncShaders();
+    this->IShaderConstantsFlush();
+    this->IStateSyncDeviceConstants(ffVs);
+
+    if (this->m_stateDirty & Dirty_Raster) {
+        this->m_d3dContext->RSSetState(static_cast<ID3D11RasterizerState*>(this->IStateGet(State_Raster, &this->m_rsDesc, sizeof(this->m_rsDesc))));
+    }
+
+    if (this->m_stateDirty & Dirty_Blend) {
+        this->m_d3dContext->OMSetBlendState(static_cast<ID3D11BlendState*>(this->IStateGet(State_Blend, &this->m_blendDesc, sizeof(this->m_blendDesc))), this->m_blendFactor, 0xFFFFFFFF);
+    }
+
+    if (this->m_stateDirty & Dirty_Depth) {
+        this->m_d3dContext->OMSetDepthStencilState(static_cast<ID3D11DepthStencilState*>(this->IStateGet(State_Depth, &this->m_dsDesc, sizeof(this->m_dsDesc))), 0);
+    }
+
+    this->m_stateDirty = 0;
+
+    this->IStateSyncTextures();
+    this->IStateSyncScissorRect();
     this->IStateSyncInputLayout();
     this->IStateSyncVertexPtrs();
 
@@ -1470,6 +2347,7 @@ void CGxDeviceD3d11::IStateSync() {
         this->IXformSetViewport();
     }
 }
+
 
 void CGxDeviceD3d11::Draw(CGxBatch* batch, int32_t count) {
     if (!this->m_context || this->m_intF5C) {
@@ -2175,14 +3053,65 @@ bool CGxDeviceD3d11::QueryGetData(CGxQuery* query, uint32_t& data) {
 // ---------------------------------------------------------------------------------------------------------------
 // Shaders
 
-// Shader files are read as on D3D9 (SM3 .bls via IShaderLoad); no API objects are made yet.
-// TODO(phase 4): create ID3D11VertexShader / ID3D11PixelShader from the shader-xlate output (keep the VS bytecode
-// for input-layout creation), set m_valid.
+// The translated pack (shader-xlate xlate.py) sits beside the SM3 files as Shaders\Vertex\vs_4_0 and
+// Shaders\Pixel\ps_4_0. Caps keep reporting vs_3_0 / ps_3_0, so every client feature check behaves as on D3D9; only
+// the load path moves to the SM4 folder. IShaderLoad has no fallback below vs_4_0 / ps_4_0, so SM3 bytecode is never
+// loaded on this device.
+static int32_t Sm4Profile(EGxShTarget target, int32_t profile) {
+    if (profile <= 0) {
+        return profile;
+    }
+
+    return target == GxSh_Vertex ? 4 : (target == GxSh_Pixel ? 5 : profile);
+}
+
+// Body is DXBC (same 'GXSH' container). shader->m_code keeps the bytecode, which input layouts are built from.
 void CGxDeviceD3d11::IShaderCreate(CGxShader* shader) {
+    shader->m_valid = 0;
+
+    if (!this->m_context) {
+        return;
+    }
+
+    shader->m_loaded = 1;
+    SafeRelease(reinterpret_cast<IUnknown*&>(shader->m_apiSpecific));
+
+    uint32_t size = shader->m_code.Count();
+    const void* code = shader->m_code.m_data;
+
+    if (size < 4 || memcmp(code, "DXBC", 4)) {
+        static int32_t s_logged;
+
+        if (!s_logged) {
+            s_logged = 1;
+            CGxDevice::Log("CGxDeviceD3d11: shader without DXBC body; is the translated pack (vs_4_0 / ps_4_0) installed?");
+        }
+
+        return;
+    }
+
+    HRESULT hr = E_FAIL;
+
+    if (shader->m_target == GxSh_Vertex) {
+        hr = this->m_d3dDevice->CreateVertexShader(code, size, nullptr, reinterpret_cast<ID3D11VertexShader**>(&shader->m_apiSpecific));
+    } else if (shader->m_target == GxSh_Pixel) {
+        hr = this->m_d3dDevice->CreatePixelShader(code, size, nullptr, reinterpret_cast<ID3D11PixelShader**>(&shader->m_apiSpecific));
+    }
+
+    if (FAILED(hr)) {
+        shader->m_apiSpecific = nullptr;
+        return;
+    }
+
+    shader->m_valid = 1;
 }
 
 void CGxDeviceD3d11::ShaderCreate(CGxShader** shaders, EGxShTarget target, const char* path, const char* name, uint32_t permutations) {
+    int32_t& profile = this->m_caps.m_shaderTargets[target];
+    int32_t saved = profile;
+    profile = Sm4Profile(target, profile);
     CGxDevice::ShaderCreate(shaders, target, path, name, permutations);
+    profile = saved;
 
     if (permutations == 1 && !shaders[0]->m_loaded) {
         this->IShaderCreate(shaders[0]);
@@ -2216,7 +3145,12 @@ void CGxDeviceD3d11::IShaderReload(CGxShader* shader, const char* path, const ch
         shader->m_loaded = 0;
     }
 
-    this->IShaderLoad(&shader, static_cast<EGxShTarget>(shader->m_target), path, name, 1);
+    EGxShTarget target = static_cast<EGxShTarget>(shader->m_target);
+    int32_t& profile = this->m_caps.m_shaderTargets[target];
+    int32_t saved = profile;
+    profile = Sm4Profile(target, profile);
+    this->IShaderLoad(&shader, target, path, name, 1);
+    profile = saved;
     this->IShaderCreate(shader);
 }
 

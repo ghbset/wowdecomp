@@ -6,6 +6,7 @@
 #include <windows.h>
 #include <d3d11.h>
 #include <dxgi.h>
+#include <unordered_map>
 #include "Engine/Source/Gx/CGxDevice/CGxDevice.h"
 #include "Engine/Source/Storm/H/stpl.h"
 
@@ -36,6 +37,9 @@ class CGxDeviceD3d11 : public CGxDevice {
     int32_t m_ownhwnd;
     HMODULE m_d3dLib;
     HMODULE m_dxgiLib;
+    // Always null. wxl add-ons read the D3D9 device pointer at gx +0x397C; when the stock 12340 exe hosts this class
+    // (stock-host/DESIGN.md) they must find null there, not one of ours. Asserted below for x86.
+    void* m_reserved397C;
     PFN_D3D11_CREATE_DEVICE m_d3dCreateDevice;
     IDXGIFactory1* m_dxgiFactory;
     ID3D11Device* m_d3dDevice;
@@ -50,7 +54,9 @@ class CGxDeviceD3d11 : public CGxDevice {
     ID3D11Texture2D* m_rtDepthTexture;
     ID3D11DepthStencilView* m_rtDepthDsv;
     ID3D11Texture2D* m_resolveTexture;
-    ID3D11Buffer* m_constantBuffers[2]; // [0] VS b0, [1] PS b0
+    ID3D11Buffer* m_constantBuffers[2]; // [0] VS b0, [1] PS b0: app register files (s_shadowConstants)
+    ID3D11Buffer* m_ffConstantBuffers[2]; // [0] VS b0, [1] PS b0 while a fixed-function stage is bound
+    ID3D11Buffer* m_devConstantBuffer; // b1 in both stages (shader-xlate README)
     ID3D11Buffer* m_fanIndexBuffer;
     uint32_t m_fanIndexBufferSize;
     ID3D11RenderTargetView* m_curRtv;
@@ -61,6 +67,28 @@ class CGxDeviceD3d11 : public CGxDevice {
     uint32_t m_curVertexStride[8];
     ID3D11Buffer* m_curIndexBuf;
     D3D11_PRIMITIVE_TOPOLOGY m_curTopology;
+
+    // Phase 2 state. IRsSendToHw edits these descs and sets m_stateDirty; IStateSync resolves them into state objects
+    // from m_stateCache (one map for the 5 kinds, keyed by a hash salted with the kind).
+    D3D11_RASTERIZER_DESC m_rsDesc;
+    D3D11_BLEND_DESC m_blendDesc;
+    D3D11_DEPTH_STENCIL_DESC m_dsDesc;
+    float m_blendFactor[4];
+    uint32_t m_stateDirty;
+    uint32_t m_samplerDirty;
+    std::unordered_map<uint64_t, ID3D11DeviceChild*> m_stateCache;
+    ID3D11ShaderResourceView* m_curSrv[16];
+    ID3D11Buffer* m_curCb[2];
+    void* m_curVs;
+    void* m_curPs;
+    const void* m_curVsCode;
+    uint32_t m_curVsCodeSize;
+    uint64_t m_curVsSig;
+    uint64_t m_curLayoutKey;
+    float m_devConstants[23 * 4];
+    float m_ffConstants[2][53 * 4];
+    ID3D11VertexShader* m_ffVs[48];
+    ID3D11PixelShader* m_ffPs[3];
 
     virtual void ITexMarkAsUpdated(CGxTex* texId);
     virtual void IRsSendToHw(EGxRenderState which);
@@ -144,6 +172,15 @@ class CGxDeviceD3d11 : public CGxDevice {
     void ISetWindowFocus(int32_t focus);
     void IBindRenderTargets();
     void IShaderConstantsFlush();
+    void IStateReset();
+    void IStateRelease();
+    ID3D11DeviceChild* IStateGet(uint32_t kind, const void* desc, uint32_t size);
+    bool IStateSyncShaders();
+    void IStateSyncFixedFunction(bool vs, bool ps, bool lighting, bool ambientOnly);
+    void IStateSyncDeviceConstants(bool ffVs);
+    void IStateSyncTextures();
+    void IStateSyncScissorRect();
+    void ISetTexGen(uint32_t tmu, int32_t texGen);
     void IStateSync();
     void IStateSyncInputLayout();
     void IStateSyncVertexPtrs();
@@ -155,6 +192,13 @@ class CGxDeviceD3d11 : public CGxDevice {
     ID3D11Texture2D* IResolvedBackBuffer();
     void IXformSetViewport();
 };
+
+#if defined(_M_IX86)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Winvalid-offsetof"
+static_assert(offsetof(CGxDeviceD3d11, m_reserved397C) == 0x397C, "wxl reads the D3D9 device pointer at gx +0x397C");
+#pragma clang diagnostic pop
+#endif
 
 CGxDevice* CreateCGxDeviceD3d11();
 

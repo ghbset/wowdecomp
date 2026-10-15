@@ -44,27 +44,81 @@ reuses the D3D9 mode list.
   - Vertex streams (same grouping and strides as D3D9), the 16-bit index buffer, topology, and Draw/DrawIndexed.
   - The draw uses base vertex 0, because stream offsets are always on (`caps.unk_0010 = 1`).
   - Triangle fans are rewritten as lists through a scratch IB. Indexed fans read the pool's CPU copy.
-- **Occlusion queries and constant buffers.**
-  - Queries are D3D11 occlusion queries.
-  - Two dynamic cbuffers are created and bound at b0 (VS and PS). Their size is `(256 + 32) * 16` bytes.
-- **Caps.**
-  - The shader targets report the SM3 profiles (vs 3, ps 4), so `IShaderLoad` reads the vs_3_0/ps_3_0 `.bls` files that
-    phase 4 translates.
-  - Point sprites are 0 and clip planes are 0.
+- **Occlusion queries.** D3D11 occlusion queries.
+- **Caps.** Shader targets still report SM3 (vs 3, ps 4) so every client feature check matches D3D9; only the load path
+  moves (see Shaders). Point sprites are 0. Clip planes are 6.
 
-## Stubs (each marked `TODO(phase N)` in the code)
+## Real (phases 2 and 4)
+- **Render states** (`IRsSendToHw`, 4.3.4 0x0086FF70 model): states only edit a rasterizer / blend / depth-stencil desc
+  and set dirty bits. `IStateSync` resolves them through `m_stateCache`, one `unordered_map` for the 5 kinds
+  (rasterizer, blend, depth-stencil, sampler, input layout), keyed by a 64-bit FNV hash salted with the kind. Objects are
+  created lazily and released in `IDestroyD3d`.
+  - Blend modes from D3D9 `s_srcBlend`/`s_dstBlend`. Alpha reuses them, with colour factors swapped for alpha factors.
+  - Depth func, depth write, colour mask, cull (D3D9 CW/CCW → FRONT/BACK), scissor, multisample, wireframe (master
+    enable), blend factor (Unk84) and depth bias are all handled.
+  - Depth bias: D3D9 units × 2^24 (exact for D24, off for D16/D32).
+- **Textures and samplers:** PS SRVs are compared every draw, so a texture recreated behind the same `CGxTex*` still
+  rebinds. Samplers are rebuilt when the texture or its flags change, or when `texLodBias` changes.
+  - Filter: Nearest/Linear get MaxLOD 0. Anisotropic is a real `ANISOTROPIC` at the texture's `m_maxAnisotropy`
+    (`textureFilteringMode`).
+  - LOD bias is the client's `texLodBias` CVar. 12340 D3D9 ignored it; this replaces wxl-texfilter.
+  - Render-target changes unbind all PS SRVs.
+- **Scissor and viewport:** scissor as D3D9 `IStateSyncScissorRect`. The viewport keeps D3D9's MinZ/MaxZ.
+- **Input layouts** (`IStateSyncInputLayout`): built from the same element list as D3D9's vertex decl, with the semantic
+  and format table from shader-xlate. They are hashed on (elements, hash of the VS DXBC ISGN chunk). A failed create
+  (VS reads an attribute the decl lacks) is cached as null and logged once per combination.
+- **Constants:**
+  - b0 per stage holds 256 float4. `IShaderConstantsFlush` maps a dirty stage with DISCARD and copies all 4 KB of
+    `s_shadowConstants`.
+  - b1 (`m_devConstantBuffer`, 23 float4, bound to VS and PS) is rebuilt every draw and uploaded only when it changes:
+    - alpha ref = AlphaRef/255 (0 = off);
+    - user clip planes enabled by `GxRs_ClipPlaneMask`. Shader draws take them as given, which is clip space as on D3D9.
+      Fixed-function draws go through `inv(view*proj)ᵀ`, since D3D9 FF planes are in world space;
+    - the int constants stay 0, because stock uses only `defi`.
+  - All cbuffers are created zero-filled.
+- **Fixed function** (`IStateSyncFixedFunction`): when no valid app VS/PS is bound, `g_ffVs[FfSelectVs(mask, lit)]` /
+  `g_ffPs[FfSelectPs(tex0, tex1)]` from `FfShaders.h` are bound. These are created lazily, together with their own
+  b0 buffers, filled to the `ff_common.hlsli` map:
+  - world·view, `m_projNative`, and the texture matrices/sources/modes as D3D9 `IXformSetTex`/`ISetTexCoordIndex` build
+    them (`ISetTexGen` is ported);
+  - material, ambient-only mode, linear fog, colour-material source, 4 lights in camera space, normalize, point size
+    and scale;
+  - PS fog colour, stage ops (6 = no texture) and the specular add.
+  - Either FF stage pairs with a translated shader of the other stage.
+  - `FfShaders.h` is a copy of `/root/d3d11-port/ffshaders/out/ff_shaders.h` (sha1 9f93ab93); regenerate it with
+    `python3 build.py` there and copy it over.
+- **Shaders** (`IShaderCreate`): the `.bls` container is unchanged and the body is DXBC. `shader->m_code` keeps the
+  bytecode for input layouts. A body without `DXBC` (no pack installed) leaves the shader invalid, logs once, and draws
+  fall back to FF.
+- **Loading** (`ShaderCreate`/`IShaderReload`): the shader target caps are bumped to vs_4_0 / ps_4_0 only for the length
+  of the load. Files are therefore read from `Shaders\Vertex\vs_4_0\*.bls` and `Shaders\Pixel\ps_4_0\*.bls`, and
+  only on this device. `IShaderLoad` has no fallback below these, so SM3 bytecode never reaches D3D11.
+- **Stock-host layout:** `m_reserved397C` is an always-null `void*` at gx +0x397C, the offset where wxl add-ons read the
+  D3D9 device pointer. It has a `static_assert` on x86. The object grew by 4 bytes plus the phase-2 members, which the
+  stock host's 0x3F28 zeroed allocation covers (see `/root/d3d11-port/stock-host/DESIGN.md`).
+
+## Shader pack: producing and placing it
+```
+cd /root/d3d11-port/shader-xlate && python3 xlate.py batch stock out   # -> out/vs_4_0/*.bls, out/ps_4_0/*.bls
+```
+Pack `out/vs_4_0` as `Shaders\Vertex\vs_4_0\` and `out/ps_4_0` as `Shaders\Pixel\ps_4_0\` into an MPQ that the client
+loads, such as a `patch-<letter>.MPQ` in `Data\`. SFile reads loose files only from archives, so a folder on disk is not
+enough. The SM3 files stay where they are, and D3D9 keeps using them.
+
+## Stubs and gaps (each marked `TODO(phase N)` in the code where it has a site)
 | What | Phase |
 |---|---|
-| `IRsSendToHw`: render states into the 5 hashed state objects; texture/sampler/shader/scissor binding | 2 |
-| `IShaderConstantsFlush`: dirty `s_shadowConstants` ranges to the cbuffers; final int/bool/alpha-test tail size | 2 |
-| `IStateSyncInputLayout`: input layout hashed per (decl, VS signature). **Nothing draws visibly until this exists** | 2 |
-| Fixed-function lights, material, xforms into the FF shaders; user clip planes (`SV_ClipDistance`) | 3 |
-| `IShaderCreate`: VS/PS objects from the shader-xlate output (the VS bytecode must be kept for input layouts) | 4 |
+| Hardware-PCF shadow sampling: the `_pcf` families and the s4 shadow slot need `SampleCmp` plus a comparison sampler (translator and device) | 5 |
+| SHORT2 attributes reach float VS inputs as R16G16_SINT bits (needs an int input in the translator, or conversion) | 5 |
+| VS inputs that are missing from the decl fail the input layout, where D3D9 supplied defaults | 5 |
+| Point sprites (caps 0; `g_ffGsPointSprite` is not bound) and vertex textures (wxl-light; SRVs are bound to PS only) | 5 / 6 |
+| Half-pixel: check whether any client path applies a D3D9 -0.5 offset (the translator README says the device must not) | 5 |
 | Scaled `TexStretch` (needs a StretchRect shader) | 4 |
 | Clears are full-view, while D3D9 clears only the viewport rect (`ID3D11DeviceContext1::ClearView` if it matters) | 5 |
 | MSAA depth resolve for readers; `DeviceReadDepths` with MSAA returns zeros | 5 |
 | Argb1555/Rgb565 *data* on pre-11.1 runtimes (no 16-bit BGRA, and Blit has no 1555/565 to 8888 converter) | 5 |
 | Gamma ramp (D3D9 sets it only in fullscreen; DXGI `SetGammaControl`), stereo (no-op) | later |
+| Nothing has run on a GPU yet | 5 |
 
 ## Build
 These commands use the separate build dirs in `/root/d3d11-port/build` (`x64`, `x86`), with the release config and
