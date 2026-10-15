@@ -5,6 +5,10 @@
 #include "Engine/Source/Storm/H/storm.h"
 
 void DebugLog(const char* format, ...) {
+#ifdef NDEBUG
+    // The original Release client compiles this out (0x005EEB70 is a bare RET); calls sit in per-batch M2 draw paths
+    return;
+#endif
     char buffer[1024];
 
     va_list args;
@@ -22,6 +26,9 @@ void DebugLog(const char* format, ...) {
 }
 
 void DebugLog(int32_t target, const char* format, ...) {
+#ifdef NDEBUG
+    return;
+#endif
     char buffer[1024];
 
     va_list args;
