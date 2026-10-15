@@ -125,6 +125,8 @@ int32_t GxApiSupported(EGxApi api) {
         case GxApi_OpenGl:
         case GxApi_D3d9:
         case GxApi_D3d9Ex:
+        // Not in 12340: opt-in D3D11 backend (CGxDeviceD3d11), never the default.
+        case GxApi_D3d11:
             return 1;
 
         default:
@@ -192,6 +194,11 @@ CGxDevice* CreateGxDevice(EGxApi api, GxWindowProc windowProc, const CGxFormat& 
 
         case GxApi_D3d9Ex:
             device = CreateCGxDeviceD3d9Ex();
+            g_theGxDevicePtr = device;
+            break;
+
+        case GxApi_D3d11:
+            device = CreateCGxDeviceD3d11();
             g_theGxDevicePtr = device;
             break;
 

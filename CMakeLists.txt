@@ -26,8 +26,11 @@ elseif (CMAKE_SIZEOF_VOID_P EQUAL 4)
     set(WOWDECOMP_ARCH_32 1)
     add_compile_definitions(WOWDECOMP_ARCH_32=1)
     # x87 floating point like the VS2005 original; keeps Win32 code comparable with the binary (re/tools/verify.py).
-    if (MSVC)
+    # clang-cl: /arch:IA32 (and clang-cl's i686 default) has no SSE, which the SSE intrinsics in SPIRIT/M2/CharacterComponent need.
+    if (MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
         add_compile_options(/arch:IA32 /fp:fast)
+    elseif (MSVC)
+        add_compile_options(-msse2 /fp:fast)
     endif ()
     # 32-bit time_t like the original build: time/localtime/mktime resolve to _time32/_localtime32/_mktime32.
     add_compile_definitions(_USE_32BIT_TIME_T)

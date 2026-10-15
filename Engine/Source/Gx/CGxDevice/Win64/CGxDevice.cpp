@@ -48,6 +48,11 @@ int32_t CGxDevice::AdapterFormats(EGxApi api, TSGrowableArray<CGxFormat>& format
             CGxDevice::D3d9ExAdapterFormats(formats);
             break;
 
+        // D3D11: the same display modes/formats as D3D9 (DXGI picks the swap chain format itself).
+        case GxApi_D3d11:
+            CGxDevice::D3dAdapterFormats(formats);
+            break;
+
         default:
             break;
     }
