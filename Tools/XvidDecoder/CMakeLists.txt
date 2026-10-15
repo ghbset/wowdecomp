@@ -28,3 +28,6 @@ target_compile_options(XvidDecoder
     PRIVATE
         $<$<CONFIG:Debug>:/MD>
 )
+
+# libxvidcore.lib is prebuilt against the DLL CRT, so this DLL must use it too.
+set_property(TARGET XvidDecoder PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
