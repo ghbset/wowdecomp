@@ -1642,8 +1642,11 @@ int32_t CM2Shared::LoadSkinProfile(uint32_t profile) {
 
 // INLINED
 uint32_t CM2Shared::GetSkinProfileIndex(uint32_t maxBones) {
+    // The original indexes before the table with more than 4 profiles; on x86 that reads four floats too big
+    // to pass, on x64 the unsigned index lands 16 GB away. Skip those slots: same choice, no wild read.
     for (uint32_t i = 0; i < this->m_data->m_numSkinProfiles; i++) {
-        if (s_skinProfileBoneCounts[4 - this->m_data->m_numSkinProfiles + i] <= maxBones) {
+        int32_t slot = 4 - int32_t(this->m_data->m_numSkinProfiles) + int32_t(i);
+        if (slot >= 0 && s_skinProfileBoneCounts[slot] <= maxBones) {
             return i;
         }
     }
