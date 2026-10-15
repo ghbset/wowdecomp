@@ -15,18 +15,24 @@ original.
 
 ## Progress
 
+The percentages below measure how much of the original binary has a counterpart in this source tree. They do
+**not** say how much of the game works, and the missing part is not missing gameplay: the client builds into a
+complete executable and the game is 100% playable. Bugs could still be hiding, though; a ported function can behave differently
+from the original.
+
 Measured against the 12340 binary on 2026-10-15. A function counts as ported when its address is
 tagged in the source.
 
-| | Ported | Total | Done |
+| | Ported | Total | Share of the original |
 |---|---:|---:|---:|
-| Functions | 24,515 | 27,157 | **90.3%** |
-| Code bytes | 5,270,186 | 5,656,573 | **93.2%** |
+| Functions | 24,515 | 27,157 | 90.3% |
+| Code bytes | 5,270,186 | 5,656,573 | 93.2% |
 
 The total leaves out 658 functions that IDA identifies as compiler library code and 132 import thunks.
-Most of what remains is compiler-generated code (static initializers, template instances), C runtime
-helpers, and third-party libraries that are linked from their upstream sources instead of being
-decompiled (FreeType, zlib, PCRE, parts of FMOD Ex).
+Most of the untagged remainder is code the build gets elsewhere: compiler-generated code (static
+initializers, template instances) that our compiler emits on its own, C runtime helpers, and third-party
+libraries that are linked from their upstream sources instead of being decompiled (FreeType, zlib, PCRE,
+parts of FMOD Ex).
 
 ## Requirements
 
