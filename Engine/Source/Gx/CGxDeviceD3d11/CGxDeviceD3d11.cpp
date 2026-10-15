@@ -110,6 +110,7 @@ CGxDeviceD3d11::CGxDeviceD3d11() {
     this->m_ffConstantBuffers[1] = nullptr;
     this->m_devConstantBuffer = nullptr;
     this->m_reserved397C = nullptr;
+    memset(this->m_reservedD3d9Tail, 0, sizeof(this->m_reservedD3d9Tail));
     memset(this->m_ffVs, 0, sizeof(this->m_ffVs));
     memset(this->m_ffPs, 0, sizeof(this->m_ffPs));
     this->m_fanIndexBuffer = nullptr;

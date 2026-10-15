@@ -40,6 +40,8 @@ class CGxDeviceD3d11 : public CGxDevice {
     // Always null. wxl add-ons read the D3D9 device pointer at gx +0x397C; when the stock 12340 exe hosts this class
     // (stock-host/DESIGN.md) they must find null there, not one of ours. Asserted below for x86.
     void* m_reserved397C;
+    // Always null too: wxl-core reads the D3D9 cached back-buffer / depth surfaces at gx +0x3B3C / +0x3B40.
+    void* m_reservedD3d9Tail[(0x3B44 - 0x3980) / 4];
     PFN_D3D11_CREATE_DEVICE m_d3dCreateDevice;
     IDXGIFactory1* m_dxgiFactory;
     ID3D11Device* m_d3dDevice;
@@ -197,6 +199,8 @@ class CGxDeviceD3d11 : public CGxDevice {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Winvalid-offsetof"
 static_assert(offsetof(CGxDeviceD3d11, m_reserved397C) == 0x397C, "wxl reads the D3D9 device pointer at gx +0x397C");
+static_assert(offsetof(CGxDeviceD3d11, m_reservedD3d9Tail) + sizeof(CGxDeviceD3d11::m_reservedD3d9Tail) >= 0x3B44,
+              "wxl reads D3D9 surfaces at gx +0x3B3C/+0x3B40");
 #pragma clang diagnostic pop
 #endif
 
