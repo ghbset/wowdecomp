@@ -73,6 +73,12 @@ static void PortraitDepthTextureCallback(EGxTexCommand command, uint32_t width, 
 // VERIFY: 9cb5c23b auto
 // OFFSET: 0x00616DC0
 int32_t RTAlphaSupported() {
+    // Not in 12340: 4.3.4 returns 1 for D3D11 without the clear/readback test. The non-RT fallback skips readback
+    // on D3D10/11 (UpdatePortrait below), so a failed test there left every portrait black.
+    if (g_theGxDevicePtr->DeviceApi() == GxApi_D3d11) {
+        return 1;
+    }
+
     if (g_theGxDevicePtr->DeviceApi() == GxApi_OpenGl && !g_theGxDevicePtr->Caps().m_oglRtAlpha) {
         return 0;
     }

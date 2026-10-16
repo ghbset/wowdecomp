@@ -22,6 +22,8 @@ enum CMDOPT {
     CMD_22050HZ = 14,
     CMD_NO_WARNINGS = 15,
     CMDOPTS = 16,
+    // Not in 12340: -d3d11 (CGxDeviceD3d11). Past the WoW ids (WOWCMDOPT, Client.h, 16..39), so no switch shares it.
+    CMD_D3D11 = 40,
 };
 
 enum PROPERTY {

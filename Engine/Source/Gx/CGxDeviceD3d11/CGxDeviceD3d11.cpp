@@ -207,6 +207,7 @@ CGxDeviceD3d11::CGxDeviceD3d11() {
     this->m_resolveTexture = nullptr;
     this->m_constantBuffers[0] = nullptr;
     this->m_constantBuffers[1] = nullptr;
+    memset(this->m_gpuConstants, 0, sizeof(this->m_gpuConstants));
     this->m_ffConstantBuffers[0] = nullptr;
     this->m_ffConstantBuffers[1] = nullptr;
     this->m_devConstantBuffer = nullptr;
@@ -215,6 +216,11 @@ CGxDeviceD3d11::CGxDeviceD3d11() {
     memset(this->m_ffVs, 0, sizeof(this->m_ffVs));
     memset(this->m_ffPs, 0, sizeof(this->m_ffPs));
     this->m_fanIndexBuffer = nullptr;
+    this->m_zeroVertexBuf = nullptr;
+    this->m_blitVs = nullptr;
+    this->m_blitPs = nullptr;
+    this->m_blitConstantBuffer = nullptr;
+    this->m_backBufferSrv = nullptr;
     this->m_fanIndexBufferSize = 0;
     this->m_curRtv = nullptr;
     this->m_curDsv = nullptr;
@@ -800,7 +806,8 @@ int32_t CGxDeviceD3d11::ICreateD3dDevice(const CGxFormat& format) {
         cbDesc.Usage = D3D11_USAGE_DYNAMIC;
         cbDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         cbDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-        D3D11_SUBRESOURCE_DATA init = { s_zeroConstants, 0, 0 };
+        // The app register files start from the mirror, so a recreated device keeps what the app last set.
+        D3D11_SUBRESOURCE_DATA init = { i < 2 ? this->m_gpuConstants[i] : s_zeroConstants, 0, 0 };
 
         if (FAILED(this->m_d3dDevice->CreateBuffer(&cbDesc, &init, cbuffers[i]))) {
             return 0;
@@ -809,6 +816,22 @@ int32_t CGxDeviceD3d11::ICreateD3dDevice(const CGxFormat& format) {
 
     this->m_d3dContext->VSSetConstantBuffers(1, 1, &this->m_devConstantBuffer);
     this->m_d3dContext->PSSetConstantBuffers(1, 1, &this->m_devConstantBuffer);
+
+    D3D11_BUFFER_DESC zeroDesc;
+    memset(&zeroDesc, 0, sizeof(zeroDesc));
+    zeroDesc.ByteWidth = 64;
+    zeroDesc.Usage = D3D11_USAGE_IMMUTABLE;
+    zeroDesc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+    D3D11_SUBRESOURCE_DATA zeroInit = { s_zeroConstants, 0, 0 };
+
+    if (FAILED(this->m_d3dDevice->CreateBuffer(&zeroDesc, &zeroInit, &this->m_zeroVertexBuf))) {
+        return 0;
+    }
+
+    // Slot 15 is never used by a vertex format (8 streams at most) and nothing else rebinds it.
+    UINT zeroStride = 0;
+    UINT zeroOffset = 0;
+    this->m_d3dContext->IASetVertexBuffers(15, 1, &this->m_zeroVertexBuf, &zeroStride, &zeroOffset);
 
     this->m_context = 1;
     this->IStateReset();
@@ -864,6 +887,7 @@ void CGxDeviceD3d11::IDestroyD3d() {
     SafeRelease(this->m_constantBuffers[1]);
     this->IStateRelease();
     SafeRelease(this->m_fanIndexBuffer);
+    SafeRelease(this->m_zeroVertexBuf);
     this->m_fanIndexBufferSize = 0;
     D3d11Log("CGxDeviceD3d11::IDestroyD3d(): back buffer, constant buffers, state objects released");
 
@@ -1069,6 +1093,7 @@ void CGxDeviceD3d11::IReleaseBackBuffer() {
     SafeRelease(this->m_rtDepthDsv);
     SafeRelease(this->m_rtDepthTexture);
     SafeRelease(this->m_resolveTexture);
+    SafeRelease(this->m_backBufferSrv);
 }
 
 // Colour = texture target or back buffer. Depth = depth target, else the back buffer's depth, or for a colour
@@ -1977,6 +2002,9 @@ void CGxDeviceD3d11::IStateRelease() {
     SafeRelease(this->m_ffConstantBuffers[0]);
     SafeRelease(this->m_ffConstantBuffers[1]);
     SafeRelease(this->m_devConstantBuffer);
+    SafeRelease(this->m_blitVs);
+    SafeRelease(this->m_blitPs);
+    SafeRelease(this->m_blitConstantBuffer);
 }
 
 // ponytail: 64-bit FNV keys without a desc compare; a collision would hand back the wrong state object. Store and
@@ -2023,10 +2051,81 @@ ID3D11DeviceChild* CGxDeviceD3d11::IStateGet(uint32_t kind, const void* desc, ui
     return object;
 }
 
+// Appends a slot-15 element (zero buffer, stride 0) for every ISGN input of the VS that no element supplies.
+// ISGN: count, 8, then 24-byte entries (name offset, semantic index, system value, component type, register, masks).
+static uint32_t AddMissingVsInputs(const void* code, uint32_t size, D3D11_INPUT_ELEMENT_DESC* elements, uint32_t count, uint32_t capacity) {
+    static const DXGI_FORMAT s_zeroFormats[4] = { DXGI_FORMAT_R32G32B32A32_FLOAT, DXGI_FORMAT_R32G32B32A32_UINT, DXGI_FORMAT_R32G32B32A32_SINT, DXGI_FORMAT_R32G32B32A32_FLOAT };
+    const uint8_t* bytes = static_cast<const uint8_t*>(code);
+
+    if (size < 32 || memcmp(bytes, "DXBC", 4)) {
+        return count;
+    }
+
+    uint32_t chunks;
+    memcpy(&chunks, bytes + 28, 4);
+
+    for (uint32_t c = 0; c < chunks && 32 + c * 4 + 4 <= size; c++) {
+        uint32_t offset;
+        memcpy(&offset, bytes + 32 + c * 4, 4);
+
+        if (offset + 16 > size || memcmp(bytes + offset, "ISGN", 4)) {
+            continue;
+        }
+
+        uint32_t chunkSize;
+        memcpy(&chunkSize, bytes + offset + 4, 4);
+        const uint8_t* sig = bytes + offset + 8;
+
+        if (offset + 8 + chunkSize > size) {
+            return count;
+        }
+
+        uint32_t inputs;
+        memcpy(&inputs, sig, 4);
+
+        for (uint32_t i = 0; i < inputs && 8 + i * 24 + 24 <= chunkSize && count < capacity; i++) {
+            uint32_t entry[4];
+            memcpy(entry, sig + 8 + i * 24, sizeof(entry));
+
+            // System values (SV_VertexID and friends) come from the IA, not a buffer.
+            if (entry[2] != 0 || entry[0] >= chunkSize) {
+                continue;
+            }
+
+            const char* name = reinterpret_cast<const char*>(sig + entry[0]);
+
+            if (!memchr(name, 0, chunkSize - entry[0])) {
+                continue;
+            }
+
+            bool found = false;
+
+            for (uint32_t e = 0; e < count && !found; e++) {
+                found = elements[e].SemanticIndex == entry[1] && !_stricmp(elements[e].SemanticName, name);
+            }
+
+            if (!found) {
+                D3D11_INPUT_ELEMENT_DESC& element = elements[count++];
+                element.SemanticName = name;
+                element.SemanticIndex = entry[1];
+                element.Format = s_zeroFormats[entry[3] & 3];
+                element.InputSlot = 15;
+                element.AlignedByteOffset = 0;
+                element.InputSlotClass = D3D11_INPUT_PER_VERTEX_DATA;
+                element.InstanceDataStepRate = 0;
+            }
+        }
+
+        return count;
+    }
+
+    return count;
+}
+
 // Same element list as CGxDeviceD3d::IStateSyncVertexPtrs builds for its vertex declaration (predefined formats use
 // stream 0 only), named by the shader-xlate semantic table, hashed with the bound VS input signature.
 void CGxDeviceD3d11::IStateSyncInputLayout() {
-    D3D11_INPUT_ELEMENT_DESC elements[GxVAs_Last];
+    D3D11_INPUT_ELEMENT_DESC elements[GxVAs_Last + 16];
     CGxBuf* streamBufs[GxVAs_Last] = {};
     uint32_t streamCount = 0;
     uint32_t count = 0;
@@ -2078,7 +2177,12 @@ void CGxDeviceD3d11::IStateSyncInputLayout() {
     if (found != this->m_stateCache.end()) {
         layout = static_cast<ID3D11InputLayout*>(found->second);
     } else {
-        // A VS reading an attribute the decl lacks fails here (D3D9 fed it defaults); the failure is cached as null.
+        // VS inputs the decl lacks read the zero buffer at slot 15 (D3D9 fed them defaults).
+        if (this->m_curVsCode) {
+            count = AddMissingVsInputs(this->m_curVsCode, this->m_curVsCodeSize, elements, count, sizeof(elements) / sizeof(elements[0]));
+        }
+
+        // Anything still failing is cached as null (the draw is dropped).
         if (!this->m_curVsCode || FAILED(this->m_d3dDevice->CreateInputLayout(elements, count, this->m_curVsCode, this->m_curVsCodeSize, &layout))) {
             D3d11Log("CGxDeviceD3d11: CreateInputLayout failed (mask 0x%X)", this->m_primVertexMask);
             layout = nullptr;
@@ -2090,27 +2194,24 @@ void CGxDeviceD3d11::IStateSyncInputLayout() {
     this->m_d3dContext->IASetInputLayout(layout);
 }
 
-// Whole register file per dirty stage: a DISCARD map leaves the rest of the buffer undefined. (4.3.4 FUN_00871570
-// copies the bound shader's used range; ours are all 256 registers.)
+// D3D9 semantics: copy the dirty range into the mirror, then send the mirror (a DISCARD map needs the whole buffer).
+// d3d11Debug 1 re-sends every draw; 4 turns FLT_MAX (written by ShaderConstantsClear, never by the app) into 0.
 void CGxDeviceD3d11::IShaderConstantsFlush() {
     int32_t debug = D3d11Debug();
 
     for (uint32_t stage = 0; stage < 2; stage++) {
         ShadowConstants& shadow = CGxDevice::s_shadowConstants[stage == 0 ? 1 : 0];
+        float* mirror = this->m_gpuConstants[stage];
+        bool dirty = shadow.dirtyMin <= shadow.dirtyMax && shadow.dirtyMax < 256;
 
-        if (shadow.dirtyMin <= shadow.dirtyMax || debug == 1 || debug == 4) {
-            if (debug == 4) {
-                // CGxDevice seeds the shadow with FLT_MAX; D3D9 only ever uploads written ranges, so it never sees it.
-                static float s_clean[sizeof(shadow.constants) / sizeof(float)];
-
-                for (uint32_t i = 0; i < sizeof(s_clean) / sizeof(float); i++) {
-                    s_clean[i] = shadow.constants[i] == FLT_MAX ? 0.0f : shadow.constants[i];
-                }
-
-                UploadConstants(this->m_d3dContext, this->m_constantBuffers[stage], s_clean, sizeof(s_clean));
-            } else {
-                UploadConstants(this->m_d3dContext, this->m_constantBuffers[stage], shadow.constants, sizeof(shadow.constants));
+        if (dirty) {
+            for (uint32_t i = shadow.dirtyMin * 4; i < (shadow.dirtyMax + 1) * 4; i++) {
+                mirror[i] = debug == 4 && shadow.constants[i] == FLT_MAX ? 0.0f : shadow.constants[i];
             }
+        }
+
+        if (dirty || debug == 1) {
+            UploadConstants(this->m_d3dContext, this->m_constantBuffers[stage], mirror, sizeof(this->m_gpuConstants[stage]));
         }
 
         shadow.dirtyMin = 255;
@@ -3267,11 +3368,15 @@ void CGxDeviceD3d11::TexDestroy(CGxTex* texId) {
         }
     }
 
+    // m_texture too: a new CGxTex at the same address set as a target would hit DeviceSetRenderTarget's early return
+    // and never get its RTV bound.
     for (uint32_t i = 0; i < 2; i++) {
-        if (this->m_textureTarget[i].m_texture == texId && this->m_textureTarget[i].m_apiSpecific) {
+        if (this->m_textureTarget[i].m_texture == texId) {
+            bool bound = this->m_textureTarget[i].m_apiSpecific != nullptr;
+            this->m_textureTarget[i].m_texture = nullptr;
             this->m_textureTarget[i].m_apiSpecific = nullptr;
 
-            if (this->m_d3dContext) {
+            if (bound && this->m_d3dContext) {
                 this->IBindRenderTargets();
             }
         }
@@ -3300,12 +3405,24 @@ void CGxDeviceD3d11::DeviceCopyTex(CGxTex* source, uint32_t sourcePlane, CGxTex*
     }
 
     TexApi* src = static_cast<TexApi*>(source->m_apiSpecificData);
+    TexApi* dst = static_cast<TexApi*>(dest->m_apiSpecificData);
 
-    if (!src || !this->ITexMatchFormat(dest, src->m_wanted.Format)) {
+    if (!src || !dst) {
         return;
     }
 
-    TexApi* dst = static_cast<TexApi*>(dest->m_apiSpecificData);
+    bool same = src->m_wanted.Format == dst->m_wanted.Format && src->m_wanted.Width == dst->m_wanted.Width && src->m_wanted.Height == dst->m_wanted.Height;
+
+    // Other format or size: D3D9 StretchRect converts and scales, CopySubresourceRegion would drop it.
+    if (!same && src->m_srv && src->m_wanted.ArraySize == 1 && this->IBlit(src->m_srv, src->m_wanted.Width, src->m_wanted.Height, nullptr, dest, 0, destPlane, nullptr, true)) {
+        return;
+    }
+
+    if (!this->ITexMatchFormat(dest, src->m_wanted.Format)) {
+        return;
+    }
+
+    dst = static_cast<TexApi*>(dest->m_apiSpecificData);
 
     if (dst) {
         this->m_d3dContext->CopySubresourceRegion(dst->m_texture, D3D11CalcSubresource(0, destPlane, dst->m_levels), 0, 0, 0, src->m_texture, D3D11CalcSubresource(0, sourcePlane, src->m_levels), nullptr);
@@ -3357,14 +3474,34 @@ int32_t CGxDeviceD3d11::TexCopy(CGxTex* dest, const C2iVector& destPos, const C2
 
     D3D11_TEXTURE2D_DESC sourceDesc;
     source->GetDesc(&sourceDesc);
+    TexApi* api = static_cast<TexApi*>(dest->m_apiSpecificData);
+
+    // Another format (a 10-bit back buffer into an 8888 texture): convert through the blit when the target can be
+    // drawn to, else remap the target to the back buffer's format as before.
+    if (api->m_wanted.Format != sourceDesc.Format && (api->m_wanted.BindFlags & D3D11_BIND_RENDER_TARGET)) {
+        CiRect sourceRect = { sourcePos.y, sourcePos.x, sourcePos.y + size.y, sourcePos.x + size.x };
+        CiRect destRect = { destPos.y, destPos.x, destPos.y + size.y, destPos.x + size.x };
+
+        if (this->IBlitBackBuffer(dest, level, plane, &sourceRect, &destRect, false)) {
+            return 1;
+        }
+    }
 
     if (!this->ITexMatchFormat(dest, sourceDesc.Format)) {
         return 0;
     }
 
-    TexApi* api = static_cast<TexApi*>(dest->m_apiSpecificData);
+    api = static_cast<TexApi*>(dest->m_apiSpecificData);
 
+    // A box past the back buffer edge makes CopySubresourceRegion drop the whole copy.
     D3D11_BOX box = { static_cast<UINT>(sourcePos.x), static_cast<UINT>(sourcePos.y), 0, static_cast<UINT>(sourcePos.x + size.x), static_cast<UINT>(sourcePos.y + size.y), 1 };
+    box.right = box.right < sourceDesc.Width ? box.right : sourceDesc.Width;
+    box.bottom = box.bottom < sourceDesc.Height ? box.bottom : sourceDesc.Height;
+
+    if (box.left >= box.right || box.top >= box.bottom) {
+        return 0;
+    }
+
     this->m_d3dContext->CopySubresourceRegion(api->m_texture, D3D11CalcSubresource(level, plane, api->m_levels), destPos.x, destPos.y, 0, source, 0, &box);
 
     return 1;
@@ -3390,8 +3527,168 @@ int32_t CGxDeviceD3d11::TexStretch(CGxTex* dest, const CiRect* destRect, const C
         return this->TexCopy(dest, destPos, sourcePos, size, level, face);
     }
 
-    // TODO(phase 4): scaled stretch through a full-screen StretchRect shader (4.3.4 ships StretchRect.bls).
-    return 0;
+    // Scaled, or a null rect (whole back buffer / whole target level): StretchRect through the blit shader.
+    if (dest->m_needsCreation || !dest->m_apiSpecificData) {
+        this->ITexCreate(dest);
+    }
+
+    if (dest->m_needsCreation || !dest->m_apiSpecificData) {
+        return 0;
+    }
+
+    return this->IBlitBackBuffer(dest, level, face, sourceRect, destRect, true);
+}
+
+int32_t CGxDeviceD3d11::IBlitBackBuffer(CGxTex* dest, uint32_t level, uint32_t face, const CiRect* sourceRect, const CiRect* destRect, bool linear) {
+    ID3D11Texture2D* source = this->IResolvedBackBuffer();
+
+    if (!source) {
+        return 0;
+    }
+
+    if (!this->m_backBufferSrv && FAILED(this->m_d3dDevice->CreateShaderResourceView(source, nullptr, &this->m_backBufferSrv))) {
+        this->m_backBufferSrv = nullptr;
+        D3d11LogOnce("CGxDeviceD3d11: back buffer SRV failed, blits from it dropped");
+        return 0;
+    }
+
+    D3D11_TEXTURE2D_DESC desc;
+    source->GetDesc(&desc);
+
+    return this->IBlit(this->m_backBufferSrv, desc.Width, desc.Height, sourceRect, dest, level, face, destRect, linear);
+}
+
+// D3D9 StretchRect: one triangle into `dest` (level, face), sampling `source` over sourceRect (null = all of it).
+// Draws with its own state, then marks everything IStateSync caches as stale.
+int32_t CGxDeviceD3d11::IBlit(ID3D11ShaderResourceView* source, uint32_t sourceWidth, uint32_t sourceHeight, const CiRect* sourceRect, CGxTex* dest, uint32_t level, uint32_t face, const CiRect* destRect, bool linear) {
+    TexApi* api = static_cast<TexApi*>(dest->m_apiSpecificData);
+
+    if (!api || !source || !sourceWidth || !sourceHeight) {
+        return 0;
+    }
+
+    D3D11_TEXTURE2D_DESC desc;
+    api->m_texture->GetDesc(&desc);
+
+    if (!(desc.BindFlags & D3D11_BIND_RENDER_TARGET) || level >= desc.MipLevels || face >= desc.ArraySize) {
+        D3d11LogOnce("CGxDeviceD3d11: blit dropped, target %ux%u dxgi %d is not a render target", desc.Width, desc.Height, desc.Format);
+        return 0;
+    }
+
+    if (!this->m_blitVs) {
+        static const float s_zero[4] = {};
+        D3D11_BUFFER_DESC cbDesc;
+        memset(&cbDesc, 0, sizeof(cbDesc));
+        cbDesc.ByteWidth = 16;
+        cbDesc.Usage = D3D11_USAGE_DYNAMIC;
+        cbDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        cbDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        D3D11_SUBRESOURCE_DATA init = { s_zero, 0, 0 };
+
+        if (FAILED(this->m_d3dDevice->CreateVertexShader(g_blitVs.data, g_blitVs.size, nullptr, &this->m_blitVs))
+            || FAILED(this->m_d3dDevice->CreatePixelShader(g_blitPs.data, g_blitPs.size, nullptr, &this->m_blitPs))
+            || FAILED(this->m_d3dDevice->CreateBuffer(&cbDesc, &init, &this->m_blitConstantBuffer))) {
+            D3d11LogOnce("CGxDeviceD3d11: blit shaders failed");
+            SafeRelease(this->m_blitVs);
+            SafeRelease(this->m_blitPs);
+            SafeRelease(this->m_blitConstantBuffer);
+            return 0;
+        }
+    }
+
+    ID3D11RenderTargetView* rtv = level == 0 ? api->m_rtv[face] : nullptr;
+    bool ownRtv = false;
+
+    if (!rtv) {
+        D3D11_RENDER_TARGET_VIEW_DESC rtvDesc;
+        memset(&rtvDesc, 0, sizeof(rtvDesc));
+        rtvDesc.Format = desc.Format;
+
+        if (desc.ArraySize > 1) {
+            rtvDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DARRAY;
+            rtvDesc.Texture2DArray.MipSlice = level;
+            rtvDesc.Texture2DArray.FirstArraySlice = face;
+            rtvDesc.Texture2DArray.ArraySize = 1;
+        } else {
+            rtvDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+            rtvDesc.Texture2D.MipSlice = level;
+        }
+
+        if (FAILED(this->m_d3dDevice->CreateRenderTargetView(api->m_texture, &rtvDesc, &rtv))) {
+            return 0;
+        }
+
+        ownRtv = true;
+    }
+
+    uint32_t destWidth = desc.Width >> level ? desc.Width >> level : 1;
+    uint32_t destHeight = desc.Height >> level ? desc.Height >> level : 1;
+    bool hasDest = destRect && destRect->maxX > destRect->minX && destRect->maxY > destRect->minY;
+    bool hasSource = sourceRect && sourceRect->maxX > sourceRect->minX && sourceRect->maxY > sourceRect->minY;
+
+    D3D11_VIEWPORT viewport;
+    viewport.TopLeftX = hasDest ? static_cast<float>(destRect->minX) : 0.0f;
+    viewport.TopLeftY = hasDest ? static_cast<float>(destRect->minY) : 0.0f;
+    viewport.Width = hasDest ? static_cast<float>(destRect->maxX - destRect->minX) : static_cast<float>(destWidth);
+    viewport.Height = hasDest ? static_cast<float>(destRect->maxY - destRect->minY) : static_cast<float>(destHeight);
+    viewport.MinDepth = 0.0f;
+    viewport.MaxDepth = 1.0f;
+
+    float uv[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
+
+    if (hasSource) {
+        uv[0] = static_cast<float>(sourceRect->minX) / sourceWidth;
+        uv[1] = static_cast<float>(sourceRect->minY) / sourceHeight;
+        uv[2] = static_cast<float>(sourceRect->maxX) / sourceWidth;
+        uv[3] = static_cast<float>(sourceRect->maxY) / sourceHeight;
+    }
+
+    UploadConstants(this->m_d3dContext, this->m_blitConstantBuffer, uv, sizeof(uv));
+
+    D3D11_SAMPLER_DESC samplerDesc;
+    memset(&samplerDesc, 0, sizeof(samplerDesc));
+    samplerDesc.Filter = linear ? D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT : D3D11_FILTER_MIN_MAG_MIP_POINT;
+    samplerDesc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+    samplerDesc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+    samplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+    samplerDesc.MaxAnisotropy = 1;
+    samplerDesc.ComparisonFunc = D3D11_COMPARISON_NEVER;
+    ID3D11SamplerState* sampler = static_cast<ID3D11SamplerState*>(this->IStateGet(State_Sampler, &samplerDesc, sizeof(samplerDesc)));
+
+    // Target first, so a source that is the bound RTV (the back buffer) is unbound before it is read.
+    ID3D11ShaderResourceView* noSrvs[16] = {};
+    this->m_d3dContext->PSSetShaderResources(0, 16, noSrvs);
+    this->m_d3dContext->OMSetRenderTargets(1, &rtv, nullptr);
+    this->m_d3dContext->RSSetViewports(1, &viewport);
+    this->m_d3dContext->RSSetState(nullptr);
+    this->m_d3dContext->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
+    this->m_d3dContext->OMSetDepthStencilState(nullptr, 0);
+    this->m_d3dContext->IASetInputLayout(nullptr);
+    this->m_d3dContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    this->m_d3dContext->VSSetShader(this->m_blitVs, nullptr, 0);
+    this->m_d3dContext->VSSetConstantBuffers(2, 1, &this->m_blitConstantBuffer);
+    this->m_d3dContext->PSSetShader(this->m_blitPs, nullptr, 0);
+    this->m_d3dContext->PSSetShaderResources(0, 1, &source);
+    this->m_d3dContext->PSSetSamplers(0, 1, &sampler);
+    this->m_d3dContext->Draw(3, 0);
+    this->m_d3dContext->PSSetShaderResources(0, 1, noSrvs);
+
+    if (ownRtv) {
+        rtv->Release();
+    }
+
+    // Back to the app's targets (also drops the SRV cache); the next IStateSync resends the rest.
+    this->IBindRenderTargets();
+    this->m_curVs = nullptr;
+    this->m_curPs = nullptr;
+    this->m_curLayoutKey = 0;
+    this->m_curTopology = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
+    this->m_stateDirty |= Dirty_Raster | Dirty_Blend | Dirty_Depth;
+    this->m_samplerDirty |= 1;
+    this->m_viewportDirty = 1;
+    this->m_scissorRectDirty = 1;
+
+    return 1;
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -3439,12 +3736,36 @@ void CGxDeviceD3d11::DeviceReadPixels(CiRect& rect, TSGrowableArray<CImVector>& 
     D3D11_MAPPED_SUBRESOURCE mapped;
 
     if (SUCCEEDED(this->m_d3dContext->Map(staging, 0, D3D11_MAP_READ, 0, &mapped))) {
-        if (desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM) {
-            const uint8_t* row = static_cast<const uint8_t*>(mapped.pData);
-            CImVector* dest = pixels.Ptr();
+        const uint8_t* row = static_cast<const uint8_t*>(mapped.pData);
+        CImVector* dest = pixels.Ptr();
 
+        if (desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM) {
             for (uint32_t y = 0; y < height; y++, row += mapped.RowPitch, dest += width) {
                 memcpy(dest, row, sizeof(CImVector) * width);
+            }
+        } else if (desc.Format == DXGI_FORMAT_R10G10B10A2_UNORM || desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM) {
+            // 10-bit (gxColorBits 30) and RGBA back buffers, to the BGRA CImVector the callers expect.
+            bool tenBit = desc.Format == DXGI_FORMAT_R10G10B10A2_UNORM;
+
+            for (uint32_t y = 0; y < height; y++, row += mapped.RowPitch, dest += width) {
+                const uint32_t* src = reinterpret_cast<const uint32_t*>(row);
+
+                for (uint32_t x = 0; x < width; x++) {
+                    uint32_t v = src[x];
+                    CImVector& out = dest[x];
+
+                    if (tenBit) {
+                        out.r = static_cast<uint8_t>((v & 0x3FF) >> 2);
+                        out.g = static_cast<uint8_t>(((v >> 10) & 0x3FF) >> 2);
+                        out.b = static_cast<uint8_t>(((v >> 20) & 0x3FF) >> 2);
+                        out.a = static_cast<uint8_t>((v >> 30) * 0x55);
+                    } else {
+                        out.r = static_cast<uint8_t>(v);
+                        out.g = static_cast<uint8_t>(v >> 8);
+                        out.b = static_cast<uint8_t>(v >> 16);
+                        out.a = static_cast<uint8_t>(v >> 24);
+                    }
+                }
             }
         } else {
             memset(pixels.Ptr(), 0xFF, sizeof(CImVector) * width * height);

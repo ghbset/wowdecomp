@@ -61,9 +61,19 @@ class CGxDeviceD3d11 : public CGxDevice {
     ID3D11DepthStencilView* m_rtDepthDsv;
     ID3D11Texture2D* m_resolveTexture;
     ID3D11Buffer* m_constantBuffers[2]; // [0] VS b0, [1] PS b0: app register files (s_shadowConstants)
+    // What m_constantBuffers hold. Only the dirty range of s_shadowConstants is copied in, as D3D9 uploads only
+    // [dirtyMin, dirtyMax]: registers outside it keep their last value instead of the FLT_MAX the frame clear writes.
+    float m_gpuConstants[2][256 * 4];
     ID3D11Buffer* m_ffConstantBuffers[2]; // [0] VS b0, [1] PS b0 while a fixed-function stage is bound
     ID3D11Buffer* m_devConstantBuffer; // b1 in both stages (shader-xlate README)
     ID3D11Buffer* m_fanIndexBuffer;
+    // IA slot 15, stride 0: feeds (0,0,0,0) to VS inputs the vertex format lacks (D3D9 gave them defaults).
+    ID3D11Buffer* m_zeroVertexBuf;
+    // IBlit (TexStretch/TexCopy/DeviceCopyTex when a plain copy cannot do it): shaders and VS b2 made on first use.
+    ID3D11VertexShader* m_blitVs;
+    ID3D11PixelShader* m_blitPs;
+    ID3D11Buffer* m_blitConstantBuffer;
+    ID3D11ShaderResourceView* m_backBufferSrv; // of IResolvedBackBuffer()
     uint32_t m_fanIndexBufferSize;
     ID3D11RenderTargetView* m_curRtv;
     ID3D11DepthStencilView* m_curDsv;
@@ -204,6 +214,8 @@ class CGxDeviceD3d11 : public CGxDevice {
     void ITexRelease(CGxTex* texId);
     void ITexUpload(CGxTex* texId);
     ID3D11Texture2D* IResolvedBackBuffer();
+    int32_t IBlit(ID3D11ShaderResourceView* source, uint32_t sourceWidth, uint32_t sourceHeight, const CiRect* sourceRect, CGxTex* dest, uint32_t level, uint32_t face, const CiRect* destRect, bool linear);
+    int32_t IBlitBackBuffer(CGxTex* dest, uint32_t level, uint32_t face, const CiRect* sourceRect, const CiRect* destRect, bool linear);
     void IXformSetViewport();
 };
 
