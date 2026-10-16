@@ -3271,6 +3271,14 @@ void CGxDeviceD3d11::ShaderCreate(CGxShader** shaders, EGxShTarget target, const
     CGxDevice::ShaderCreate(shaders, target, path, name, permutations);
     profile = saved;
 
+    // No SM2 fallback exists for vs_4_0/ps_4_0, so a family missing from the pack (or an empty permutation) falls
+    // back to fixed function. Name every one, not just the first.
+    for (uint32_t i = 0; i < permutations; i++) {
+        if (shaders[i]->m_code.Count() < 4 || memcmp(shaders[i]->m_code.m_data, "DXBC", 4)) {
+            CGxDevice::Log("CGxDeviceD3d11: no DXBC for %s\\%s.bls permutation %u of %u", path, name, i, permutations);
+        }
+    }
+
     if (permutations == 1 && !shaders[0]->m_loaded) {
         this->IShaderCreate(shaders[0]);
     }
