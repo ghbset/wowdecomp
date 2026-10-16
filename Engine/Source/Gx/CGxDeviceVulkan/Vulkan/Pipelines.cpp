@@ -1,7 +1,9 @@
 // The graphics pipelines a draw binds: the module's life and the record of one draw.
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Pipelines/Internal.hpp"
 
+#include <cstdio>
 #include <cstring>
+#include <vector>
 #include <new>
 
 namespace gxvk::vk::pipelines::detail
@@ -13,6 +15,9 @@ using namespace gxvk::vk::pipelines::detail;
 
 namespace
 {
+    // Beside WoW's own Cache folder; a missing folder only means no saved cache.
+    constexpr const char* kPipelineCacheFile = "Cache\\vkpipelines.bin";
+
     /// The set-0 images of a draw for a layout: the draw's texture at each slot of the mask, or the
     /// white image of the slot's kind when the draw has none there. False when a texture is bound
     /// of the other kind (a 2D image under a cube sampler or the reverse), which the module cannot
@@ -97,9 +102,32 @@ namespace gxvk::vk::pipelines
             return false;
         }
 
+        // Seed the cache from the last run so pipelines are not rebuilt (first-use stutter). The driver checks the
+        // header and ignores data from another GPU or driver.
+        std::vector<uint8_t> saved;
+        if (FILE* f = std::fopen(kPipelineCacheFile, "rb"))
+        {
+            std::fseek(f, 0, SEEK_END);
+            long size = std::ftell(f);
+            std::fseek(f, 0, SEEK_SET);
+            if (size > 0)
+            {
+                saved.resize(size);
+                if (std::fread(saved.data(), 1, saved.size(), f) != saved.size()) saved.clear();
+            }
+            std::fclose(f);
+        }
         VkPipelineCacheCreateInfo cache = {};
-        cache.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
-        if (d.CreatePipelineCache(s.device, &cache, nullptr, &s.cache) != VK_SUCCESS) s.cache = VK_NULL_HANDLE;
+        cache.sType           = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+        cache.initialDataSize = saved.size();
+        cache.pInitialData    = saved.empty() ? nullptr : saved.data();
+        if (d.CreatePipelineCache(s.device, &cache, nullptr, &s.cache) != VK_SUCCESS)
+        {
+            cache.initialDataSize = 0;
+            cache.pInitialData    = nullptr;
+            if (d.CreatePipelineCache(s.device, &cache, nullptr, &s.cache) != VK_SUCCESS) s.cache = VK_NULL_HANDLE;
+        }
+        Write(Debug, "vulkan: pipelines: cache seeded with %u bytes from %s", static_cast<uint32_t>(saved.size()), kPipelineCacheFile);
 
         if (!memory::CreateBuffer(kConstantBytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, memory::Where::Stream, s.constant) || !s.constant.block.mapped)
         {
@@ -127,7 +155,23 @@ namespace gxvk::vk::pipelines
         if (s.regsPool != VK_NULL_HANDLE) d.DestroyDescriptorPool(s.device, s.regsPool, nullptr);
         DestroyLayouts();
         memory::DestroyBuffer(s.constant);
-        if (s.cache != VK_NULL_HANDLE) d.DestroyPipelineCache(s.device, s.cache, nullptr);
+        if (s.cache != VK_NULL_HANDLE)
+        {
+            size_t size = 0;
+            if (d.GetPipelineCacheData(s.device, s.cache, &size, nullptr) == VK_SUCCESS && size)
+            {
+                std::vector<uint8_t> data(size);
+                if (d.GetPipelineCacheData(s.device, s.cache, &size, data.data()) == VK_SUCCESS)
+                {
+                    if (FILE* f = std::fopen(kPipelineCacheFile, "wb"))
+                    {
+                        std::fwrite(data.data(), 1, size, f);
+                        std::fclose(f);
+                    }
+                }
+            }
+            d.DestroyPipelineCache(s.device, s.cache, nullptr);
+        }
         DestroyPrograms();
         delete[] s.entries;
         s = State();
