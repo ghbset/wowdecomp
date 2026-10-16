@@ -1,5 +1,7 @@
 // The Vulkan backend's scene: the present and the clear.
 #include <cstdint>
+#include "Engine/Source/ConsoleBase/ConsoleVar.h"
+#include "Engine/Source/ConsoleBase/Types.h"
 #include "Engine/Source/Gx/CGxDeviceVulkan/CGxDeviceVulkan.h"
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Context.hpp"
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Frame.hpp"
@@ -7,6 +9,18 @@
 
 namespace context = gxvk::vk::context;
 namespace frame   = gxvk::vk::frame;
+
+// RENDERTHREAD: renderThread 1 hands each finished frame to a render thread that acquires, submits and
+// presents it while the main thread records the next one (Vulkan only; read every frame, live).
+static CVar* RenderThreadCVar() {
+    static CVar* cvar;
+
+    if (!cvar) {
+        cvar = CVar::Register("renderThread", "Vulkan: 1 submits and presents frames on a render thread while the next one is recorded", 1, "0", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    }
+
+    return cvar;
+}
 
 // Mirrors CGxDeviceD3d::ScenePresent (0x006A3450), with the frame's present where D3D's Present was
 // and the engine half of ISceneBegin (the shader constants cleared) after it. The frame is ended
@@ -28,6 +42,9 @@ void CGxDeviceVulkan::ScenePresent() {
         this->IBringUpIfPending();
 
         if (this->m_context && context::Live()) {
+            CVar* renderThread = RenderThreadCVar();
+            frame::SetThreaded(renderThread && renderThread->m_intValue != 0);
+
             if (frame::Present(this->IWindowVisible() != 0)) {
                 // A resize, or a surface that went out of date: the frame has dropped what named the
                 // old swapchain; the context rebuilds it on the window.

@@ -10,6 +10,8 @@
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Texture.hpp"
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Vk.hpp"
 
+#include <atomic>
+#include <mutex>
 #include <cstdint>
 
 // The frame lives in Vulkan/Frame/, one file per responsibility, over this one header. Nothing here
@@ -152,6 +154,7 @@ namespace gxvk::vk::frame::detail
         VkImageView   views[kMaxImages]          = {};
         VkSemaphore   renderFinished[kMaxImages] = {};   ///< per IMAGE: only re-acquiring an image proves its present consumed it
         VkFence       imagesInFlight[kMaxImages] = {};
+        uint64_t      imageSerial[kMaxImages]    = {};   ///< RENDERTHREAD: the serial imagesInFlight[i]'s slot had then
         texture::Image scene;                            ///< the offscreen colour image the present pass shows
 
         // --- targets ----------------------------------------------------------------------------------
@@ -186,6 +189,7 @@ namespace gxvk::vk::frame::detail
         bool  clearDepthPending  = false;
         float clearColour[4]     = { 0.0f, 0.0f, 0.0f, 1.0f };
 
+        bool     rtPresent = false;   ///< RENDERTHREAD: Present() wants the render thread to present this frame
         bool     rebuild     = false;
         bool     surfaceLost = false;   ///< the rebuild must remake the surface too
         bool     failed      = false;
@@ -229,6 +233,18 @@ namespace gxvk::vk::frame::detail
     bool TargetView(const Target& t, const texture::Image*& image, VkFormat& format, VkExtent2D& extent);
     void DestroyTargets();
     void DropFramebuffersOf(VkImage image, bool retire);
+
+    // Thread.cpp -- RENDERTHREAD: the render thread (submit + present off the main thread)
+    extern std::atomic<uint64_t> gSubmitted;
+    /// Held by the main thread around a slot fence's reset and its new serial, and by the render
+    /// thread around its wait on another slot's fence for a swapchain image (imagesInFlight).
+    extern std::mutex gFenceLock;   ///< the last serial actually given to vkQueueSubmit, on either thread
+    bool RtWanted();   ///< the CVar is on: Present() leaves the acquire to the render thread
+    bool RtHandOff(uint32_t fi, uint64_t serial, bool wantPresent);   ///< false: not threaded, submit here
+    void RtWait(uint64_t serial);   ///< until the render thread is done with `serial` (or idle)
+    void RtCollect();               ///< picks up the render thread's rebuild / surface-lost / failure flags
+    void RtStop(bool destroy);
+    uint64_t RtPresented();
 
     // Uploads.cpp
     void StagingFrameBegin(FrameSlot& slot);
