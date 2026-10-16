@@ -349,7 +349,8 @@ class CM2Model {
     void AnimateMT(const C44Matrix* view, const C3Vector& diffuse, const C3Vector& emissive, float alpha, float alpha2);
     void AnimateMTSimple(const C44Matrix* view, const C3Vector& diffuse, const C3Vector& emissive, float alpha, float alpha2);
     void AnimateParticleST(float deltaTime, uint32_t index);
-    void AnimateST();
+    void AnimateST(uint32_t pass = 0);
+    int32_t CanAnimateSTThreaded();
     int32_t GetRegionBounds(M2SkinSection* section, CAaBox& box, C44Matrix& matrix);
     int32_t Initialize(CM2Scene* scene, CM2Shared* shared, CM2Model* source, uint32_t flags);
     int32_t InitializeLoaded();

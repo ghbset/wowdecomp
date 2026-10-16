@@ -237,6 +237,35 @@ static volatile LONG s_animateNextRoot;
 static const uint32_t ANIMATE_CHUNK = 4;
 static const uint32_t ANIMATE_MIN_PARALLEL = 8;
 
+// Not stock: AnimateST is lighter per root than AnimateMT (most roots have no emitters), so it takes bigger chunks and
+// a higher threshold. s_animateSTDone[i] marks roots whose emitters a worker already updated (AnimateST pass 1).
+static TSGrowableArray<uint8_t> s_animateSTDone;
+static const uint32_t ANIMATE_ST_CHUNK = 8;
+static const uint32_t ANIMATE_ST_MIN_PARALLEL = 16;
+
+static void AnimateSTThread(void* param) {
+    uint32_t count = s_animateRoots.Count();
+
+    while (true) {
+        uint32_t begin = static_cast<uint32_t>(InterlockedExchangeAdd(&s_animateNextRoot, ANIMATE_ST_CHUNK));
+
+        if (begin >= count) {
+            break;
+        }
+
+        uint32_t end = begin + ANIMATE_ST_CHUNK < count ? begin + ANIMATE_ST_CHUNK : count;
+
+        for (uint32_t i = begin; i < end; i++) {
+            CM2Model* model = s_animateRoots.m_data[i];
+            s_animateSTDone.m_data[i] = model->CanAnimateSTThreaded();
+
+            if (s_animateSTDone.m_data[i]) {
+                model->AnimateST(1);
+            }
+        }
+    }
+}
+
 static void AnimateRoot(CM2Model* model, const C44Matrix* view) {
     if (model->m_fFlags & 0x1000) {
         model->AnimateMTSimple(view, C3Vector(1.0f, 1.0f, 1.0f), C3Vector(0.0f, 0.0f, 0.0f), 1.0f, 1.0f);
@@ -1738,9 +1767,22 @@ int32_t CM2Scene::Animate(const C3Vector& cameraPos) {
         }
     }
 
-    for (CM2Model* model = this->m_animateList; model; model = model->m_animateNext) {
-        if (!model->m_attachParent) {
-            model->AnimateST();
+    // Not stock: emitters of thread-safe root trees update on the worker pool first; the rest of AnimateST (lights,
+    // draw/particle list links, unsafe trees in full) then runs here in the stock list order.
+    if (s_animateRoots.Count() >= ANIMATE_ST_MIN_PARALLEL) {
+        uint32_t chunks = (s_animateRoots.Count() + ANIMATE_ST_CHUNK - 1) / ANIMATE_ST_CHUNK;
+        s_animateSTDone.SetCount(s_animateRoots.Count());
+        s_animateNextRoot = 0;
+        this->m_cache->RunThreads(&AnimateSTThread, this, chunks - 1);
+
+        for (uint32_t i = 0; i < s_animateRoots.Count(); i++) {
+            s_animateRoots.m_data[i]->AnimateST(s_animateSTDone.m_data[i] ? 2 : 0);
+        }
+    } else {
+        for (CM2Model* model = this->m_animateList; model; model = model->m_animateNext) {
+            if (!model->m_attachParent) {
+                model->AnimateST();
+            }
         }
     }
 

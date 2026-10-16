@@ -134,7 +134,9 @@ class CParticleEmitter2 {
     static uint8_t s_noIndexBuffer;
     static CSortableParticleQueue s_pq;
     static float s_rndTable[128];
-    static float s_viewDist;
+    // Not stock: per thread, since CM2Scene::Animate updates emitters on the Model2 workers (set in Update, read in
+    // EmitNewParticles of the same emitter tree)
+    static thread_local float s_viewDist;
 
     static void Destroy();
     static void Init();

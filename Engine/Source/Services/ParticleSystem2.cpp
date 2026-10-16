@@ -57,7 +57,7 @@ CGxBuf* CParticleEmitter2::s_indexBuf;
 CGxPool* CParticleEmitter2::s_indexPool;
 
 // STATIC: 0x00DCE68C
-float CParticleEmitter2::s_viewDist;
+thread_local float CParticleEmitter2::s_viewDist;
 
 // STATIC: 0x00DCE690
 float CParticleEmitter2::s_rndTable[128];

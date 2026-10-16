@@ -2483,7 +2483,9 @@ void M2AnimateTrack<M2CompQuat, C4Quaternion>(CM2Model* model, M2ModelBone* bone
 
 // VERIFY: 4a40646d manual
 // OFFSET: 0x00828A00
-void CM2Model::AnimateST() {
+// Not stock: pass 0 is the stock function. Pass 1 updates only the ribbon and particle emitters (no lights, list links
+// or m_uint90), so CM2Scene::Animate can run it on a Model2 worker; pass 2 then does the rest on the main thread.
+void CM2Model::AnimateST(uint32_t pass) {
     if (!(this->m_fFlags & 1)) {
         return;
     }
@@ -2501,7 +2503,7 @@ void CM2Model::AnimateST() {
         this->m_currentLighting = &this->m_lighting;
     }
 
-    for (uint32_t i = 0; i < data->m_lights.m_count; i++) {
+    for (uint32_t i = 0; pass != 1 && i < data->m_lights.m_count; i++) {
         M2ModelLight* light = &this->m_lights[i];
         M2Light* lightData = &data->m_lights[i];
         int32_t visible;
@@ -2530,7 +2532,7 @@ void CM2Model::AnimateST() {
         light->m_light.m_stamp = this->m_scene->m_frameStamp;
     }
 
-    for (uint32_t i = 0; i < data->m_cameras.m_count; i++) {
+    for (uint32_t i = 0; pass != 1 && i < data->m_cameras.m_count; i++) {
         M2ModelCamera* camera = &this->m_cameras[i];
         M2Camera* cameraData = &data->m_cameras[i];
 
@@ -2549,12 +2551,16 @@ void CM2Model::AnimateST() {
         CameraSetFloat(camera->m_camera, 5, camera->m_rollTrack.m_currentValue);
     }
 
-    uint32_t time = this->m_scene->m_time;
-    uint32_t elapsed = time - this->m_lastEmitterTime;
-    float deltaTime = elapsed * 0.001f;
-    this->m_lastEmitterTime = time;
+    float deltaTime = 0.0f;
 
-    for (uint32_t i = 0; i < data->m_ribbons.m_count; i++) {
+    if (pass != 2) {
+        uint32_t time = this->m_scene->m_time;
+        uint32_t elapsed = time - this->m_lastEmitterTime;
+        deltaTime = elapsed * 0.001f;
+        this->m_lastEmitterTime = time;
+    }
+
+    for (uint32_t i = 0; pass != 2 && i < data->m_ribbons.m_count; i++) {
         M2Ribbon* ribbonData = &data->m_ribbons[i];
         CRibbonEmitter* emitter = this->m_ribbonEmitters[i];
         M2ModelRibbon* ribbon = &this->m_ribbons[i];
@@ -2589,11 +2595,11 @@ void CM2Model::AnimateST() {
         }
     }
 
-    for (uint32_t i = 0; i < data->m_particles.m_count; i++) {
+    for (uint32_t i = 0; pass != 2 && i < data->m_particles.m_count; i++) {
         this->AnimateParticleST(deltaTime, i);
     }
 
-    if (this->m_fFlags & 8) {
+    if (pass != 1 && (this->m_fFlags & 8)) {
         CM2Model** head = &this->m_scene->m_drawList;
         this->m_drawPrev = head;
         this->m_drawNext = *head;
@@ -2604,7 +2610,7 @@ void CM2Model::AnimateST() {
         }
     }
 
-    if ((this->m_fFlags & 0x400) && (this->m_fFlags & 0x10000)) {
+    if (pass != 1 && (this->m_fFlags & 0x400) && (this->m_fFlags & 0x10000)) {
         CM2Model** head = &this->m_scene->m_particleList;
         this->m_particlePrev = head;
         this->m_particleNext = *head;
@@ -2625,13 +2631,36 @@ void CM2Model::AnimateST() {
         }
 
         if (!hidden) {
-            child->AnimateST();
+            child->AnimateST(pass);
         }
     }
 
-    if (this->m_effectiveAlpha == 1.0f) {
+    if (pass != 1 && this->m_effectiveAlpha == 1.0f) {
         this->m_uint90 = 1;
     }
+}
+
+// Not stock: whether AnimateST pass 1 may run this model's attachment tree off the main thread. Model particles
+// create models and use the shared s_pq, projected particles call the world height callback, and child emitters
+// belong to another model, so any of those keeps the whole tree on the main thread.
+int32_t CM2Model::CanAnimateSTThreaded() {
+    if (this->m_fFlags & 1) {
+        for (uint32_t i = 0; i < this->m_shared->m_data->m_particles.m_count; i++) {
+            CParticleEmitter2* emitter = this->m_particleEmitters[i];
+
+            if (emitter->m_params.m_hasModel || (emitter->m_flags & 0x40000) || emitter->m_childEmitterCount) {
+                return 0;
+            }
+        }
+    }
+
+    for (CM2Model* child = this->m_attachList; child; child = child->m_attachNext) {
+        if (!child->CanAnimateSTThreaded()) {
+            return 0;
+        }
+    }
+
+    return 1;
 }
 
 // VERIFY: 852eaff5 manual
