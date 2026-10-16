@@ -166,6 +166,10 @@ static void D3d11LogOnce(const char* format, ...) {
     }
 }
 
+// Set when IDestroyD3d's final device Release leaves references: DeviceDestroy then keeps d3d11/dxgi loaded, since
+// unloading them under a live device (and its driver/DXVK threads) can hang or crash the exit.
+static bool s_deviceLeaked;
+
 template <class T>
 static void SafeRelease(T*& p) {
     if (p) {
@@ -690,9 +694,16 @@ void CGxDeviceD3d11::DeviceDestroy() {
         this->m_hwndClass = 0;
     }
 
+    D3d11Log("CGxDeviceD3d11::DeviceDestroy(): window gone");
     this->IDestroyD3d();
-    D3d11Log("CGxDeviceD3d11::DeviceDestroy(): unload d3d11/dxgi");
-    CGxDeviceD3d11::IUnloadD3dLib(this->m_d3dLib, this->m_dxgiLib, this->m_dxgiFactory);
+
+    if (s_deviceLeaked) {
+        D3d11Log("CGxDeviceD3d11::DeviceDestroy(): device still referenced, d3d11/dxgi stay loaded");
+        SafeRelease(this->m_dxgiFactory);
+    } else {
+        D3d11Log("CGxDeviceD3d11::DeviceDestroy(): unload d3d11/dxgi");
+        CGxDeviceD3d11::IUnloadD3dLib(this->m_d3dLib, this->m_dxgiLib, this->m_dxgiFactory);
+    }
     D3d11Log("CGxDeviceD3d11::DeviceDestroy(): end");
 }
 
@@ -842,6 +853,17 @@ int32_t CGxDeviceD3d11::ICreateD3dDevice(const CGxFormat& format) {
     this->DeviceSetGamma(this->m_gammaRamp);
     this->ICursorCreate(format);
 
+    // Shaders that outlived the previous device (IDestroyD3d released their objects) are rebuilt from m_code.
+    for (uint32_t target = GxSh_Vertex; target <= GxSh_Pixel; target++) {
+        TSHashTable<CGxShader, HASHKEY_STRI>& list = this->m_shaderList[target];
+
+        for (CGxShader* shader = list.m_fulllist.Head(); shader; shader = list.m_fulllist.Next(shader)) {
+            if (shader->m_loaded && !shader->m_apiSpecific) {
+                this->IShaderCreate(shader);
+            }
+        }
+    }
+
     g_theGxDevicePtr->ShaderCreate(CGxDevice::s_uiVertexShader, GxSh_Vertex, "Shaders\\Vertex", "UI", 2);
     g_theGxDevicePtr->ShaderCreate(&CGxDevice::s_uiPixelShader, GxSh_Pixel, "Shaders\\Pixel", "UI", 1);
 
@@ -870,7 +892,20 @@ void CGxDeviceD3d11::IDestroyD3d() {
         g_theGxDevicePtr->ShaderDestroy(CGxDevice::s_uiPixelShader);
     }
 
-    D3d11Log("CGxDeviceD3d11::IDestroyD3d(): UI shaders released");
+    // Every other shader object too (4.3.4 IReleaseD3dShaders(1)). Left alive, each held a device reference, so at
+    // quit the device never reached 0 and d3d11/dxgi were unloaded under a live device and its worker threads.
+    for (uint32_t target = GxSh_Vertex; target <= GxSh_Pixel; target++) {
+        TSHashTable<CGxShader, HASHKEY_STRI>& list = this->m_shaderList[target];
+
+        for (CGxShader* shader = list.m_fulllist.Head(); shader; shader = list.m_fulllist.Next(shader)) {
+            SafeRelease(reinterpret_cast<IUnknown*&>(shader->m_apiSpecific));
+            shader->m_valid = 0;
+        }
+    }
+
+    this->m_curVs = nullptr;
+    this->m_curPs = nullptr;
+    D3d11Log("CGxDeviceD3d11::IDestroyD3d(): shaders released");
     this->ICursorDestroy();
     this->ITexForceRecreation(1);
     D3d11Log("CGxDeviceD3d11::IDestroyD3d(): cursor + textures released");
@@ -904,6 +939,7 @@ void CGxDeviceD3d11::IDestroyD3d() {
     if (this->m_d3dDevice) {
         ULONG refs = this->m_d3dDevice->Release();
         this->m_d3dDevice = nullptr;
+        s_deviceLeaked = refs != 0;
         D3d11Log("CGxDeviceD3d11::IDestroyD3d(): device released (%u references left)", static_cast<uint32_t>(refs));
     }
 
@@ -1378,33 +1414,14 @@ void CGxDeviceD3d11::ScenePresent() {
     this->ShaderConstantsClear();
 }
 
-// Device removed: release every shader object (they belong to the dead device), rebuild the device, then recreate
-// the shaders from the DXBC they keep in m_code. Textures and pools are marked for recreation by IDestroyD3d.
+// Device removed: rebuild the device. IDestroyD3d releases every shader object and marks textures and pools for
+// recreation; ICreateD3dDevice recreates the shaders from the DXBC they keep in m_code.
 void CGxDeviceD3d11::IRecreateD3dDevice() {
-    for (uint32_t target = GxSh_Vertex; target <= GxSh_Pixel; target++) {
-        TSHashTable<CGxShader, HASHKEY_STRI>& list = this->m_shaderList[target];
-
-        for (CGxShader* shader = list.m_fulllist.Head(); shader; shader = list.m_fulllist.Next(shader)) {
-            SafeRelease(reinterpret_cast<IUnknown*&>(shader->m_apiSpecific));
-            shader->m_valid = 0;
-        }
-    }
-
     CGxFormat format = this->m_format;
     this->IDestroyD3d();
 
     if (!this->ICreateD3dDevice(format)) {
         return; // m_context stays 0
-    }
-
-    for (uint32_t target = GxSh_Vertex; target <= GxSh_Pixel; target++) {
-        TSHashTable<CGxShader, HASHKEY_STRI>& list = this->m_shaderList[target];
-
-        for (CGxShader* shader = list.m_fulllist.Head(); shader; shader = list.m_fulllist.Next(shader)) {
-            if (shader->m_loaded && !shader->m_apiSpecific) {
-                this->IShaderCreate(shader);
-            }
-        }
     }
 
     this->m_intF5C = 0;

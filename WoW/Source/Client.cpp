@@ -1770,13 +1770,25 @@ bool InitializeGlobal() {
     return true;
 }
 
+// Not stock: gx.log is flushed per line, so a hang on quit shows the last step reached.
+static void TeardownLog(const char* step) {
+    GxLog("teardown: %s", step);
+
+    if (CGxDevice::m_log) {
+        SLogFlush(CGxDevice::m_log);
+    }
+}
+
 // VERIFY: 87ba0ad5 manual
 // OFFSET: 0x00406B70
 void BeginCloseGame() {
+    TeardownLog("BeginCloseGame");
     SMemSetDebugFlags(0, 8);
     OsIMEDestroy();
     OsTimeShutdown();
+    TeardownLog("EventDestroy");
     EventDestroy();
+    TeardownLog("ConsoleDeviceDestroy");
     ConsoleDeviceDestroy();
 
     {

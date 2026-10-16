@@ -187,6 +187,7 @@ void ConsoleDeviceDestroy() {
     s_cvVideoOptionsVersion->Update();
     GxDevDestroy(s_device);
     s_device = nullptr;
+    GxLog("teardown: device destroyed");
     GxLogClose();
 }
 
