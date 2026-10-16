@@ -598,9 +598,15 @@ void AsyncFileReadObject(CAsyncObject* object, int32_t urgent) {
 void AsyncFileReadIncreasePriority(CAsyncObject* object) {
     object->m_queuedFrame = g_theGxDevicePtr->m_frameCount;
 
+    // Not stock: relink under the queue lock. Stock had one reader thread; several readers popping the read list
+    // while this relinks would corrupt it.
+    g_queueLock.Enter();
+
     if (object->m_char25) {
         AsyncFileReadLinkObject(object, 1);
     }
+
+    g_queueLock.Leave();
 }
 
 // VERIFY: 3aa538d7 manual
