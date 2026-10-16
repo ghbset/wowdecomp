@@ -59,10 +59,11 @@ const DXGI_FORMAT CGxDeviceD3d11::s_GxTexFmtToDxgiFmt[GxTexFormats_Last] = {
 };
 
 // Constant like 4.3.4's (0x00BD67E8 is read-only there): a failed create falls back for that one texture only.
-const EGxTexFormat CGxDeviceD3d11::s_GxTexFormatToUse[GxTexFormats_Last] = { GxTex_Unknown, GxTex_Abgr8888, GxTex_Argb8888, GxTex_Argb4444, GxTex_Argb1555, GxTex_Rgb565, GxTex_Dxt1, GxTex_Dxt3, GxTex_Dxt5, GxTex_Uv88, GxTex_Gr1616F, GxTex_R32F, GxTex_D24X8 };
+// 16-bit formats widen to Argb8888 (B8G8R8A8) like 4.3.4 widens them to 8888: native B5G6R5/B5G5R5A1 are optional
+// and cannot always take GENERATE_MIPS, and stock Blit has no 1555/565 -> 8888. ConvertTexels16To8888 expands them.
+const EGxTexFormat CGxDeviceD3d11::s_GxTexFormatToUse[GxTexFormats_Last] = { GxTex_Unknown, GxTex_Abgr8888, GxTex_Argb8888, GxTex_Argb8888, GxTex_Argb8888, GxTex_Argb8888, GxTex_Dxt1, GxTex_Dxt3, GxTex_Dxt5, GxTex_Uv88, GxTex_Gr1616F, GxTex_R32F, GxTex_D24X8 };
 
-// 4.3.4 widens every 16-bit format to 8888 (table 0x00BD67E8). Blit has Argb8888/Argb4444 -> Abgr8888 converters.
-// TODO(phase 5): Argb1555/Rgb565 data has no converter to 8888; on pre-11.1 runtimes those textures fail to create.
+// Unreached for 16-bit formats now that s_GxTexFormatToUse widens them.
 const EGxTexFormat CGxDeviceD3d11::s_tolerableTexFmtMapping[GxTexFormats_Last] = { GxTex_Unknown, GxTex_Abgr8888, GxTex_Abgr8888, GxTex_Abgr8888, GxTex_Argb1555, GxTex_Rgb565, GxTex_Dxt1, GxTex_Dxt3, GxTex_Dxt5, GxTex_Uv88, GxTex_Gr1616F, GxTex_R32F, GxTex_D24X8 };
 
 // Triangle fans have no D3D11 topology: Draw() rewrites them as lists.
@@ -81,6 +82,51 @@ static void D3d11Log(const char* format, ...) {
     if (CGxDevice::m_log) {
         SLogFlush(CGxDevice::m_log);
     }
+}
+
+// 16-bit texel data -> Argb8888 (B8G8R8A8 in memory), channels widened by bit replication; 565 gets alpha 0xFF.
+// Returns 0 for any other data format so the caller falls through to the shared Blit (D3D9's tables stay stock).
+static int32_t ConvertTexels16To8888(const C2iVector& size, const void* in, uint32_t inStride, EGxTexFormat inFormat, void* out, uint32_t outStride) {
+    if (inFormat != GxTex_Argb4444 && inFormat != GxTex_Argb1555 && inFormat != GxTex_Rgb565) {
+        return 0;
+    }
+
+    for (int32_t y = 0; y < size.y; y++) {
+        const uint16_t* src = reinterpret_cast<const uint16_t*>(static_cast<const uint8_t*>(in) + y * inStride);
+        uint32_t* dst = reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(out) + y * outStride);
+
+        for (int32_t x = 0; x < size.x; x++) {
+            uint32_t p = src[x];
+            uint32_t a, r, g, b;
+
+            if (inFormat == GxTex_Argb4444) {
+                a = ((p >> 12) & 0xF) * 0x11;
+                r = ((p >> 8) & 0xF) * 0x11;
+                g = ((p >> 4) & 0xF) * 0x11;
+                b = (p & 0xF) * 0x11;
+            } else if (inFormat == GxTex_Argb1555) {
+                a = (p & 0x8000) ? 0xFF : 0;
+                r = (p >> 10) & 0x1F;
+                g = (p >> 5) & 0x1F;
+                b = p & 0x1F;
+                r = (r << 3) | (r >> 2);
+                g = (g << 3) | (g >> 2);
+                b = (b << 3) | (b >> 2);
+            } else {
+                a = 0xFF;
+                r = (p >> 11) & 0x1F;
+                g = (p >> 5) & 0x3F;
+                b = p & 0x1F;
+                r = (r << 3) | (r >> 2);
+                g = (g << 2) | (g >> 4);
+                b = (b << 3) | (b >> 2);
+            }
+
+            dst[x] = (a << 24) | (r << 16) | (g << 8) | b;
+        }
+    }
+
+    return 1;
 }
 
 // d3d11DumpFrame 1: log every draw of the next frame to gx.log, one line each, then the CVar resets to 0.
@@ -3055,7 +3101,12 @@ void CGxDeviceD3d11::ITexUpload(CGxTex* texId) {
                     goto done;
                 }
 
-                Blit(size, BlitAlpha_0, src, texelStrideInBytes, GxGetBlitFormat(texId->m_dataFormat), scratch, pitch, GxGetBlitFormat(texId->m_format));
+                int32_t converted = (texId->m_format == GxTex_Argb8888 && ConvertTexels16To8888(size, src, texelStrideInBytes, texId->m_dataFormat, scratch, pitch))
+                    || Blit(size, BlitAlpha_0, src, texelStrideInBytes, GxGetBlitFormat(texId->m_dataFormat), scratch, pitch, GxGetBlitFormat(texId->m_format));
+
+                if (!converted) {
+                    D3d11LogOnce("CGxDeviceD3d11: texture upload has no conversion %d -> %d (%dx%d mip %u)", texId->m_dataFormat, texId->m_format, size.x, size.y, mip);
+                }
 
                 D3D11_BOX box = { static_cast<UINT>(rect.left), static_cast<UINT>(rect.top), 0, static_cast<UINT>(rect.right), static_cast<UINT>(rect.bottom), 1 };
                 this->m_d3dContext->UpdateSubresource(api->m_texture, D3D11CalcSubresource(level, face, api->m_levels), &box, scratch, pitch, 0);

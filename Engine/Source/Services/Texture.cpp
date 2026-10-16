@@ -221,6 +221,8 @@ int32_t TextureBuildAliasPath(char* buffer, const char* fileName) {
 // VERIFY: a6ae9dde manual
 // OFFSET: 0x004B5280
 MipBits* GetDefaultTexture(uint32_t width, uint32_t height) {
+    // Not stock: a failed >1024 texture fills the default at full size, overrunning s_mipBits like the BLP decode did.
+    MipBitsReserve(PIXEL_ARGB8888, width, height);
     MipBits* images = s_mipBits;
     MipBits* level = images;
 
@@ -1724,6 +1726,7 @@ void UpdateTgaTexture(EGxTexCommand command, uint32_t width, uint32_t height, ui
         case GxTex_Lock:
             if (!s_pumping) {
                 char* extension = texture->m_filename + SStrLen(texture->m_filename);
+                MipBitsReserve(PIXEL_ARGB8888, width, height); // Not stock: TGA reload decodes ARGB8888 into s_mipBits
                 int32_t result = LoadTgaMips(texture->m_filename, extension, texture->m_flags & 2, &s_mipBits, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
                 *extension = '\0';
 

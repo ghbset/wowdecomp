@@ -35,6 +35,7 @@
 #include "Engine/Source/Services/Texture.h"
 #include "Engine/Source/Services/Types.h"
 #include "Engine/Source/Gx/CGxDevice/CGxDevice.h"
+#include "Engine/Source/Storm/H/storm.h"
 #include "Engine/Source/Tempest/C2Vector.h"
 #include "Engine/Source/Tempest/C3Vector.h"
 #include "WoW/Source/DB/DBClient/DBClient.h"
@@ -603,6 +604,30 @@ static void LoadingScreenPaint(void* param, const RECTF* rect, const RECTF* visi
         GxShaderConstantsSet(GxSh_Vertex, 0, &transform.a0, 4);
     } else {
         GxRsSet(GxRs_Lighting, 0);
+    }
+
+    // Diagnostic (not stock): once per run, which path the loading screen takes and, for fixed function, the TMU0
+    // texture transform/texgen it inherits (a world-left matrix would scale the background UVs).
+    static bool s_pathLogged;
+
+    if (!s_pathLogged) {
+        s_pathLogged = true;
+        CGxDevice* device = g_theGxDevicePtr;
+        bool vsValid = s_vertexShader[0]->Valid();
+        bool psValid = s_pixelShader[0]->Valid();
+        CGxDevice::Log("LoadingScreenPaint: UI vertex shader valid %d, pixel shader valid %d -> %s path", vsValid, psValid, vsValid && psValid ? "shader" : "fixed-function");
+
+        if (!(vsValid && psValid)) {
+            const CGxMatrixStack& tex0 = device->m_xforms[GxXform_Tex0];
+            const C44Matrix& m = tex0.m_mtx[tex0.m_level];
+            CGxDevice::Log("LoadingScreenPaint: TMU0 xform level %u flags 0x%X dirty %d diag %.3f %.3f %.3f %.3f trans %.3f %.3f, TexGen0 %d TextureCoord0 %d",
+                tex0.m_level, tex0.m_flags[tex0.m_level], tex0.m_dirty, m.a0, m.b1, m.c2, m.d3, m.d0, m.d1,
+                device->m_appRenderStates[GxRs_TexGen0].m_value.m_data.i[0], device->m_appRenderStates[GxRs_TextureCoord0].m_value.m_data.i[0]);
+        }
+
+        if (CGxDevice::m_log) {
+            SLogFlush(CGxDevice::m_log);
+        }
     }
 
     GxRsSet(GxRs_Fog, 0);
