@@ -641,7 +641,47 @@ int32_t CGxDeviceD3d11::ICreateD3d() {
 int32_t CGxDeviceD3d11::DeviceSetFormat(const CGxFormat& format) {
     D3d11Log("CGxDeviceD3d11::DeviceSetFormat():");
     this->Log(format);
-    D3d11Log("CGxDeviceD3d11::DeviceSetFormat(): MSAA %u -> %u (quality %g -> %g): full device recreate, every texture recreated and re-uploaded", this->m_format.m_multisampleCount, format.m_multisampleCount, static_cast<double>(this->m_format.m_multisampleQuality), static_cast<double>(format.m_multisampleQuality));
+    D3d11Log("CGxDeviceD3d11::DeviceSetFormat(): MSAA %u -> %u (quality %g -> %g)", this->m_format.m_multisampleCount, format.m_multisampleCount, static_cast<double>(this->m_format.m_multisampleQuality), static_cast<double>(format.m_multisampleQuality));
+
+    // Every format change (MSAA, size, windowed/fullscreen, vsync, back-buffer format) only touches the swap chain
+    // and what follows its size or sample count. Keep the device: D3D9 managed textures survive a Reset and the client
+    // never re-supplies their texels, so a device recreate left them black/white. The adapter is always 0, so only a
+    // removed device needs the full recreate.
+    if (this->m_d3dDevice && this->m_context && this->m_d3dDevice->GetDeviceRemovedReason() == S_OK) {
+        D3d11Log("CGxDeviceD3d11::DeviceSetFormat(): swap chain rebuild, device kept");
+
+        // Render targets may follow the window size; their owners rebuild them on the regen callback (as on resize).
+        this->ITexForceRecreation(0);
+        this->IReleaseBackBuffer();
+        ID3D11ShaderResourceView* noSrvs[16] = {};
+        this->m_d3dContext->PSSetShaderResources(0, 16, noSrvs);
+        memset(this->m_curSrv, 0, sizeof(this->m_curSrv));
+        this->m_d3dContext->Flush();
+        this->ILeaveFullscreen();
+        SafeRelease(this->m_swapChain);
+
+        if (this->m_hwnd) {
+            ShowWindow(this->m_hwnd, SW_HIDE);
+            DestroyWindow(this->m_hwnd);
+        }
+
+        this->m_hwnd = nullptr;
+        this->m_format = format;
+
+        CGxFormat createFormat = format;
+
+        if (this->ICreateWindow(createFormat) && this->ICreateSwapChain(createFormat) && CGxDevice::DeviceSetFormat(createFormat)) {
+            this->ISetCaps(createFormat);
+            this->m_viewportDirty = 1;
+            this->m_scissorRectDirty = 1;
+            this->ISetWindowFocus(1);
+            return 1;
+        }
+
+        D3d11Log("CGxDeviceD3d11::DeviceSetFormat(): swap chain rebuild failed, trying a full device recreate");
+    } else {
+        D3d11Log("CGxDeviceD3d11::DeviceSetFormat(): full device recreate");
+    }
 
     if (this->m_hwnd) {
         ShowWindow(this->m_hwnd, SW_HIDE);
@@ -718,30 +758,9 @@ void CGxDeviceD3d11::ILeaveFullscreen() {
     }
 }
 
-// 4.3.4 FUN_00853EE0: adapter 0 from the factory, FL {11_0, 10_1, 10_0}, single-threaded; one dynamic cbuffer per
-// stage bound once at b0.
-int32_t CGxDeviceD3d11::ICreateD3dDevice(const CGxFormat& format) {
-    IDXGIAdapter1* adapter = nullptr;
-
-    if (FAILED(this->m_dxgiFactory->EnumAdapters1(0, &adapter))) {
-        D3d11Log("CGxDeviceD3d11: no adapter");
-        return 0;
-    }
-
-    static const D3D_FEATURE_LEVEL s_levels[3] = { D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0 };
-
-    HRESULT hr = this->m_d3dCreateDevice(adapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_SINGLETHREADED, s_levels, 3, D3D11_SDK_VERSION, &this->m_d3dDevice, &this->m_featureLevel, &this->m_d3dContext);
-    adapter->Release();
-
-    if (FAILED(hr)) {
-        D3d11Log("CGxDeviceD3d11: D3D11CreateDevice failed: 0x%08X", static_cast<uint32_t>(hr));
-        this->m_d3dDevice = nullptr;
-        this->m_d3dContext = nullptr;
-        return 0;
-    }
-
-    D3d11Log("CGxDeviceD3d11: feature level 0x%X", static_cast<uint32_t>(this->m_featureLevel));
-
+// Swap chain + back buffer views + depth on the current device and window. DeviceSetFormat rebuilds just this when
+// the device survives, so textures, shaders and states keep their contents.
+int32_t CGxDeviceD3d11::ICreateSwapChain(const CGxFormat& format) {
     DXGI_SWAP_CHAIN_DESC desc;
     memset(&desc, 0, sizeof(desc));
 
@@ -802,7 +821,34 @@ int32_t CGxDeviceD3d11::ICreateD3dDevice(const CGxFormat& format) {
         }
     }
 
-    if (!this->ICreateBackBuffer()) {
+    return this->ICreateBackBuffer();
+}
+
+// 4.3.4 FUN_00853EE0: adapter 0 from the factory, FL {11_0, 10_1, 10_0}, single-threaded; one dynamic cbuffer per
+// stage bound once at b0.
+int32_t CGxDeviceD3d11::ICreateD3dDevice(const CGxFormat& format) {
+    IDXGIAdapter1* adapter = nullptr;
+
+    if (FAILED(this->m_dxgiFactory->EnumAdapters1(0, &adapter))) {
+        D3d11Log("CGxDeviceD3d11: no adapter");
+        return 0;
+    }
+
+    static const D3D_FEATURE_LEVEL s_levels[3] = { D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0 };
+
+    HRESULT hr = this->m_d3dCreateDevice(adapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_SINGLETHREADED, s_levels, 3, D3D11_SDK_VERSION, &this->m_d3dDevice, &this->m_featureLevel, &this->m_d3dContext);
+    adapter->Release();
+
+    if (FAILED(hr)) {
+        D3d11Log("CGxDeviceD3d11: D3D11CreateDevice failed: 0x%08X", static_cast<uint32_t>(hr));
+        this->m_d3dDevice = nullptr;
+        this->m_d3dContext = nullptr;
+        return 0;
+    }
+
+    D3d11Log("CGxDeviceD3d11: feature level 0x%X", static_cast<uint32_t>(this->m_featureLevel));
+
+    if (!this->ICreateSwapChain(format)) {
         return 0;
     }
 

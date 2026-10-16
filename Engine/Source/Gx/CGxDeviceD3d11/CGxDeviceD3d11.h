@@ -178,6 +178,7 @@ class CGxDeviceD3d11 : public CGxDevice {
     int32_t CreatePoolAPI(CGxPool* pool);
     int32_t ICreateD3d();
     int32_t ICreateD3dDevice(const CGxFormat& format);
+    int32_t ICreateSwapChain(const CGxFormat& format);
     int32_t ICreateBackBuffer();
     int32_t ICreateDepth(uint32_t width, uint32_t height, uint32_t samples, ID3D11Texture2D*& texture, ID3D11DepthStencilView*& dsv, ID3D11ShaderResourceView** srv);
     void IReleaseBackBuffer();
