@@ -182,12 +182,15 @@ void FFX::SetupGeo_Quad(const C2iVector& dstSize, const C2iVector& srcSize, cons
     pos[3].y = minY;
     pos[3].z = 0.0f;
 
+    // Not in 12340: the half-texel offset is D3D9's pixel-centre convention. D3D11 centres pixels on +0.5 already, so
+    // the offset there lands every tap on a texel corner (half-texel shift, extra 2x2 blur); 4.3.4 drops it the same way.
+    float texelOffset = g_theGxDevicePtr->DeviceApi() == GxApi_D3d11 ? 0.0f : 0.5f;
     float invWidth = 1.0f / srcTexSize.x;
     float invHeight = 1.0f / srcTexSize.y;
-    float maxU = (srcSize.x + 0.5f) * invWidth;
-    float maxV = (srcSize.y + 0.5f) * invHeight;
-    float minU = invWidth * 0.5f;
-    float minV = 0.5f * invHeight;
+    float maxU = (srcSize.x + texelOffset) * invWidth;
+    float maxV = (srcSize.y + texelOffset) * invHeight;
+    float minU = invWidth * texelOffset;
+    float minV = texelOffset * invHeight;
 
     tex[0].x = minU;
     tex[0].y = maxV;
@@ -238,10 +241,11 @@ void FFX::SetupGeo_Grid(const C2iVector& dstSize, const C2iVector& srcSize, cons
 
     float invTexWidth = 1.0f / srcTexSize.x;
     float invTexHeight = 1.0f / srcTexSize.y;
-    float minU = invTexWidth * 0.5f;
-    float maxU = (srcSize.x + 0.5f) * invTexWidth;
-    float maxV = invTexHeight * (srcSize.y + 0.5f);
-    float minV = 0.5f * invTexHeight;
+    float texelOffset = g_theGxDevicePtr->DeviceApi() == GxApi_D3d11 ? 0.0f : 0.5f; // see SetupGeo_Quad
+    float minU = invTexWidth * texelOffset;
+    float maxU = (srcSize.x + texelOffset) * invTexWidth;
+    float maxV = invTexHeight * (srcSize.y + texelOffset);
+    float minV = texelOffset * invTexHeight;
     float step = 1.0f / (count - 1);
     float stepX = (maxX - minX) * step;
     float stepY = (maxY - minY) * step;

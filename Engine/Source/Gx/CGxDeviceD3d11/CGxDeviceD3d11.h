@@ -90,7 +90,7 @@ class CGxDeviceD3d11 : public CGxDevice {
     uint64_t m_curLayoutKey;
     float m_devConstants[23 * 4];
     float m_ffConstants[2][53 * 4];
-    ID3D11VertexShader* m_ffVs[48];
+    ID3D11VertexShader* m_ffVs[48 + 4];   // g_ffVs, then g_ffVsT34
     ID3D11PixelShader* m_ffPs[3];
     // d3d11Debug 2: shaders created from the SM2 (ps_2_0/vs_2_0) families, by family name.
     std::unordered_map<const CGxShader*, std::string> m_sm2Shaders;
@@ -169,6 +169,7 @@ class CGxDeviceD3d11 : public CGxDevice {
     int32_t ICreateDepth(uint32_t width, uint32_t height, uint32_t samples, ID3D11Texture2D*& texture, ID3D11DepthStencilView*& dsv, ID3D11ShaderResourceView** srv);
     void IReleaseBackBuffer();
     int32_t ICreateWindow(CGxFormat& format);
+    void ILeaveFullscreen();
     void IDestroyD3d();
     void IRecreateD3dDevice();
     void ISceneClearQuad(uint32_t mask, CImVector color);

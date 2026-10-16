@@ -1,5 +1,6 @@
 #include <cfloat>
 #include <cmath>
+#include <cstdarg>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -66,6 +67,18 @@ const D3D11_PRIMITIVE_TOPOLOGY CGxDeviceD3d11::s_primitiveConversion[GxPrims_Las
     D3D11_PRIMITIVE_TOPOLOGY_POINTLIST, D3D11_PRIMITIVE_TOPOLOGY_LINELIST, D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP,
     D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST
 };
+
+// Every line flushed: an exit hang otherwise loses gx.log's tail (VkLog pattern, shared Log untouched).
+static void D3d11Log(const char* format, ...) {
+    va_list args;
+    va_start(args, format);
+    CGxDevice::Log(format, args);
+    va_end(args);
+
+    if (CGxDevice::m_log) {
+        SLogFlush(CGxDevice::m_log);
+    }
+}
 
 template <class T>
 static void SafeRelease(T*& p) {
@@ -144,7 +157,7 @@ int32_t CGxDeviceD3d11::ILoadD3dLib(HMODULE& d3dLib, HMODULE& dxgiLib, PFN_D3D11
     dxgiLib = LoadLibraryA("dxgi.dll");
 
     if (!d3dLib || !dxgiLib) {
-        CGxDevice::Log("CGxDeviceD3d11::ILoadD3dLib(): unable to load d3d11.dll/dxgi.dll");
+        D3d11Log("CGxDeviceD3d11::ILoadD3dLib(): unable to load d3d11.dll/dxgi.dll");
         CGxDeviceD3d11::IUnloadD3dLib(d3dLib, dxgiLib, factory);
         return 0;
     }
@@ -153,7 +166,7 @@ int32_t CGxDeviceD3d11::ILoadD3dLib(HMODULE& d3dLib, HMODULE& dxgiLib, PFN_D3D11
     CreateDXGIFactory1Proc createFactory = reinterpret_cast<CreateDXGIFactory1Proc>(GetProcAddress(dxgiLib, "CreateDXGIFactory1"));
 
     if (!createDevice || !createFactory || FAILED(createFactory(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory)))) {
-        CGxDevice::Log("CGxDeviceD3d11::ILoadD3dLib(): unable to GetProcAddress()/CreateDXGIFactory1()");
+        D3d11Log("CGxDeviceD3d11::ILoadD3dLib(): unable to GetProcAddress()/CreateDXGIFactory1()");
         CGxDeviceD3d11::IUnloadD3dLib(d3dLib, dxgiLib, factory);
         return 0;
     }
@@ -489,7 +502,7 @@ int32_t CGxDeviceD3d11::DeviceCreate(GxWindowProc windowProc, const CGxFormat& f
 
     if (!this->m_hwndClass) {
         char* error = OsGetLastErrorStr();
-        CGxDevice::Log("CGxDeviceD3d11::DeviceCreate(): WindowClassCreate() failed: %s", error);
+        D3d11Log("CGxDeviceD3d11::DeviceCreate(): WindowClassCreate() failed: %s", error);
         OsFreeLastErrorStr(error);
         this->DeviceDestroy();
         return 0;
@@ -530,7 +543,7 @@ int32_t CGxDeviceD3d11::ICreateD3d() {
 }
 
 int32_t CGxDeviceD3d11::DeviceSetFormat(const CGxFormat& format) {
-    CGxDevice::Log("CGxDeviceD3d11::DeviceSetFormat():");
+    D3d11Log("CGxDeviceD3d11::DeviceSetFormat():");
     this->Log(format);
 
     if (this->m_hwnd) {
@@ -553,7 +566,7 @@ int32_t CGxDeviceD3d11::DeviceSetFormat(const CGxFormat& format) {
         return 1;
     }
 
-    CGxDevice::Log("CGxDeviceD3d11::DeviceSetFormat(): unable to set format!");
+    D3d11Log("CGxDeviceD3d11::DeviceSetFormat(): unable to set format!");
     this->IDestroyD3d();
 
     if (this->m_hwnd) {
@@ -566,9 +579,16 @@ int32_t CGxDeviceD3d11::DeviceSetFormat(const CGxFormat& format) {
 }
 
 void CGxDeviceD3d11::DeviceDestroy() {
+    D3d11Log("CGxDeviceD3d11::DeviceDestroy(): begin");
     CGxDevice::DeviceDestroy();
+    D3d11Log("CGxDeviceD3d11::DeviceDestroy(): CGxDevice::DeviceDestroy done");
+
+    // Not in 4.3.4's order: leave fullscreen while the window still exists. DXGI drives the mode change through the
+    // focus window's messages, so doing it after DestroyWindow (as IDestroyD3d would) can block forever.
+    this->ILeaveFullscreen();
 
     if (this->m_hwnd && this->m_ownhwnd) {
+        D3d11Log("CGxDeviceD3d11::DeviceDestroy(): DestroyWindow");
         DestroyWindow(this->m_hwnd);
         this->m_hwnd = nullptr;
     }
@@ -579,7 +599,19 @@ void CGxDeviceD3d11::DeviceDestroy() {
     }
 
     this->IDestroyD3d();
+    D3d11Log("CGxDeviceD3d11::DeviceDestroy(): unload d3d11/dxgi");
     CGxDeviceD3d11::IUnloadD3dLib(this->m_d3dLib, this->m_dxgiLib, this->m_dxgiFactory);
+    D3d11Log("CGxDeviceD3d11::DeviceDestroy(): end");
+}
+
+void CGxDeviceD3d11::ILeaveFullscreen() {
+    BOOL fullscreen = FALSE;
+
+    if (this->m_swapChain && SUCCEEDED(this->m_swapChain->GetFullscreenState(&fullscreen, nullptr)) && fullscreen) {
+        D3d11Log("CGxDeviceD3d11: SetFullscreenState(FALSE) begin");
+        HRESULT hr = this->m_swapChain->SetFullscreenState(FALSE, nullptr);
+        D3d11Log("CGxDeviceD3d11: SetFullscreenState(FALSE) end: 0x%08X", static_cast<uint32_t>(hr));
+    }
 }
 
 // 4.3.4 FUN_00853EE0: adapter 0 from the factory, FL {11_0, 10_1, 10_0}, single-threaded; one dynamic cbuffer per
@@ -588,7 +620,7 @@ int32_t CGxDeviceD3d11::ICreateD3dDevice(const CGxFormat& format) {
     IDXGIAdapter1* adapter = nullptr;
 
     if (FAILED(this->m_dxgiFactory->EnumAdapters1(0, &adapter))) {
-        CGxDevice::Log("CGxDeviceD3d11: no adapter");
+        D3d11Log("CGxDeviceD3d11: no adapter");
         return 0;
     }
 
@@ -598,13 +630,13 @@ int32_t CGxDeviceD3d11::ICreateD3dDevice(const CGxFormat& format) {
     adapter->Release();
 
     if (FAILED(hr)) {
-        CGxDevice::Log("CGxDeviceD3d11: D3D11CreateDevice failed: 0x%08X", static_cast<uint32_t>(hr));
+        D3d11Log("CGxDeviceD3d11: D3D11CreateDevice failed: 0x%08X", static_cast<uint32_t>(hr));
         this->m_d3dDevice = nullptr;
         this->m_d3dContext = nullptr;
         return 0;
     }
 
-    CGxDevice::Log("CGxDeviceD3d11: feature level 0x%X", static_cast<uint32_t>(this->m_featureLevel));
+    D3d11Log("CGxDeviceD3d11: feature level 0x%X", static_cast<uint32_t>(this->m_featureLevel));
 
     DXGI_SWAP_CHAIN_DESC desc;
     memset(&desc, 0, sizeof(desc));
@@ -650,7 +682,7 @@ int32_t CGxDeviceD3d11::ICreateD3dDevice(const CGxFormat& format) {
     desc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
 
     if (FAILED(this->m_dxgiFactory->CreateSwapChain(this->m_d3dDevice, &desc, &this->m_swapChain))) {
-        CGxDevice::Log("CGxDeviceD3d11: CreateSwapChain failed");
+        D3d11Log("CGxDeviceD3d11: CreateSwapChain failed");
         this->m_swapChain = nullptr;
         return 0;
     }
@@ -708,6 +740,17 @@ int32_t CGxDeviceD3d11::ICreateD3dDevice(const CGxFormat& format) {
 }
 
 void CGxDeviceD3d11::IDestroyD3d() {
+    D3d11Log("CGxDeviceD3d11::IDestroyD3d(): begin (device %p, swap chain %p)", this->m_d3dDevice, this->m_swapChain);
+
+    // 4.3.4 order: ClearState + Flush first, so nothing the releases below drop is still bound or queued.
+    if (this->m_d3dContext) {
+        this->m_d3dContext->ClearState();
+        this->m_d3dContext->Flush();
+        D3d11Log("CGxDeviceD3d11::IDestroyD3d(): ClearState + Flush done");
+    }
+
+    this->ILeaveFullscreen();
+
     for (uint32_t i = 0; i < 2; i++) {
         if (CGxDevice::s_uiVertexShader[i]) {
             g_theGxDevicePtr->ShaderDestroy(CGxDevice::s_uiVertexShader[i]);
@@ -718,10 +761,13 @@ void CGxDeviceD3d11::IDestroyD3d() {
         g_theGxDevicePtr->ShaderDestroy(CGxDevice::s_uiPixelShader);
     }
 
+    D3d11Log("CGxDeviceD3d11::IDestroyD3d(): UI shaders released");
     this->ICursorDestroy();
     this->ITexForceRecreation(1);
+    D3d11Log("CGxDeviceD3d11::IDestroyD3d(): cursor + textures released");
     this->IReleaseD3dPools(1);
     this->IReleaseD3dQueries();
+    D3d11Log("CGxDeviceD3d11::IDestroyD3d(): pools + queries released");
 
     if (this->m_d3dContext) {
         this->m_d3dContext->ClearState();
@@ -733,14 +779,23 @@ void CGxDeviceD3d11::IDestroyD3d() {
     this->IStateRelease();
     SafeRelease(this->m_fanIndexBuffer);
     this->m_fanIndexBufferSize = 0;
-
-    if (this->m_swapChain) {
-        this->m_swapChain->SetFullscreenState(FALSE, nullptr);
-    }
+    D3d11Log("CGxDeviceD3d11::IDestroyD3d(): back buffer, constant buffers, state objects released");
 
     SafeRelease(this->m_swapChain);
+    D3d11Log("CGxDeviceD3d11::IDestroyD3d(): swap chain released");
+
+    if (this->m_d3dContext) {
+        this->m_d3dContext->Flush();
+    }
+
     SafeRelease(this->m_d3dContext);
-    SafeRelease(this->m_d3dDevice);
+    D3d11Log("CGxDeviceD3d11::IDestroyD3d(): context released");
+
+    if (this->m_d3dDevice) {
+        ULONG refs = this->m_d3dDevice->Release();
+        this->m_d3dDevice = nullptr;
+        D3d11Log("CGxDeviceD3d11::IDestroyD3d(): device released (%u references left)", static_cast<uint32_t>(refs));
+    }
 
     memset(this->m_curVertexBuf, 0, sizeof(this->m_curVertexBuf));
     this->m_curIndexBuf = nullptr;
@@ -1150,7 +1205,7 @@ void CGxDeviceD3d11::ScenePresent() {
         HRESULT hr = this->m_swapChain->Present(interval, 0);
 
         if (FAILED(hr)) {
-            CGxDevice::Log("CGxDeviceD3d11::ScenePresent(): Present failed: 0x%08X", static_cast<uint32_t>(hr));
+            D3d11Log("CGxDeviceD3d11::ScenePresent(): Present failed: 0x%08X", static_cast<uint32_t>(hr));
 
             // 4.3.4: 0x00870310/0x1405A5E80 rebuilds the device on DEVICE_REMOVED/RESET (TDR, driver update) instead
             // of going dark for good. Our IDestroyD3d keeps the window and factory, so only the device is rebuilt.
@@ -1703,7 +1758,7 @@ static int32_t D3d11Debug() {
 
     if (!cvar) {
         cvar = CVar::Register("d3d11Debug", "D3D11: 1 constants every draw, 2 skip SM2 draws, 3 sun occlusion 0, 4 unset constants 0", 0, "0", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
-        CGxDevice::Log("CGxDeviceD3d11: d3d11Debug modes: 0 off, 1 re-upload both constant buffers every draw, 2 skip draws with an SM2 (ps_2_0/vs_2_0: FFX, weather) shader, 3 occlusion queries return 0 pixels (no sun glare dimming), 4 never-set constant registers read 0 instead of FLT_MAX");
+        D3d11Log("CGxDeviceD3d11: d3d11Debug modes: 0 off, 1 re-upload both constant buffers every draw, 2 skip draws with an SM2 (ps_2_0/vs_2_0: FFX, weather) shader, 3 occlusion queries return 0 pixels (no sun glare dimming), 4 never-set constant registers read 0 instead of FLT_MAX");
     }
 
     return cvar ? cvar->m_intValue : 0;
@@ -1778,7 +1833,7 @@ void CGxDeviceD3d11::IStateRelease() {
 
     this->m_stateCache.clear();
 
-    for (uint32_t i = 0; i < 48; i++) {
+    for (uint32_t i = 0; i < sizeof(this->m_ffVs) / sizeof(this->m_ffVs[0]); i++) {
         SafeRelease(this->m_ffVs[i]);
     }
 
@@ -1826,7 +1881,7 @@ ID3D11DeviceChild* CGxDeviceD3d11::IStateGet(uint32_t kind, const void* desc, ui
     }
 
     if (FAILED(hr)) {
-        CGxDevice::Log("CGxDeviceD3d11: state object %u creation failed (0x%08X)", kind, static_cast<uint32_t>(hr));
+        D3d11Log("CGxDeviceD3d11: state object %u creation failed (0x%08X)", kind, static_cast<uint32_t>(hr));
         object = nullptr;
     }
 
@@ -1892,7 +1947,7 @@ void CGxDeviceD3d11::IStateSyncInputLayout() {
     } else {
         // A VS reading an attribute the decl lacks fails here (D3D9 fed it defaults); the failure is cached as null.
         if (!this->m_curVsCode || FAILED(this->m_d3dDevice->CreateInputLayout(elements, count, this->m_curVsCode, this->m_curVsCodeSize, &layout))) {
-            CGxDevice::Log("CGxDeviceD3d11: CreateInputLayout failed (mask 0x%X)", this->m_primVertexMask);
+            D3d11Log("CGxDeviceD3d11: CreateInputLayout failed (mask 0x%X)", this->m_primVertexMask);
             layout = nullptr;
         }
 
@@ -2176,15 +2231,20 @@ bool CGxDeviceD3d11::IStateSyncShaders() {
     uint32_t vsCodeSize;
 
     if (ffVs) {
-        uint32_t index = FfSelectVs(this->m_primVertexMask, lighting || ambientOnly);
+        // D3D9's FF VS passes every texcoord set through; the FFX Box4/Gauss4/GlowWave quads read TEXCOORD2/3 in
+        // their ps_2_0, which the 2-texcoord permutations left at 0 (two of four blur taps on texel 0,0, so the
+        // glow took the colour of one corner pixel: sky towards the sun).
+        int32_t t34 = FfSelectVsT34(this->m_primVertexMask, lighting || ambientOnly);
+        const FfBlob& blob = t34 >= 0 ? g_ffVsT34[t34] : g_ffVs[FfSelectVs(this->m_primVertexMask, lighting || ambientOnly)];
+        uint32_t index = t34 >= 0 ? 48 + t34 : FfSelectVs(this->m_primVertexMask, lighting || ambientOnly);
 
         if (!this->m_ffVs[index]) {
-            this->m_d3dDevice->CreateVertexShader(g_ffVs[index].data, g_ffVs[index].size, nullptr, &this->m_ffVs[index]);
+            this->m_d3dDevice->CreateVertexShader(blob.data, blob.size, nullptr, &this->m_ffVs[index]);
         }
 
         vsObject = this->m_ffVs[index];
-        vsCode = g_ffVs[index].data;
-        vsCodeSize = static_cast<uint32_t>(g_ffVs[index].size);
+        vsCode = blob.data;
+        vsCodeSize = static_cast<uint32_t>(blob.size);
     } else {
         vsObject = vs->m_apiSpecific;
         vsCode = vs->m_code.m_data;
@@ -2539,7 +2599,7 @@ void CGxDeviceD3d11::Draw(CGxBatch* batch, int32_t count) {
             }
 
             if (!found->second.empty() && found->second[0] != '*') {
-                CGxDevice::Log("CGxDeviceD3d11: first draw with SM2 shader %s", found->second.c_str());
+                D3d11Log("CGxDeviceD3d11: first draw with SM2 shader %s", found->second.c_str());
                 found->second.insert(0, "*");
             }
 
@@ -3260,9 +3320,16 @@ bool CGxDeviceD3d11::QueryGetData(CGxQuery* query, uint32_t& data) {
     UINT64 samples = 0;
     HRESULT hr;
 
+    // Bounded: an unbounded S_FALSE spin hangs if the GPU work never retires (lost device, teardown).
+    DWORD start = GetTickCount();
+
     do {
         hr = this->m_d3dContext->GetData(d3dQuery, &samples, sizeof(samples), 0);
-    } while (hr == S_FALSE);
+    } while (hr == S_FALSE && GetTickCount() - start < 100);
+
+    if (hr != S_OK) {
+        return false;
+    }
 
     data = D3d11Debug() == 3 ? 0 : static_cast<uint32_t>(samples);
 
@@ -3303,7 +3370,7 @@ void CGxDeviceD3d11::IShaderCreate(CGxShader* shader) {
 
         if (!s_logged) {
             s_logged = 1;
-            CGxDevice::Log("CGxDeviceD3d11: shader without DXBC body; is the translated pack (vs_4_0 / ps_4_0) installed?");
+            D3d11Log("CGxDeviceD3d11: shader without DXBC body; is the translated pack (vs_4_0 / ps_4_0) installed?");
         }
 
         return;
@@ -3336,7 +3403,7 @@ void CGxDeviceD3d11::ShaderCreate(CGxShader** shaders, EGxShTarget target, const
     // back to fixed function. Name every one, not just the first.
     for (uint32_t i = 0; i < permutations; i++) {
         if (shaders[i]->m_code.Count() < 4 || memcmp(shaders[i]->m_code.m_data, "DXBC", 4)) {
-            CGxDevice::Log("CGxDeviceD3d11: no DXBC for %s\\%s.bls permutation %u of %u", path, name, i, permutations);
+            D3d11Log("CGxDeviceD3d11: no DXBC for %s\\%s.bls permutation %u of %u", path, name, i, permutations);
         }
     }
 
