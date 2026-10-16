@@ -1112,12 +1112,11 @@ void CGxDeviceD3d11::IBindRenderTargets() {
     this->m_d3dContext->PSSetShaderResources(0, 16, noSrvs);
     memset(this->m_curSrv, 0, sizeof(this->m_curSrv));
 
-    this->m_curRtv = rtv;
-    this->m_curDsv = dsv;
-
-    // Diagnostic (glue-shadow): D3D11 drops OMSetRenderTargets when the RTV and DSV sizes differ (D3D9 accepted a
-    // larger depth surface), leaving the previous targets bound while m_curRtv/m_curDsv say otherwise.
-    if (rtv && dsv) {
+    // A depth texture (shadow map) whose size or sample count differs from the colour target: bind depth-only.
+    // D3D11 rejects mismatched RTV/DSV pairs outright (D3D9 accepted a larger depth), which left the previous
+    // targets bound and let the shadow clears/draws land on them. The viewport already follows the depth
+    // texture through m_curWindowRect (CGxDevice::DeviceSetRenderTarget).
+    if (rtv && dsv && this->m_textureTarget[GxBuffers_Depth].m_apiSpecific) {
         ID3D11Resource* r = nullptr;
         ID3D11Resource* d = nullptr;
         rtv->GetResource(&r);
@@ -1126,14 +1125,23 @@ void CGxDeviceD3d11::IBindRenderTargets() {
         D3D11_TEXTURE2D_DESC dd;
         static_cast<ID3D11Texture2D*>(r)->GetDesc(&rd);
         static_cast<ID3D11Texture2D*>(d)->GetDesc(&dd);
-
-        if (rd.Width != dd.Width || rd.Height != dd.Height || rd.SampleDesc.Count != dd.SampleDesc.Count) {
-            D3d11Log("CGxDeviceD3d11: RTV %ux%u x%u / DSV %ux%u x%u mismatch (color tex %p, depth tex %p): bind dropped", rd.Width, rd.Height, rd.SampleDesc.Count, dd.Width, dd.Height, dd.SampleDesc.Count, static_cast<void*>(this->m_textureTarget[GxBuffers_Color].m_texture), static_cast<void*>(this->m_textureTarget[GxBuffers_Depth].m_texture));
-        }
-
         r->Release();
         d->Release();
+
+        if (rd.Width != dd.Width || rd.Height != dd.Height || rd.SampleDesc.Count != dd.SampleDesc.Count) {
+            static bool logged = false;
+
+            if (!logged) {
+                logged = true;
+                D3d11Log("CGxDeviceD3d11: RTV %ux%u x%u / DSV %ux%u x%u mismatch: binding depth-only (logged once)", rd.Width, rd.Height, rd.SampleDesc.Count, dd.Width, dd.Height, dd.SampleDesc.Count);
+            }
+
+            rtv = nullptr;
+        }
     }
+
+    this->m_curRtv = rtv;
+    this->m_curDsv = dsv;
 
     this->m_d3dContext->OMSetRenderTargets(rtv ? 1 : 0, rtv ? &rtv : nullptr, dsv);
 }
