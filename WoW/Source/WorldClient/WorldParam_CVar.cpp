@@ -11,6 +11,7 @@
 #include "WoW/Source/WorldClient/Map.h"
 #include "WoW/Source/WorldClient/Types.h"
 #include "WoW/Source/WorldClient/World.h"
+#include "WoW/Source/WorldClient/OcclusionCull.h"
 #include "Engine/Source/ConsoleBase/ConsoleVar.h"
 #include "Engine/Source/ConsoleBase/IConsole.h"
 #include "Engine/Source/Storm/H/storm.h"
@@ -641,6 +642,8 @@ void CWorldParam::Initialize() {
     CWorldParam::cvar_bspCache = CVar::Register("bspcache", "BSP node caching", 1, "1", CWorldParam::BspCacheCallback, CATEGORY_GRAPHICS, false, nullptr, false);
     CWorldParam::cvar_footstepBias = CVar::Register("footstepBias", "Unit footstep depth bias", 1, "0.125", CWorldParam::FootstepBiasCallback, CATEGORY_GRAPHICS, false, nullptr, false);
     CWorldParam::cvar_occlusion = CVar::Register("occlusion", "Use hardware occlusion test", 1, "1", CWorldParam::HardwareOcclusionCallback, CATEGORY_GRAPHICS, false, nullptr, false);
+    // OCCLUSION: GPU occlusion culling of WMO groups and doodads (Vulkan only; 0 = stock culling).
+    OcclusionCull::s_cvar = CVar::Register("occlusionCulling", "GPU occlusion culling of WMO groups and doodads (Vulkan)", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     CWorldParam::cvar_worldPoolUsage = CVar::Register("worldPoolUsage", "CGxPool usage static/dynamic", 1, "Dynamic", CWorldParam::WorldPoolUsageCallback, CATEGORY_GRAPHICS, false, nullptr, false);
     CWorldParam::cvar_terrainAlphaBitDepth = CVar::Register("terrainAlphaBitDepth", "Terrain alpha map bit depth", 1, "8", CWorldParam::TerrainAlphaBitDepthCallback, CATEGORY_GRAPHICS, false, nullptr, false);
     CWorldParam::cvar_groundEffectDensity = CVar::Register("groundEffectDensity", "Ground effect density", 1, "16", CWorldParam::GroundEffectDensityCallback, CATEGORY_GRAPHICS, false, nullptr, false);
