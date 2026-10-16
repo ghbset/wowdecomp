@@ -1,16 +1,19 @@
 #include "UnitSound_C.h"
 #include "Engine/Source/ConsoleBase/ConsoleVar.h"
+#include "Engine/Source/Model2/M2Model.h"
 #include "Engine/Source/Services/SysMessage.h"
-#include "Engine/Source/Storm/H/stpl.h"
 #include "Engine/Source/Storm/H/storm.h"
+#include "Engine/Source/Storm/H/stpl.h"
 #include "Engine/Source/Tempest/CRandom.h"
+#include "WoW/Source/DB/DBClient/CreatureStats_C.h"
 #include "WoW/Source/DB/DBClient/DBClient.h"
 #include "WoW/Source/Object/ObjectClient/Player_C.h"
-#include "WoW/Source/Object/ObjectClient/Unit_C.h"
 #include "WoW/Source/Object/ObjectClient/UnitCombat_C.h"
+#include "WoW/Source/Object/ObjectClient/Unit_C.h"
 #include "WoW/Source/Object/ObjectClient/VehiclePassenger_C.h"
 #include "WoW/Source/ObjectMgrClient/ObjectMgrClient.h"
 #include "WoW/Source/SoundInterface/SoundInterface2.h"
+#include "WoW/Source/Ui/GameUI.h"
 #include "WoW/Source/WorldClient/FrameTime.h"
 #include "WoW/Source/WorldClient/World.h"
 
@@ -25,6 +28,12 @@ static uint32_t s_lastStandSoundTime;
 
 // STATIC: 0x00CA12D8
 static TSFixedArray<DEATTHUDSOUNDINFO> s_deathThudSounds[5];
+
+// STATIC: 0x00ADB630
+static const float s_attachmentHeights[50] = { 1.0f, 1.0f, 1.0f, 1.5f, 1.5f, 1.8f, 1.8f, 0.5f, 0.5f, 1.0f, 1.0f, 2.0f, 1.5f, 1.0f, 1.0f, 1.0f, 1.0f, 2.0f, 2.5f, 0.0f, 2.0f, 1.5f, 1.5f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 3.0f, 1.5f, 1.5f, 1.0f, 1.0f, 1.5f, 1.0f, 1.0f, 2.5f, 1.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f };
+
+// STATIC: 0x00ADB674
+static float s_emoteSoundHeight = 2.0f;
 
 // INLINED
 inline DEATTHUDSOUNDINFO::DEATTHUDSOUNDINFO() : m_soundEntryId(0), m_soundEntryIdWater(0) {
@@ -200,7 +209,7 @@ void CGUnit_C::PlayDeathThud() {
 
 // VERIFY: 8792f0f0 auto
 // OFFSET: 0x007471A0
-void CGUnit_C::HandlePlayStandSound(uint32_t eventId, int32_t a3) {
+void CGUnit_C::HandlePlayStandSound(uint32_t eventId, int32_t unused_a3) {
     switch (eventId) {
         case 0x31444624:
             this->PlayFidgetSound(0);
@@ -301,4 +310,484 @@ void CGUnit_C::PlayUnitSound(uint32_t soundType, int32_t force) {
         properties.m_group = this->GetUnitSoundKitIndex(soundType);
         SI2::PlaySoundKit(soundKitId, &position, nullptr, &properties, 0, nullptr, 1, 0);
     }
+}
+
+// VERIFY: 12476da9 auto
+// OFFSET: 0x00746340
+void CGUnit_C::KillCreatureLoopSound() {
+    SI2::StopSound(&this->m_loopSound, 0, 0.5f, 1);
+}
+
+// VERIFY: f678b1e1 auto
+// OFFSET: 0x00746360
+bool CGUnit_C::GetWeaponSwingType(bool offhand, int32_t* swingType) const {
+    if (!this->GetVirtualItemDisplayID(offhand == false)) {
+        *swingType = 0;
+        return true;
+    }
+
+    const CGUnitVirtualItem* item = this->GetVirtualItem(offhand == false, false);
+
+    if (!item || item->m_classID != 2) {
+        return false;
+    }
+
+    const ItemSubClassRec* subClass = SDBItemSubclassGetSubClassRec(2, item->m_subclassID);
+
+    if (subClass) {
+        *swingType = subClass->m_weaponSwingSize;
+    }
+
+    return subClass != nullptr;
+}
+
+// VERIFY: f4e40cf7 auto
+// OFFSET: 0x007465E0
+void CGUnit_C::PlayStandSound() {
+    if (this->m_obj->m_guid != ClntObjMgrGetActivePlayer()) {
+        this->PlayUnitSound(5, 0);
+    }
+}
+
+// VERIFY: d0b7eaae manual
+// OFFSET: 0x00746720
+void CGUnit_C::PlaySplashSound(const C3Vector* position) {
+    static CVar* s_listenerAtCharacter = CVar::Lookup("Sound_ListenerAtCharacter");
+
+    int32_t activeMover;
+    int32_t listenerAtCharacter;
+
+    if (s_activeMover != this->m_obj->m_guid) {
+        activeMover = 0;
+        listenerAtCharacter = 0;
+    } else {
+        activeMover = 1;
+        listenerAtCharacter = s_listenerAtCharacter->m_intValue ? 1 : 0;
+    }
+
+    SE2SoundKitProperties properties;
+    properties.ResetToDefaults();
+
+    if (activeMover) {
+        properties.m_priority = 110;
+
+        if (listenerAtCharacter) {
+            properties.m_volumeScale = 0.64999998f;
+        }
+    }
+
+    properties.m_group = 8;
+    SI2::PlaySoundKit(this->m_splashSoundKitId, listenerAtCharacter ? nullptr : position, nullptr, &properties, 0, nullptr, 1, 0);
+}
+
+// VERIFY: 5cdf8669 auto
+// OFFSET: 0x00746900
+int32_t CGUnit_C::GetNewNPCSoundCount(int32_t count, int32_t* soundKitId, int32_t* soundIndex) const {
+    if (!this->m_displayInfo) {
+        return -1;
+    }
+
+    NPCSoundsRec* sounds = g_npcSoundsDB.GetRecord(this->m_displayInfo->m_npcsoundID);
+
+    if (!sounds || !sounds->m_soundID[0]) {
+        return -1;
+    }
+
+    if (count < 5) {
+        *soundKitId = sounds->m_soundID[0];
+        *soundIndex = -1;
+        return count + 1;
+    }
+
+    if (count - 5 < SI2::GetNumSoundsInSoundKit(sounds->m_soundID[2])) {
+        *soundIndex = count - 5;
+        *soundKitId = sounds->m_soundID[2];
+        return count + 1;
+    }
+
+    *soundKitId = sounds->m_soundID[0];
+    *soundIndex = -1;
+    return 0;
+}
+
+// VERIFY: e49e815c auto
+// OFFSET: 0x007469C0
+void CGUnit_C::PlayAISound(int32_t soundKitId) {
+    SI2::StopSound(&this->m_npcSound, 1, -1.0f, 1);
+
+    static CVar* s_listenerAtCharacter = CVar::Lookup("Sound_ListenerAtCharacter");
+
+    if (s_activeMover == this->m_obj->m_guid && s_listenerAtCharacter->m_intValue) {
+        SE2SoundKitProperties properties;
+        properties.ResetToDefaults();
+        properties.m_volumeScale = 0.64999998f;
+        properties.m_priority = 110;
+        SI2::PlaySoundKit(soundKitId, nullptr, &this->m_aiSound, &properties, 0, nullptr, 1, 0);
+    } else {
+        C3Vector position = this->GetPosition();
+        SI2::PlaySoundKit(soundKitId, &position, &this->m_aiSound, nullptr, 0, nullptr, 1, 0);
+        SI2::AttachToObject(&this->m_aiSound, this->m_obj->m_guid);
+    }
+}
+
+// VERIFY: 055965ad auto
+// OFFSET: 0x00746AD0
+void CGUnit_C::PlayEmoteStateSound(const C3Vector* position) {
+    EmotesRec* emote = g_emotesDB.GetRecord(this->m_unit->m_unitNpcEmotestate);
+
+    if (emote && emote->m_emoteSpecProc == 2) {
+        SI2::PlaySoundKit(emote->m_eventSoundID, position, nullptr, nullptr, 0, nullptr, 1, 0);
+    }
+}
+
+// VERIFY: 13e3e5f1 auto
+// OFFSET: 0x00746BD0
+C3Vector CGUnit_C::GetAttachmentPosition(uint32_t attachId, const C3Vector* offset) {
+    CM2Model* model = this->m_worldModel;
+
+    if (model && model->IsLoaded(0, 0) && model->HasAttachment(attachId)) {
+        if (!offset || (offset->x == 0.0f && offset->y == 0.0f && offset->z == 0.0f)) {
+            return model->GetAttachmentPosition(attachId);
+        }
+
+        return *offset * model->GetAttachmentWorldTransform(attachId);
+    }
+
+    C3Vector position(0.0f, 0.0f, 0.0f);
+
+    if (offset) {
+        position = *offset;
+    }
+
+    if (attachId <= 49) {
+        position.z = s_attachmentHeights[attachId] + position.z;
+    }
+
+    if (!offset || (offset->x == 0.0f && offset->y == 0.0f && offset->z == 0.0f)) {
+        C3Vector base = this->m_vehiclePassenger ? this->GetModelPosition() : this->GetPosition();
+        position.x = base.x + position.x;
+        position.y = base.y + position.y;
+        position.z = base.z + position.z;
+    } else {
+        position *= this->m_vehiclePassenger ? this->GetModelMatrix() : this->GetMatrix();
+    }
+
+    return position;
+}
+
+// VERIFY: 972d06e0 auto
+// OFFSET: 0x00747000
+void CGUnit_C::PlayTextEmoteSound(uint32_t emote, uint32_t emoteNum) {
+    CVar* cvar = CVar::Lookup("Sound_EnableEmoteSounds");
+
+    if (!cvar || !cvar->m_intValue) {
+        return;
+    }
+
+    if (!this->IsActivePlayer()) {
+        WOWGUID guid = this->m_obj->m_guid;
+
+        if (!CGGameUI::IsInParty(guid)) {
+            return;
+        }
+    }
+
+    int32_t soundKitId = SI2::GetTextEmoteSoundID(emote, this->GetDisplayRace(), this->GetVoiceSex());
+
+    if (this->IsShapeShifted()) {
+        SpellShapeshiftFormRec* form = g_spellShapeshiftFormDB.GetRecord(this->GetShapeshiftForm());
+
+        if (form && (form->m_flags & 0x1000)) {
+            return;
+        }
+    }
+
+    this->PlayEmoteSound(soundKitId, false, emoteNum);
+}
+
+// VERIFY: 9c20bca8 auto
+// OFFSET: 0x00746280
+int32_t CreatureSoundDataGetFidgetSound(const CreatureSoundDataRec* rec, uint32_t index) {
+    if (rec && index < 5) {
+        return rec->m_soundFidget[index];
+    }
+
+    return 0;
+}
+
+// VERIFY: 9a579a40 auto
+// OFFSET: 0x007462A0
+float CreatureSoundDataGetFidgetDelayMin(const CreatureSoundDataRec* rec) {
+    if (rec) {
+        return rec->m_fidgetDelaySecondsMin;
+    }
+
+    return 0.0f;
+}
+
+// VERIFY: e79c80f1 auto
+// OFFSET: 0x007462C0
+float CreatureSoundDataGetFidgetDelayMax(const CreatureSoundDataRec* rec) {
+    if (rec) {
+        return rec->m_fidgetDelaySecondsMax;
+    }
+
+    return 0.0f;
+}
+
+// VERIFY: b66560c6 auto
+// OFFSET: 0x007463E0
+uint32_t CGUnit_C::GetImpactType() const {
+    if (this->m_soundData && this->m_soundData->m_creatureImpactType < 4) {
+        return s_impactTypes[this->m_soundData->m_creatureImpactType];
+    }
+
+    return 0;
+}
+
+// VERIFY: 22593312 auto
+// OFFSET: 0x007464D0
+void CGUnit_C::PlayFoleySound() {
+    static CVar* s_enableArmorFoley = CVar::Lookup("Sound_EnableArmorFoleySoundForOthers");
+
+    if (s_enableArmorFoley && s_enableArmorFoley->m_intValue) {
+        C3Vector position = this->GetPosition();
+        SI2::PlayFoleySound(this->m_modelData->m_foleyMaterialID, &position, 0);
+    }
+}
+
+// VERIFY: 034a2c24 auto
+// OFFSET: 0x007467F0
+void CGUnit_C::CheckLoopSound() {
+    CreatureSoundDataRec* soundData = this->GetSoundData();
+
+    if (this->m_unit->m_unitFieldHealth > 0 && !(this->m_unit->m_unitFieldFlags2 & 0x1) && soundData && soundData->m_loopSoundID && !SI2::IsPlaying(&this->m_loopSound)) {
+        C3Vector position = this->GetPosition();
+
+        if (SI2::IsPlaying(&this->m_loopSound) || SI2::IsTooCloseToExistingSoundKit(soundData->m_loopSoundID, &position)) {
+            return;
+        }
+
+        SE2SoundKitProperties properties;
+        properties.ResetToDefaults();
+        properties.m_loopMode = 1;
+        properties.m_maxAudibleBehavior = 0;
+        properties.m_streaming = true;
+        SI2::PlaySoundKit(soundData->m_loopSoundID, &position, &this->m_loopSound, &properties, 0, nullptr, 1, 0);
+        SI2::AttachToObject(&this->m_loopSound, this->m_obj->m_guid);
+        return;
+    }
+
+    SI2::StopSound(&this->m_loopSound, 0, 0.5f, 1);
+}
+
+// VERIFY: c9c84a2c manual
+// OFFSET: 0x00746B30
+int32_t CGUnit_C::GetUnitSoundKitIndex(uint32_t soundType) const {
+    switch (soundType) {
+        case 0:
+        case 1:
+            return (this->m_creatureCacheEntry && (this->m_creatureCacheEntry->m_typeFlags & 0x20)) ? 15 : 9;
+
+        case 2:
+        case 3:
+        case 9:
+            return (this->m_creatureCacheEntry && (this->m_creatureCacheEntry->m_typeFlags & 0x20)) ? 16 : 11;
+
+        default:
+            return 0;
+    }
+}
+
+// VERIFY: bae0a2ba manual
+// OFFSET: 0x00746D60
+void CGUnit_C::PlayEmoteSound(int32_t soundKitId, bool checkCVars, int32_t fileIndex) {
+    if ((this->m_obj->m_type & TYPEMASK_PLAYER) && this->m_unit->m_unitFieldHealth <= 0) {
+        return;
+    }
+
+    if (checkCVars) {
+        static CVar* s_enableEmoteSounds = CVar::Lookup("Sound_EnableEmoteSounds");
+
+        if (!s_enableEmoteSounds || !s_enableEmoteSounds->m_intValue) {
+            return;
+        }
+
+        static CVar* s_enablePetSounds = CVar::Lookup("Sound_EnablePetSounds");
+
+        if (s_enablePetSounds && !s_enablePetSounds->m_intValue && this->m_unit->m_unitFieldPetnumber) {
+            return;
+        }
+    }
+
+    static CVar* s_listenerAtCharacter = CVar::Lookup("Sound_ListenerAtCharacter");
+    int32_t listenerAtCharacter = s_listenerAtCharacter->m_intValue;
+    int32_t local;
+    int32_t atCharacter;
+
+    if (CGUnit_C::s_activeMover != this->m_obj->m_guid && !this->IsActivePlayer()) {
+        local = 0;
+        atCharacter = 0;
+    } else {
+        local = 1;
+        atCharacter = listenerAtCharacter ? 1 : 0;
+    }
+
+    if ((this->m_obj->m_type & TYPEMASK_PLAYER) && static_cast<CGPlayer_C*>(this)->m_dance) {
+        return;
+    }
+
+    C3Vector position;
+    CM2Model* model = this->m_worldModel;
+
+    if (model && model->IsLoaded(0, 0) && model->HasAttachment(17)) {
+        position = model->GetAttachmentPosition(17);
+    } else {
+        C3Vector offset(0.0f, 0.0f, s_emoteSoundHeight);
+        C3Vector base = this->m_vehiclePassenger ? this->GetModelPosition() : this->GetPosition();
+        position = base + offset;
+    }
+
+    SE2SoundKitProperties properties;
+    properties.ResetToDefaults();
+    properties.m_fileIndex = fileIndex;
+    properties.m_suppressorMode = 2;
+
+    if (local) {
+        properties.m_priority = 110;
+
+        if (atCharacter) {
+            properties.m_volumeScale = 0.64999998f;
+        }
+    }
+
+    if (soundKitId != 6576 && this->m_unit->m_unitFieldBytes0[1] == 6) {
+        properties.m_useDspChain = 1;
+        SI2::DK_GetPlayerFilterName(this, properties.m_dspChainName, sizeof(properties.m_dspChainName));
+    }
+
+    SI2::PlaySoundKit(soundKitId, atCharacter ? nullptr : &position, &this->m_reactionSound, &properties, 0, nullptr, 1, 0);
+
+    if (!atCharacter) {
+        SI2::AttachToObject(&this->m_reactionSound, this->m_obj->m_guid);
+    }
+}
+
+// VERIFY: b56823a7 manual
+// OFFSET: 0x007470D0
+void CGUnit_C::PlayDismountSound() {
+    static CVar* s_listenerAtCharacter = CVar::Lookup("Sound_ListenerAtCharacter");
+
+    int32_t activeMover;
+    int32_t listenerAtCharacter;
+
+    if (s_activeMover != this->m_obj->m_guid) {
+        activeMover = 0;
+        listenerAtCharacter = 0;
+    } else {
+        activeMover = 1;
+        listenerAtCharacter = s_listenerAtCharacter->m_intValue ? 1 : 0;
+    }
+
+    C3Vector position = this->GetPosition();
+
+    SE2SoundKitProperties properties;
+    properties.ResetToDefaults();
+
+    if (activeMover) {
+        properties.m_priority = 110;
+
+        if (listenerAtCharacter) {
+            properties.m_volumeScale = 0.64999998f;
+        }
+    }
+
+    SI2::PlaySoundKit(s_dismountSoundKitId, listenerAtCharacter ? nullptr : &position, nullptr, &properties, 0, nullptr, 1, 0);
+}
+
+// VERIFY: 82755190 auto
+// OFFSET: 0x007474B0
+void CGUnit_C::OnAiReaction(int32_t reaction) {
+    if (reaction == 4 && this->m_creatureCacheEntry && (this->m_creatureCacheEntry->m_typeFlags & 0x1000000)) {
+        return;
+    }
+
+    if (!this->m_soundData || SI2::IsPlaying(&this->m_aiSound)) {
+        return;
+    }
+
+    SE2SoundKitObject* object = &this->m_npcSound;
+
+    if (SI2::IsPlaying(object) && reaction <= static_cast<int32_t>(this->m_reactionSoundPriority)) {
+        return;
+    }
+
+    this->m_reactionSoundPriority = reaction;
+    static CVar* s_enablePetSounds = CVar::Lookup("Sound_EnablePetSounds");
+    int32_t soundKitId;
+
+    switch (this->m_reactionSoundPriority) {
+    case 0:
+        if (s_enablePetSounds && !s_enablePetSounds->m_intValue && this->m_unit->m_unitFieldPetnumber) {
+            return;
+        }
+
+        soundKitId = this->m_soundData->m_soundAggroID;
+        break;
+
+    case 1:
+        if (s_enablePetSounds && !s_enablePetSounds->m_intValue && this->m_unit->m_unitFieldPetnumber) {
+            return;
+        }
+
+        soundKitId = this->m_soundData->m_soundPetOrderID;
+        break;
+
+    case 2:
+        if (s_enablePetSounds && !s_enablePetSounds->m_intValue && this->m_unit->m_unitFieldPetnumber) {
+            return;
+        }
+
+        soundKitId = this->m_soundData->m_soundPetAttackID;
+        break;
+
+    case 4:
+        soundKitId = this->m_soundData->m_soundDeathID;
+        break;
+
+    default:
+        return;
+    }
+
+    C3Vector position = this->GetAttachmentPosition(17, nullptr);
+    static CVar* s_listenerAtCharacter = CVar::Lookup("Sound_ListenerAtCharacter");
+    int32_t activeMover;
+    int32_t listenerAtCharacter;
+
+    if (CGUnit_C::s_activeMover == this->m_obj->m_guid) {
+        activeMover = 1;
+        listenerAtCharacter = s_listenerAtCharacter->m_intValue ? 1 : 0;
+    } else {
+        activeMover = 0;
+        listenerAtCharacter = 0;
+    }
+
+    SE2SoundKitProperties properties;
+    properties.ResetToDefaults();
+
+    if (activeMover) {
+        properties.m_priority = 110;
+        CGUnit_C* player = ClntObjMgrGetActivePlayerObj();
+
+        if (player && player->m_unit->m_unitFieldBytes0[1] == 6) {
+            properties.m_useDspChain = 1;
+            SI2::DK_GetPlayerFilterName(player, properties.m_dspChainName, sizeof(properties.m_dspChainName));
+        }
+
+        if (listenerAtCharacter) {
+            properties.m_volumeScale = 0.64999998f;
+        }
+    }
+
+    SI2::PlaySoundKit(soundKitId, listenerAtCharacter ? nullptr : &position, object, &properties, 0, nullptr, 1, 0);
 }
