@@ -929,7 +929,7 @@ void GxTeardownLog(const char* format, ...) {
     buffer[sizeof(buffer) - 1] = 0;
 
     if (CGxDevice::m_log) {
-        CGxDevice::Log("teardown: %s", buffer);
+        CGxDevice::Log("teardown: %s", static_cast<const char*>(buffer)); // char* would pick the va_list overload
         SLogFlush(CGxDevice::m_log);
         return;
     }
