@@ -258,6 +258,7 @@ namespace DayNight {
     void Update(int32_t reset, const C3Vector* cameraPos);
     void SetColors();
     void SetPlanets();
+    int32_t GetLightBody(C3Vector& toward, float& elevDeg);
     CImVector DarkenColor(CImVector color, float scale);
     float InterpTable(const C2Vector* table, uint32_t count, float t);
     void SetOverrideFog(float startScalar, float end, CImVector color, int32_t showSky);

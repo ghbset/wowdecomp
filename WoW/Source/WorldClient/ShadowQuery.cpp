@@ -5,6 +5,7 @@
 #include <cmath>
 #include "Engine/Source/Model2/M2Light.h"
 #include "Engine/Source/ShaderEffect/ShadowCache.h"
+#include "Engine/Source/Os/TimeManager.h"
 #include "WoW/Source/ObjectMgrClient/ObjectMgrClient.h"
 #include "WoW/Source/Object/ObjectClient/Object_C.h"
 #include "WoW/Source/UIUtil/Camera.h"
@@ -34,6 +35,9 @@
 #include "WoW/Source/WorldClient/MapObjGroup.h"
 #include "WoW/Source/WorldClient/CMapBaseObjLink.h"
 
+// Not stock: gfxSunShadows (wxl-light's Sun.cpp shadow_sun, made source).
+static CVar* s_cvSunShadows;
+
 // STATIC: 0x00D25300
 uint8_t CShadowQuery::s_stamp;
 
@@ -60,6 +64,7 @@ void CShadowQuery::Initialize() {
     g_shadowCull = CVar::Register("shadowCull", "enable shadow frustum culling", 0, "1", nullptr, CATEGORY_DEFAULT, false, nullptr, false);
     g_shadowScissor = CVar::Register("shadowScissor", "enable scissoring when rendering shadowmaps", 0, "1", nullptr, CATEGORY_DEFAULT, false, nullptr, false);
     g_shadowInstancing = CVar::Register("shadowInstancing", "enable instancing when rendering shadowmaps", 0, "1", nullptr, CATEGORY_DEFAULT, false, nullptr, false);
+    s_cvSunShadows = CVar::Register("gfxSunShadows", "Shadows fall from the sun or moon in the sky (0 = stock)", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
 
     CShadowCache::Initialize();
 }
@@ -97,21 +102,106 @@ static void GetViewerPosition(C3Vector* position) {
     }
 }
 
+// The shadow light: the sun or moon disc, kept between these elevations. Under the floor shadows run off to
+// infinity and the maps' fixed bias lets go of the ground; over the ceiling noon is flat.
+static const float kShadowMinElev = 12.0f, kShadowMaxElev = 70.0f;   // degrees
+// Degrees the light may move before the cached maps are redrawn, at 30 degrees up; scaled by sin^2 so a low sun
+// steps finer, never under kLatchFloor. (At 0.25 each step was a visible shift of every shadow, the user,
+// 2026-10-06; at 0.01 the light steps every two or three seconds by a twenty-fifth of that, which is the same
+// journey with nothing to see.)
+static const float kLatchStep = 0.01f, kLatchFloor = 0.004f;
+static const float kLatchJump = 5.0f;          // degrees: more than this at once (gfxDebugHour, the handover) is taken at once
+static const uint32_t kLatchWaitMs = 2000;     // a step waits for the near maps to finish, but not longer
+static C3Vector s_latch(0.0f, 0.0f, 1.0f);     // toward the light, as the shadow maps have it
+static int32_t s_haveLatch;
+static uint32_t s_latchMs;
+
+/// The direction the shadow maps' light travels this frame; false = the stock light.
+///
+/// Cached maps (shadow quality 3..4) are drawn for one direction and projected with whatever is stored now, so the
+/// stored direction moves in steps, and each step sends the idle maps round again (CShadowCache::s_bandRedraw).
+static bool SunShadowDir(C3Vector& out) {
+    if (!s_cvSunShadows || !s_cvSunShadows->m_intValue) {
+        s_haveLatch = 0;
+        return false;
+    }
+
+    C3Vector body;
+    float elev;
+
+    if (!DayNight::GetLightBody(body, elev)) {
+        return false;
+    }
+
+    // Toward the body, its elevation kept inside the floor and ceiling, its bearing as it is.
+    float clamped = elev < kShadowMinElev ? kShadowMinElev : (elev > kShadowMaxElev ? kShadowMaxElev : elev);
+    float el = clamped * 0.017453292f;
+    float h = std::sqrt(body.x * body.x + body.y * body.y);
+    C3Vector want(0.0f, 0.0f, 1.0f);
+
+    if (h > 1e-4f) {
+        want = C3Vector(body.x / h * std::cos(el), body.y / h * std::cos(el), std::sin(el));
+    }
+
+    EShadowMode mode = CShadowCache::GetShadowMode();
+    uint32_t now = OsGetAsyncTimeMs();
+    bool step = !s_haveLatch || mode >= SHADOW_VERY_HIGH;
+    bool jumped = false;
+    const CShadowBand* bands = CShadowCache::s_extShadowBands;
+
+    if (!step) {
+        // By the chord, not acos of the dot: a hundredth of a degree is under what a float's dot can tell from 1.
+        float dx = want.x - s_latch.x, dy = want.y - s_latch.y, dz = want.z - s_latch.z;
+        float moved = std::sqrt(dx * dx + dy * dy + dz * dz) * 57.29578f;
+        float s = want.z * want.z / 0.25f;   // sin^2 against 30 degrees
+        s = s < 0.1f ? 0.1f : (s > 1.0f ? 1.0f : s);
+        float threshold = kLatchStep * s > kLatchFloor ? kLatchStep * s : kLatchFloor;
+        bool idle = bands[0].m_updateCount == 0 && bands[1].m_updateCount == 0;
+        jumped = moved > kLatchJump;
+        step = jumped || (moved > threshold && (idle || now - s_latchMs > kLatchWaitMs));
+    }
+
+    if (step) {
+        bool first = !s_haveLatch;
+        s_latch = want;
+        s_haveLatch = 1;
+        s_latchMs = now;
+
+        if (mode > SHADOW_MEDIUM && mode < SHADOW_VERY_HIGH) {
+            for (uint32_t c = 0; c < 3; c++) {
+                // (after a jump, one caught half redrawn too: its finished tiles are for the old direction)
+                if (bands[c].m_updateCount == 0 || first || jumped) {
+                    CShadowCache::s_bandRedraw |= 1u << c;
+                }
+            }
+        }
+    }
+
+    out = C3Vector(-s_latch.x, -s_latch.y, -s_latch.z);
+    return true;
+}
+
 // VERIFY: aa0465cc auto
 // OFFSET: 0x007BB570
 void CShadowQuery::Update() {
     C3Vector direction = CMap::s_mapLight->m_light.m_dir;
     int32_t useCullFrustum = CWorldScene::frustumPortalView.m_maxViewDepth >= 0.0f || CWorldScene::s_unk_CD8778;
-    float z = direction.z * 5.0f;
 
-    if (z < -1.2f) {
-        z = -1.2f;
+    // gfxSunShadows: the true sun (or moon) direction instead of the world light steepened (z x5, clamped).
+    if (!SunShadowDir(direction)) {
+        direction = CMap::s_mapLight->m_light.m_dir;
+        float z = direction.z * 5.0f;
+
+        if (z < -1.2f) {
+            z = -1.2f;
+        }
+
+        float inv = 1.0f / std::sqrt(direction.y * direction.y + direction.x * direction.x + z * z);
+        direction.x = direction.x * inv;
+        direction.y = direction.y * inv;
+        direction.z = z * inv;
     }
 
-    float inv = 1.0f / std::sqrt(direction.y * direction.y + direction.x * direction.x + z * z);
-    direction.x = direction.x * inv;
-    direction.y = direction.y * inv;
-    direction.z = z * inv;
     CShadowCache::PreUpdate(direction);
     C3Vector viewer(0.0f, 0.0f, 0.0f);
     GetViewerPosition(&viewer);

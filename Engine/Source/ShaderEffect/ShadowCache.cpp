@@ -43,6 +43,9 @@ CTexture* CShadowCache::s_intDynShadow;
 // STATIC: 0x00D4314C
 int32_t CShadowCache::s_needsRebuild;
 
+// Not stock (gfxSunShadows): CShadowQuery::Update sets a band's bit when the sun has moved since it was drawn.
+uint32_t CShadowCache::s_bandRedraw;
+
 // STATIC: 0x00D43150
 uint32_t CShadowCache::s_shadowSize;
 
@@ -469,9 +472,13 @@ void CShadowCache::GatherBands(CShadowCacheQueryData& data, const C3Vector& pos,
                 float dy = band.m_lastPos.y - pos.y;
                 float dz = band.m_lastPos.z - pos.z;
 
-                if (dx * dx + dy * dy + dz * dz <= band.m_updateDistance) {
+                // (or the light has moved since it was drawn: the redraw goes into the back texture and is swapped
+                // in when done, so the map on screen stays whole throughout)
+                if (dx * dx + dy * dy + dz * dz <= band.m_updateDistance && !(CShadowCache::s_bandRedraw & (1u << i))) {
                     continue;
                 }
+
+                CShadowCache::s_bandRedraw &= ~(1u << i);
             }
 
             data.m_radius[i] = band.m_radius;
