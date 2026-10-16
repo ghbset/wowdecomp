@@ -42,7 +42,7 @@ reuses the D3D9 mode list.
   - `TexCopy`, equal-size `TexStretch`, `DeviceCopyTex` and `DeviceReadPixels` resolve MSAA first.
 - **Draw.**
   - Vertex streams (same grouping and strides as D3D9), the 16-bit index buffer, topology, and Draw/DrawIndexed.
-  - The draw uses base vertex 0, because stream offsets are always on (`caps.unk_0010 = 1`).
+  - The draw uses base vertex 0, because stream offsets are always on (`caps.m_streamOffset = 1`).
   - Triangle fans are rewritten as lists through a scratch IB. Indexed fans read the pool's CPU copy.
 - **Occlusion queries.** D3D11 occlusion queries.
 - **Caps.** Shader targets still report SM3 (vs 3, ps 4) so every client feature check matches D3D9; only the load path
