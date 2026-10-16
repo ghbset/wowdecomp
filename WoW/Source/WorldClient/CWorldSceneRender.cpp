@@ -23,6 +23,7 @@
 #include "WoW/Source/WorldClient/MapObjDef.h"
 #include "WoW/Source/WorldClient/MapRenderChunk.h"
 #include "WoW/Source/WorldClient/MapWeather.h"
+#include "WoW/Source/WorldClient/OcclusionCull.h"
 #include "WoW/Source/WorldClient/ShadowQuery.h"
 #include "WoW/Source/WorldClient/SortTable.h"
 #include "Engine/Source/Gx/CGxMatrixStack.h"
@@ -100,6 +101,8 @@ void CWorldScene::Render(const C3Vector& cameraPos, float time) {
 
     CWorldOcclusion::ClearVolumes();
     CWorldScene::AddWorldOccluders();
+    // OCCLUSION: last frames' query answers, read before this frame's culling.
+    OcclusionCull::BeginFrame();
 
     if (CWorldScene::s_viewerMapObjDef) {
         CWorldScene::s_cullPassStamp++;
@@ -196,6 +199,8 @@ void CWorldScene::Render(const C3Vector& cameraPos, float time) {
     CWorldScene::ApplyFogState();
     CWorldScene::RenderChunks();
     CWorldScene::RenderMapObjDefGroups();
+    // OCCLUSION: depth now holds terrain and WMO groups; test this frame's candidates against it.
+    OcclusionCull::IssueQueries();
     CWorldScene::RenderHorizon();
 
     if (CWorldScene::s_unk_ADF570.m_maxViewDepth >= 0.0f) {

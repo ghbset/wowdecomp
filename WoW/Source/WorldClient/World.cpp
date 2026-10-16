@@ -48,6 +48,7 @@
 #include "Engine/Source/Tempest/CiRect.h"
 #include "WoW/Common/AaBsp.h"
 #include "WoW/Source/Client.h"
+#include "WoW/Source/WorldClient/OcclusionCull.h"
 #include "WoW/Source/DB/DBClient/DBClient.h"
 #include "WoW/Source/DB/Rec/AreaTableRec.h"
 #include "WoW/Source/DB/Rec/LiquidMaterialRec.h"
@@ -3611,6 +3612,8 @@ void CWorldScene::CullDoodads(CSortEntry* entry, uint16_t fadeLevel) {
         if (visible) {
             doodadDef->m_culled = 0;
             visible = CWorldOcclusion::QueryBuffer(doodadDef->m_sphere.c, doodadDef->m_sphere.r, 0x10) < 2;
+            // OCCLUSION: GPU-occluded doodads take the culled branch (animation kept as stock does).
+            visible = visible && !OcclusionCull::IsOccluded(doodadDef, doodadDef->m_sphere);
         }
 
         if (visible) {
@@ -3876,7 +3879,8 @@ void CWorldScene::CullDoodadsExterior(TSList<CMapBaseObjLink, TSGetExplicitLink<
                     doodadDef->m_culled = 0;
                 }
 
-                if (!culled && CWorldOcclusion::QueryBuffer(doodadDef->m_sphere.c, doodadDef->m_sphere.r, 0x10) < 2) {
+                // OCCLUSION: GPU-occluded chunk doodads take the culled branch.
+                if (!culled && CWorldOcclusion::QueryBuffer(doodadDef->m_sphere.c, doodadDef->m_sphere.r, 0x10) < 2 && !OcclusionCull::IsOccluded(doodadDef, doodadDef->m_sphere)) {
                     CWorldScene::AddDoodadDefModelToModelScene(doodadDef);
                     CWorldScene::nDoodadsRendered++;
                 } else {
@@ -3942,6 +3946,11 @@ void CWorldScene::CullDoodadsInterior(TSList<CMapBaseObjLink, TSGetExplicitLink<
 
         for (CWFrustum* test = frustum; test; test = test->m_link.Next()) {
             if (test->Cull(doodadDef->m_sphere.c, doodadDef->m_sphere.r)) {
+                // OCCLUSION: GPU-occluded doodads seen through portals stay culled.
+                if (OcclusionCull::IsOccluded(doodadDef, doodadDef->m_sphere)) {
+                    break;
+                }
+
                 doodadDef->m_culled = 0;
 
                 if (interior) {
@@ -4066,7 +4075,9 @@ void CWorldScene::CullMapObjDefGroups(CSortEntry* entry, CRect* rect, uint32_t i
 
         CMapObjDef* mapObjDef = static_cast<CMapObjDef*>(group->m_parentLinkList.Head()->m_ref);
 
-        if (CWorldScene::frustumStack[CWorldScene::frustumIndex].Cull(group->m_bbox) && !CWorldOcclusion::QueryVolumes(&group->m_sphere) && !CWorldOcclusion::QueryBuffer(&group->m_bbox, 0)) {
+        // OCCLUSION: GPU-occluded exterior groups (never the viewer's own WMO) skip their portals and doodads too.
+        if (CWorldScene::frustumStack[CWorldScene::frustumIndex].Cull(group->m_bbox) && !CWorldOcclusion::QueryVolumes(&group->m_sphere) && !CWorldOcclusion::QueryBuffer(&group->m_bbox, 0)
+            && (mapObjDef == CWorldScene::s_viewerMapObjDef || !OcclusionCull::IsOccluded(group, group->m_bbox))) {
             mapObjDef->CullMapObjDefGroupFromExterior(group, rect, 0);
             CWorldScene::AddDoodadDefs(&group->m_doodadDefLinkList, index);
         }

@@ -19,8 +19,9 @@ namespace
     using gxvk::log::Error;
     using gxvk::vk::ResultName;
 
-    /// Queries the pool holds: the engine issues one (the sun glare).
-    constexpr uint32_t kMaxQueries = 64;
+    /// Queries the pool holds: the sun glare's one, plus up to 2048 for occlusion culling.
+    // OCCLUSION: raised from 64 for WoW/Source/WorldClient/OcclusionCull.cpp.
+    constexpr uint32_t kMaxQueries = 4096;
 
     struct Query
     {
