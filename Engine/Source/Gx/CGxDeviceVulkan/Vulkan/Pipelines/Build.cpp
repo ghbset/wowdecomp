@@ -188,7 +188,8 @@ namespace
      *
      *   FixedFunction, Ui        position at 0, colour at 1, texcoord 0 at 2, texcoord 1 at 3 (the
      *                            backend's interface)
-     *   FixedFunctionSemantic    position0 at 0, color0 at 2, texcoord0 at 4, texcoord1 at 5
+     *   FixedFunctionSemantic    position0 at 0, color0 at 2, texcoord0 at 4, texcoord1 at 5,
+ *                            texcoord2 at 8, texcoord3 at 9
      *   Translated               the record's declared inputs, each at its semantic's location, each
      *                            required of the vertex
      *
@@ -218,6 +219,8 @@ namespace
                 AddAttribute(k, in, 2, kAttribColor0, VK_FORMAT_B8G8R8A8_UNORM, kConstantColourOffset);
                 AddAttribute(k, in, 4, kAttribTexCoord0, VK_FORMAT_R32G32_SFLOAT, kConstantTexcoordOffset);
                 AddAttribute(k, in, 5, kAttribTexCoord1, VK_FORMAT_R32G32_SFLOAT, kConstantTexcoordOffset);
+                AddAttribute(k, in, 8, kAttribTexCoord1 + 1, VK_FORMAT_R32G32_SFLOAT, kConstantTexcoordOffset);
+                AddAttribute(k, in, 9, kAttribTexCoord1 + 2, VK_FORMAT_R32G32_SFLOAT, kConstantTexcoordOffset);
                 return true;
 
             case VertexProgram::Translated:
