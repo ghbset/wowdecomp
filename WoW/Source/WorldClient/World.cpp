@@ -1655,6 +1655,9 @@ void CWorld::Destroy() {
 
     CShadowCache::Destroy();
     CShadowQuery::FreeBuffers();
+    // Not stock: glue (char select/create, high elf screen) runs at the lowest shadow mode. Above it the D3D11 port drew
+    // glue models black after a world session; the CVar is untouched and Initialize below restores it on login.
+    CShadowCache::SetShadowMode(SHADOW_LOWEST);
 }
 
 // VERIFY: 7261c1de manual
@@ -1706,6 +1709,7 @@ void CWorld::Initialize() {
     CShaderEffectManager::AddEffectFile("Model2.wfx");
     CShaderEffectManager::AddEffectFile("Particle.wfx");
     CShaderEffectManager::AddEffectFile("ShadowMap.wfx");
+    CShadowCache::SetShadowMode(static_cast<EShadowMode>(CWorldParam::cvar_extShadowQuality->m_intValue));
     CShadowQuery::Initialize();
     CWorldScene::Initialize();
     CMap::Initialize();
