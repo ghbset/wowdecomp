@@ -3,6 +3,9 @@
 #include <cstdint>
 #include <vector>
 #include "Engine/Source/Model2/CM2SceneRender.h"
+#include "Engine/Source/ConsoleBase/ConsoleVar.h"
+#include "Engine/Source/ConsoleBase/Types.h"
+#include "Engine/Source/Gx/GxParticleQuads.h"
 #include "Engine/Source/Gx/CGxBuf.h"
 #include "Engine/Source/Gx/CGxDevice/CGxDevice.h"
 #include "Engine/Source/Gx/Gx.h"
@@ -37,6 +40,26 @@ static std::vector<int32_t> s_prebuiltAt;
 static std::vector<uint8_t> s_prebuiltData;
 static volatile LONG s_prebuiltNext;
 static uint32_t s_drawDepth;
+
+// GPUPARTICLES: CVar particleGpuQuads (default 1): M2 particle quads go to the Vulkan backend as one GxParticleQuad
+// record each and are expanded on the GPU; 0 builds the four vertices per quad on the CPU (stock). Other backends
+// always take the CPU path.
+static int32_t GpuQuadsOn() {
+    static CVar* cvar;
+
+    if (!cvar) {
+        cvar = CVar::Register("particleGpuQuads", "Vulkan: 1 expands M2 particle quads on the GPU, 0 builds them on the CPU", 0, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    }
+
+    return cvar->m_intValue && GxVkParticleQuadsReady();
+}
+
+// GPUPARTICLES: whether an emitter's quads may go to the GPU: a top level Draw, no model or projected particles, and
+// no more live particles than the stock 0x4000 vertex cap draws (over it the sort queue keeps the rest; stock path)
+static uint8_t GpuQuadsFor(CParticleEmitter2* emitter) {
+    uint32_t live = emitter->m_liveList.Count();
+    return s_drawDepth == 1 && !emitter->m_params.m_hasModel && !(emitter->m_flags & 0x40000) && emitter->m_vertsPerParticle && live <= 0x4000 / emitter->m_vertsPerParticle && GpuQuadsOn();
+}
 
 static void PrebuildThread(void*) {
     while (true) {
@@ -87,12 +110,13 @@ static void PrebuildParticles(CM2SceneRender* render, M2Element* elements, uint3
         prebuilt.m_data = nullptr;
         prebuilt.m_capacity = live * emitter->m_vertsPerParticle;
         prebuilt.m_vertexCount = 0;
+        prebuilt.m_quads = GpuQuadsFor(emitter);   // GPUPARTICLES: quad records
 
         s_prebuiltAt[i] = static_cast<int32_t>(s_prebuilt.size());
         s_prebuilt.push_back(prebuilt);
         offsets.push_back(bytes);
         particles += live;
-        bytes += prebuilt.m_capacity * GxVertexSize((emitter->m_params.m_materialFlags & 1) ? GxVBF_PNCT : GxVBF_PCT);
+        bytes += prebuilt.m_quads ? prebuilt.m_capacity / 4 * sizeof(GxParticleQuad) : prebuilt.m_capacity * GxVertexSize((emitter->m_params.m_materialFlags & 1) ? GxVBF_PNCT : GxVBF_PCT);
     }
 
     // Two workers must never build the same emitter, so an emitter listed twice sends the whole Draw down the stock path
@@ -925,7 +949,18 @@ uint32_t CM2SceneRender::DrawBatchedParticle(uint32_t index, M2Element* elements
     C44Matrix view = viewStack.m_mtx[viewStack.m_level];
     this->SetupBillboardView(*reinterpret_cast<const C3Vector*>(&this->m_scene->m_viewInv.d0));
 
-    CGxBuf* buf = g_theGxDevicePtr->BufStream(GxPoolTarget_Vertex, vertexSize, vertices);
+    // GPUPARTICLES: the whole batch writes quad records when every emitter of it may; else the stock vertices
+    uint8_t quads = 1;
+
+    for (uint32_t i = 0; i < batched; i++) {
+        quads &= GpuQuadsFor(elements[first[i]].m_emitter);
+    }
+
+    CParticleEmitter2::s_quads = quads;
+    const uint32_t itemSize = quads ? sizeof(GxParticleQuad) : vertexSize;
+    const uint32_t verticesPerItem = quads ? 4 : 1;
+
+    CGxBuf* buf = g_theGxDevicePtr->BufStream(GxPoolTarget_Vertex, itemSize, vertices / verticesPerItem);
     uint8_t* data = reinterpret_cast<uint8_t*>(g_theGxDevicePtr->BufLock(buf));
     uint32_t renderedVertices = 0;
     uint32_t renderedIndices = 0;
@@ -936,7 +971,7 @@ uint32_t CM2SceneRender::DrawBatchedParticle(uint32_t index, M2Element* elements
         emitter->Render(static_cast<const C44Matrix*>(this->m_curModel->m_frameOfReference), data, i == 0);
         CParticleEmitter2::s_prebuilt = nullptr;
         renderedVertices += emitter->m_renderedParticles * emitter->m_vertsPerParticle;
-        data += vertexSize * emitter->m_renderedParticles * emitter->m_vertsPerParticle;
+        data += itemSize * (emitter->m_renderedParticles * emitter->m_vertsPerParticle / verticesPerItem);
         renderedIndices += emitter->m_renderedParticles * emitter->m_indicesPerParticle;
     }
 
@@ -946,6 +981,8 @@ uint32_t CM2SceneRender::DrawBatchedParticle(uint32_t index, M2Element* elements
     if (renderedVertices && renderedIndices) {
         this->RenderBatchedParticle(emitter, buf, format, renderedVertices, renderedIndices);
     }
+
+    CParticleEmitter2::s_quads = 0;
 
     g_theGxDevicePtr->XformSetView(view);
 
@@ -997,7 +1034,9 @@ uint32_t CM2SceneRender::DrawParticle(uint32_t index, M2Element* elements, uint3
     this->SetupMaterial();
     this->SetupBillboardView(*reinterpret_cast<const C3Vector*>(&this->m_scene->m_viewInv.d0));
     CParticleEmitter2::s_prebuilt = PrebuiltAt(index);
+    CParticleEmitter2::s_quads = GpuQuadsFor(emitter);   // GPUPARTICLES: quad records
     emitter->Render(static_cast<const C44Matrix*>(this->m_curModel->m_frameOfReference), nullptr, 1);
+    CParticleEmitter2::s_quads = 0;
     CParticleEmitter2::s_prebuilt = nullptr;
     g_theGxDevicePtr->XformSetView(s_identity);
 

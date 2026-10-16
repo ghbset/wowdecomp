@@ -172,7 +172,8 @@ namespace {
 
         memory::Buffer& b = r.chunks[r.chunkCount];
 
-        if (!memory::CreateBuffer(r.size, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT, memory::Where::Stream, b) || !b.block.mapped) {
+        // GPUPARTICLES: STORAGE too, so the particle quad expansion can read records out of a vertex stream
+        if (!memory::CreateBuffer(r.size, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, memory::Where::Stream, b) || !b.block.mapped) {
             memory::DestroyBuffer(b);
 
             if (!g_loggedFail) {
