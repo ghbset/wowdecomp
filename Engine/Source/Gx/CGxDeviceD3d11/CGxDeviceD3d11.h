@@ -6,6 +6,7 @@
 #include <windows.h>
 #include <d3d11.h>
 #include <dxgi.h>
+#include <string>
 #include <unordered_map>
 #include "Engine/Source/Gx/CGxDevice/CGxDevice.h"
 #include "Engine/Source/Storm/H/stpl.h"
@@ -91,6 +92,8 @@ class CGxDeviceD3d11 : public CGxDevice {
     float m_ffConstants[2][53 * 4];
     ID3D11VertexShader* m_ffVs[48];
     ID3D11PixelShader* m_ffPs[3];
+    // d3d11Debug 2: shaders created from the SM2 (ps_2_0/vs_2_0) families, by family name.
+    std::unordered_map<const CGxShader*, std::string> m_sm2Shaders;
 
     virtual void ITexMarkAsUpdated(CGxTex* texId);
     virtual void IRsSendToHw(EGxRenderState which);
@@ -176,6 +179,7 @@ class CGxDeviceD3d11 : public CGxDevice {
     void ISetWindowFocus(int32_t focus);
     void IBindRenderTargets();
     void IShaderConstantsFlush();
+    void IShaderForget(CGxShader* shader);
     void IStateReset();
     void IStateRelease();
     ID3D11DeviceChild* IStateGet(uint32_t kind, const void* desc, uint32_t size);

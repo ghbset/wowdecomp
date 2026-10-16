@@ -1,9 +1,11 @@
+#include <cfloat>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include "Engine/Source/Gx/CGxDeviceD3d11/CGxDeviceD3d11.h"
 #include "Engine/Source/ConsoleBase/ConsoleVar.h"
+#include "Engine/Source/ConsoleBase/Types.h"
 #include "Engine/Source/Gx/CGxDeviceD3d11/FfShaders.h"
 #include "Engine/Source/Gx/Blit.h"
 #include "Engine/Source/Gx/CGxBuf.h"
@@ -1695,6 +1697,31 @@ static void UploadConstants(ID3D11DeviceContext* context, ID3D11Buffer* buffer, 
     }
 }
 
+// Live bisect switch for world-look differences against D3D9, read every draw.
+static int32_t D3d11Debug() {
+    static CVar* cvar;
+
+    if (!cvar) {
+        cvar = CVar::Register("d3d11Debug", "D3D11: 1 constants every draw, 2 skip SM2 draws, 3 sun occlusion 0, 4 unset constants 0", 0, "0", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+        CGxDevice::Log("CGxDeviceD3d11: d3d11Debug modes: 0 off, 1 re-upload both constant buffers every draw, 2 skip draws with an SM2 (ps_2_0/vs_2_0: FFX, weather) shader, 3 occlusion queries return 0 pixels (no sun glare dimming), 4 never-set constant registers read 0 instead of FLT_MAX");
+    }
+
+    return cvar ? cvar->m_intValue : 0;
+}
+
+// SM2 families of the pack (shader-xlate ba20c00): every one before that fell back to fixed function.
+static bool IsSm2Family(const char* name) {
+    static const char* s_names[] = { "FFXBox4", "FFXComposite", "FFXDeath", "FFXFogCombine", "FFXGauss4", "FFXGlow", "FFXGlowWave", "FFXNetherBlur", "FFXNetherCombine", "FFXPropagateFog", "FFXQuad", "patter", "rain", "sand", "snowpoint" };
+
+    for (const char* known : s_names) {
+        if (!SStrCmpI(name, known, STORM_MAX_STR)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 // D3D9 defaults (IStateSetD3DDefaults) and every render state re-sent, after device creation.
 void CGxDeviceD3d11::IStateReset() {
     memset(&this->m_rsDesc, 0, sizeof(this->m_rsDesc));
@@ -1878,11 +1905,24 @@ void CGxDeviceD3d11::IStateSyncInputLayout() {
 // Whole register file per dirty stage: a DISCARD map leaves the rest of the buffer undefined. (4.3.4 FUN_00871570
 // copies the bound shader's used range; ours are all 256 registers.)
 void CGxDeviceD3d11::IShaderConstantsFlush() {
+    int32_t debug = D3d11Debug();
+
     for (uint32_t stage = 0; stage < 2; stage++) {
         ShadowConstants& shadow = CGxDevice::s_shadowConstants[stage == 0 ? 1 : 0];
 
-        if (shadow.dirtyMin <= shadow.dirtyMax) {
-            UploadConstants(this->m_d3dContext, this->m_constantBuffers[stage], shadow.constants, sizeof(shadow.constants));
+        if (shadow.dirtyMin <= shadow.dirtyMax || debug == 1 || debug == 4) {
+            if (debug == 4) {
+                // CGxDevice seeds the shadow with FLT_MAX; D3D9 only ever uploads written ranges, so it never sees it.
+                static float s_clean[sizeof(shadow.constants) / sizeof(float)];
+
+                for (uint32_t i = 0; i < sizeof(s_clean) / sizeof(float); i++) {
+                    s_clean[i] = shadow.constants[i] == FLT_MAX ? 0.0f : shadow.constants[i];
+                }
+
+                UploadConstants(this->m_d3dContext, this->m_constantBuffers[stage], s_clean, sizeof(s_clean));
+            } else {
+                UploadConstants(this->m_d3dContext, this->m_constantBuffers[stage], shadow.constants, sizeof(shadow.constants));
+            }
         }
 
         shadow.dirtyMin = 255;
@@ -2487,6 +2527,27 @@ void CGxDeviceD3d11::Draw(CGxBatch* batch, int32_t count) {
     }
 
     this->IStateSync();
+
+    if (!this->m_sm2Shaders.empty()) {
+        const CGxAppRenderState* rs = this->m_appRenderStates.m_data;
+
+        for (const void* bound : { rs[GxRs_VertexShader].m_value.m_data.p, rs[GxRs_PixelShader].m_value.m_data.p }) {
+            auto found = bound ? this->m_sm2Shaders.find(static_cast<const CGxShader*>(bound)) : this->m_sm2Shaders.end();
+
+            if (found == this->m_sm2Shaders.end()) {
+                continue;
+            }
+
+            if (!found->second.empty() && found->second[0] != '*') {
+                CGxDevice::Log("CGxDeviceD3d11: first draw with SM2 shader %s", found->second.c_str());
+                found->second.insert(0, "*");
+            }
+
+            if (D3d11Debug() == 2) {
+                return;
+            }
+        }
+    }
 
     D3D11_PRIMITIVE_TOPOLOGY topology = s_primitiveConversion[batch->m_primType];
 
@@ -3203,7 +3264,7 @@ bool CGxDeviceD3d11::QueryGetData(CGxQuery* query, uint32_t& data) {
         hr = this->m_d3dContext->GetData(d3dQuery, &samples, sizeof(samples), 0);
     } while (hr == S_FALSE);
 
-    data = static_cast<uint32_t>(samples);
+    data = D3d11Debug() == 3 ? 0 : static_cast<uint32_t>(samples);
 
     return hr == S_OK;
 }
@@ -3282,10 +3343,30 @@ void CGxDeviceD3d11::ShaderCreate(CGxShader** shaders, EGxShTarget target, const
     if (permutations == 1 && !shaders[0]->m_loaded) {
         this->IShaderCreate(shaders[0]);
     }
+
+    if (IsSm2Family(name)) {
+        for (uint32_t i = 0; i < permutations; i++) {
+            this->m_sm2Shaders[shaders[i]] = name;
+        }
+    }
+}
+
+// The input-layout cache keys on the bound VS code pointer; a destroyed or reloaded shader's buffer can come back at
+// the same address with another input signature, so forget it.
+void CGxDeviceD3d11::IShaderForget(CGxShader* shader) {
+    if (shader->m_target == GxSh_Vertex && shader->m_code.m_data == this->m_curVsCode) {
+        this->m_curVsCode = nullptr;
+        this->m_curVsCodeSize = 0;
+        this->m_curLayoutKey = 0;
+    }
 }
 
 void CGxDeviceD3d11::ShaderDestroy(CGxShader*& shader) {
+    this->IShaderForget(shader);
+
     if (shader->m_refCount == 1) {
+        this->m_sm2Shaders.erase(shader);
+
         if (shader->m_apiSpecific) {
             static_cast<IUnknown*>(shader->m_apiSpecific)->Release();
             shader->m_apiSpecific = nullptr;
@@ -3301,6 +3382,8 @@ void CGxDeviceD3d11::IShaderReload(CGxShader* shader, const char* path, const ch
     if (shader->m_target != GxSh_Vertex && shader->m_target != GxSh_Pixel) {
         return;
     }
+
+    this->IShaderForget(shader);
 
     if (shader->m_refCount == 1) {
         if (shader->m_apiSpecific) {
