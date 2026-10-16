@@ -7,6 +7,8 @@
 #include <cstring>
 #include <cmath>
 #include "Engine/Source/Base/CDataAllocator.h"
+#include "Engine/Source/ConsoleBase/ConsoleVar.h"
+#include "Engine/Source/ConsoleBase/Types.h"
 #include "Engine/Source/Base/Handle.h"
 #include "Engine/Source/Base/ObjectAlloc.h"
 #include "Engine/Source/BlizzardCore/Source/Packages/Mopaq/SFile.h"
@@ -3221,6 +3223,7 @@ void CMapObj::DestroyPools() {
 // VERIFY: 45ac5b73 manual
 // OFFSET: 0x007ABAC0
 void CMapObj::RenderMapObjGroupsColor(CMapObjGroup** groups, uint32_t count, C44Matrix** matrices, const C44Matrix* world, int32_t* a5) {
+    static CVar* s_horizonStaticVB = CVar::Register("horizonStaticVB", "Engine option: draw horizon WMO silhouettes from static buffers", 0x1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     uint32_t color = static_cast<uint32_t>(*a5);
 
     if (g_theGxDevicePtr->Caps().m_colorFormat == GxCF_rgba) {
@@ -3246,24 +3249,35 @@ void CMapObj::RenderMapObjGroupsColor(CMapObjGroup** groups, uint32_t count, C44
             continue;
         }
 
-        CGxBuf* vertexBuf = g_theGxDevicePtr->BufStream(GxPoolTarget_Vertex, sizeof(CGxVertexPNC), group->m_vertexListCount);
-        CGxVertexPNC* vertex = reinterpret_cast<CGxVertexPNC*>(g_theGxDevicePtr->BufLock(vertexBuf));
+        if (s_horizonStaticVB->m_intValue) {
+            // Engine option: draw from the group's own static VB/IB, exactly as the near
+            // WMO pass does (refilled when !m_valid after device loss, freed by FreeVB after
+            // 5 s unused or on Clear). Its vertex colour is the baked one, not `color`, but the
+            // only caller (RenderHorizon) draws fog 0..1 so every pixel is the fog colour.
+            group->m_timer = 0.0f;
+            group->AllocVB();
+            group->SetIndexVB();
+            group->SetVertexVB();
+        } else {
+            CGxBuf* vertexBuf = g_theGxDevicePtr->BufStream(GxPoolTarget_Vertex, sizeof(CGxVertexPNC), group->m_vertexListCount);
+            CGxVertexPNC* vertex = reinterpret_cast<CGxVertexPNC*>(g_theGxDevicePtr->BufLock(vertexBuf));
 
-        for (int32_t j = 0; j < group->m_vertexListCount; j++) {
-            vertex->m_position = group->m_vertexList[j];
-            vertex->m_normal = group->m_normalList[j];
-            *reinterpret_cast<uint32_t*>(&vertex->m_color) = color;
-            vertex++;
+            for (int32_t j = 0; j < group->m_vertexListCount; j++) {
+                vertex->m_position = group->m_vertexList[j];
+                vertex->m_normal = group->m_normalList[j];
+                *reinterpret_cast<uint32_t*>(&vertex->m_color) = color;
+                vertex++;
+            }
+
+            g_theGxDevicePtr->BufUnlock(vertexBuf, 0);
+            vertexBuf->m_hasData = 1;
+            GxPrimVertexPtr(vertexBuf, GxVBF_PNC);
+            CGxBuf* indexBuf = g_theGxDevicePtr->BufStream(GxPoolTarget_Index, sizeof(uint16_t), group->m_indicesCount);
+            memcpy(g_theGxDevicePtr->BufLock(indexBuf), group->m_indices, sizeof(uint16_t) * group->m_indicesCount);
+            g_theGxDevicePtr->BufUnlock(indexBuf, 0);
+            indexBuf->m_hasData = 1;
+            g_theGxDevicePtr->PrimIndexPtr(indexBuf);
         }
-
-        g_theGxDevicePtr->BufUnlock(vertexBuf, 0);
-        vertexBuf->m_hasData = 1;
-        GxPrimVertexPtr(vertexBuf, GxVBF_PNC);
-        CGxBuf* indexBuf = g_theGxDevicePtr->BufStream(GxPoolTarget_Index, sizeof(uint16_t), group->m_indicesCount);
-        memcpy(g_theGxDevicePtr->BufLock(indexBuf), group->m_indices, sizeof(uint16_t) * group->m_indicesCount);
-        g_theGxDevicePtr->BufUnlock(indexBuf, 0);
-        indexBuf->m_hasData = 1;
-        g_theGxDevicePtr->PrimIndexPtr(indexBuf);
 
         if (group->m_unkLoadedFlag & 0x4) {
             GxRsSet(GxRs_Texture0, static_cast<void*>(nullptr));
