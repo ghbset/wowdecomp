@@ -4,7 +4,8 @@
 #include <cstring>
 #include <iterator>
 #include "Engine/Source/Gx/CGxDeviceVulkan/CGxDeviceVulkan.h"
-#include "Engine/Source/Gx/CGxDeviceVulkan/StubShaders.h"
+#include "Engine/Source/Gx/CGxDeviceVulkan/FfShadersSpv.h"
+#include "Engine/Source/ConsoleBase/ConsoleVar.h"
 #include "Engine/Source/Gx/Blit.h"
 #include "Engine/Source/Gx/CGxBuf.h"
 #include "Engine/Source/Gx/CGxPool.h"
@@ -49,7 +50,9 @@
     X(vkCmdClearAttachments) X(vkCmdSetViewport) X(vkCmdSetScissor) X(vkCmdBindPipeline) \
     X(vkCmdBindDescriptorSets) X(vkCmdBindVertexBuffers2) X(vkCmdBindIndexBuffer) X(vkCmdDraw) \
     X(vkCmdDrawIndexed) X(vkCmdSetPrimitiveTopology) X(vkCmdSetCullMode) X(vkCmdSetFrontFace) \
-    X(vkCmdSetDepthTestEnable) X(vkCmdSetDepthWriteEnable) X(vkCmdSetDepthCompareOp) X(vkCmdSetDepthBias)
+    X(vkCmdSetDepthTestEnable) X(vkCmdSetDepthWriteEnable) X(vkCmdSetDepthCompareOp) X(vkCmdSetDepthBias) \
+    X(vkCreatePipelineCache) X(vkDestroyPipelineCache) X(vkCreateSampler) X(vkDestroySampler) X(vkResetDescriptorPool) \
+    X(vkCmdClearColorImage) X(vkCmdSetBlendConstants)
 
 #define VK_DECLARE(name) static PFN_##name name;
 static PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr;
@@ -61,7 +64,7 @@ VK_DEVICE_FUNCS(VK_DECLARE)
 
 static const VkDeviceSize kBlockSize = 64 << 20;
 static const VkDeviceSize kStagingSize = 4 << 20;
-static const uint32_t kUboRingSize = 8 << 20;
+static const uint32_t kUboRingSize = 32 << 20;
 static const uint32_t kConstantBytes = 256 * 16;
 static const uint32_t kDeviceConstantBytes = 23 * 16;
 
@@ -148,6 +151,7 @@ CGxDeviceVulkan::CGxDeviceVulkan() {
         frame.m_uboHead = 0;
         frame.m_stagingHead = 0;
         frame.m_stagingCap = 0;
+        frame.m_texPool = 0;
     }
     this->m_frameSerial = kFrames; // serials below kFrames count as completed
     this->m_recording = false;
@@ -170,10 +174,21 @@ CGxDeviceVulkan::CGxDeviceVulkan() {
     this->m_descPool = VK_NULL_HANDLE;
     this->m_dummyUbo = VK_NULL_HANDLE;
     this->m_dummyUboAlloc = {};
-    this->m_stubVs = this->m_stubPs = VK_NULL_HANDLE;
+    memset(this->m_ffVs, 0, sizeof(this->m_ffVs));
+    memset(this->m_ffPs, 0, sizeof(this->m_ffPs));
+    this->m_curVs = this->m_curPs = nullptr;
+    this->m_pipelineCache = VK_NULL_HANDLE;
     this->m_curPipeline = VK_NULL_HANDLE;
-    memset(this->m_uboOffsets, 0, sizeof(this->m_uboOffsets));
-    memset(this->m_stubMvp, 0, sizeof(this->m_stubMvp));
+    memset(this->m_uboOffsets, 0xFF, sizeof(this->m_uboOffsets));
+    this->m_cbSource[0] = this->m_cbSource[1] = -1;
+    this->m_cbHigh[0] = this->m_cbHigh[1] = 0;
+    memset(this->m_devConstants, 0, sizeof(this->m_devConstants));
+    memset(this->m_ffConstants, 0, sizeof(this->m_ffConstants));
+    memset(this->m_blendFactor, 0, sizeof(this->m_blendFactor));
+    memset(&this->m_dummyImage, 0, sizeof(this->m_dummyImage));
+    this->m_curTexSet = VK_NULL_HANDLE;
+    memset(this->m_curViews, 0, sizeof(this->m_curViews));
+    memset(this->m_curSamplers, 0, sizeof(this->m_curSamplers));
     this->m_blendMode = 0;
     this->m_depthCompare = VK_COMPARE_OP_LESS_OR_EQUAL;
     this->m_depthWrite = true;
@@ -1068,7 +1083,12 @@ int32_t CGxDeviceVulkan::ICreateVkDevice(const CGxFormat& format) {
         }
     }
 
-    if (!this->ICreateBuffer(kConstantBytes, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true, this->m_dummyUbo, this->m_dummyUboAlloc)) {
+    // Zero buffer: GS cb0 and the zero-stride vertex binding for VS inputs the decl lacks.
+    if (!this->ICreateBuffer(kConstantBytes, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, true, this->m_dummyUbo, this->m_dummyUboAlloc)) {
+        return 0;
+    }
+
+    if (!this->ICreateImage(1, 1, 1, 1, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, false, this->m_dummyImage)) {
         return 0;
     }
 
@@ -1108,7 +1128,8 @@ int32_t CGxDeviceVulkan::ICreateVkDevice(const CGxFormat& format) {
     descPoolInfo.pPoolSizes = &poolSize;
     vkCreateDescriptorPool(this->m_vkDevice, &descPoolInfo, nullptr, &this->m_descPool);
 
-    // One set 0 per frame: binding 0 points into the frame's UBO ring, the rest at the zero buffer for now.
+    // One set 0 per frame: VS b0, PS b0 and cb1 point into the frame's UBO ring (dynamic offsets per draw), the GS
+    // cb0 at the zero buffer (no point-sprite GS yet, as D3D11).
     for (uint32_t f = 0; f < kFrames; f++) {
         VkDescriptorSetAllocateInfo allocInfo = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
         allocInfo.descriptorPool = this->m_descPool;
@@ -1118,8 +1139,8 @@ int32_t CGxDeviceVulkan::ICreateVkDevice(const CGxFormat& format) {
 
         VkDescriptorBufferInfo bufInfo[4] = {
             { this->m_frames[f].m_uboBuffer, 0, kConstantBytes },
-            { this->m_dummyUbo, 0, kConstantBytes },
-            { this->m_dummyUbo, 0, kDeviceConstantBytes },
+            { this->m_frames[f].m_uboBuffer, 0, kConstantBytes },
+            { this->m_frames[f].m_uboBuffer, 0, kDeviceConstantBytes },
             { this->m_dummyUbo, 0, kConstantBytes },
         };
         VkWriteDescriptorSet writes[4];
@@ -1136,13 +1157,17 @@ int32_t CGxDeviceVulkan::ICreateVkDevice(const CGxFormat& format) {
         vkUpdateDescriptorSets(this->m_vkDevice, supported.geometryShader ? 4 : 3, writes, 0, nullptr);
     }
 
-    VkShaderModuleCreateInfo moduleInfo = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
-    moduleInfo.codeSize = sizeof(g_stubVS);
-    moduleInfo.pCode = g_stubVS;
-    vkCreateShaderModule(this->m_vkDevice, &moduleInfo, nullptr, &this->m_stubVs);
-    moduleInfo.codeSize = sizeof(g_stubPS);
-    moduleInfo.pCode = g_stubPS;
-    vkCreateShaderModule(this->m_vkDevice, &moduleInfo, nullptr, &this->m_stubPs);
+    // ponytail: the pipeline cache lives in memory only; save it to disk if first-use hitches show up.
+    VkPipelineCacheCreateInfo cacheInfo = { VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO };
+    vkCreatePipelineCache(this->m_vkDevice, &cacheInfo, nullptr, &this->m_pipelineCache);
+
+    for (uint32_t i = 0; i < 48; i++) {
+        this->IShaderApiCreate(g_ffVsSpv[i].data, static_cast<uint32_t>(g_ffVsSpv[i].size), this->m_ffVs[i]);
+    }
+
+    for (uint32_t i = 0; i < 3; i++) {
+        this->IShaderApiCreate(g_ffPsSpv[i].data, static_cast<uint32_t>(g_ffPsSpv[i].size), this->m_ffPs[i]);
+    }
 
     this->m_format = format;
 
@@ -1172,6 +1197,22 @@ void CGxDeviceVulkan::IDestroyVk() {
     }
 
     this->ICursorDestroy();
+
+    // App shaders are recreated from their kept code (m_loaded = 0) on the next device.
+    for (uint32_t target : { GxSh_Vertex, GxSh_Pixel }) {
+        TSHashTable<CGxShader, HASHKEY_STRI>& list = this->m_shaderList[target];
+
+        for (CGxShader* shader = list.m_fulllist.Head(); shader; shader = list.m_fulllist.Next(shader)) {
+            if (shader->m_apiSpecific) {
+                this->IShaderApiRelease(*static_cast<ShaderApi*>(shader->m_apiSpecific));
+                delete static_cast<ShaderApi*>(shader->m_apiSpecific);
+                shader->m_apiSpecific = nullptr;
+            }
+
+            shader->m_loaded = 0;
+            shader->m_valid = 0;
+        }
+    }
 
     if (this->m_vkDevice) {
         if (this->m_recording) {
@@ -1205,8 +1246,25 @@ void CGxDeviceVulkan::IDestroyVk() {
         }
 
         this->m_pipelines.clear();
-        vkDestroyShaderModule(this->m_vkDevice, this->m_stubVs, nullptr);
-        vkDestroyShaderModule(this->m_vkDevice, this->m_stubPs, nullptr);
+
+        for (auto& entry : this->m_samplers) {
+            vkDestroySampler(this->m_vkDevice, entry.second, nullptr);
+        }
+
+        this->m_samplers.clear();
+
+        for (ShaderApi& api : this->m_ffVs) {
+            this->IShaderApiRelease(api);
+        }
+
+        for (ShaderApi& api : this->m_ffPs) {
+            this->IShaderApiRelease(api);
+        }
+
+        vkDestroyPipelineCache(this->m_vkDevice, this->m_pipelineCache, nullptr);
+        this->m_pipelineCache = VK_NULL_HANDLE;
+        this->IDestroyImage(this->m_dummyImage, false);
+        memset(&this->m_dummyImage, 0, sizeof(this->m_dummyImage));
         vkDestroyDescriptorPool(this->m_vkDevice, this->m_descPool, nullptr);
         vkDestroyPipelineLayout(this->m_vkDevice, this->m_pipelineLayout, nullptr);
         vkDestroyDescriptorSetLayout(this->m_vkDevice, this->m_setLayouts[0], nullptr);
@@ -1221,12 +1279,18 @@ void CGxDeviceVulkan::IDestroyVk() {
             frame.m_stagingBuffers.clear();
             frame.m_stagingAllocs.clear();
             vkDestroyBuffer(this->m_vkDevice, frame.m_uboBuffer, nullptr);
+
+            for (VkDescriptorPool pool : frame.m_texPools) {
+                vkDestroyDescriptorPool(this->m_vkDevice, pool, nullptr);
+            }
+
             vkDestroySemaphore(this->m_vkDevice, frame.m_acquired, nullptr);
             vkDestroyFence(this->m_vkDevice, frame.m_fence, nullptr);
             vkDestroyCommandPool(this->m_vkDevice, frame.m_cmdPool, nullptr);
             frame = Frame();
             frame.m_stagingHead = frame.m_stagingCap = 0;
             frame.m_uboHead = 0;
+            frame.m_texPool = 0;
         }
 
         for (MemBlock* block : this->m_blocks) {
@@ -1522,7 +1586,14 @@ void CGxDeviceVulkan::IBeginFrame() {
     frame.m_stagingHead = 0;
     frame.m_stagingCap = 0;
     frame.m_uboHead = 0;
-    this->m_uboOffsets[0] = UINT32_MAX; // re-upload VS b0 into this frame's ring
+    memset(this->m_uboOffsets, 0xFF, sizeof(this->m_uboOffsets)); // re-upload b0/cb1 into this frame's ring
+
+    for (VkDescriptorPool pool : frame.m_texPools) {
+        vkResetDescriptorPool(this->m_vkDevice, pool, 0);
+    }
+
+    frame.m_texPool = 0;
+    this->m_curTexSet = VK_NULL_HANDLE;
 
     vkResetCommandPool(this->m_vkDevice, frame.m_cmdPool, 0);
     VkCommandBufferBeginInfo begin = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
@@ -1530,6 +1601,14 @@ void CGxDeviceVulkan::IBeginFrame() {
     vkBeginCommandBuffer(frame.m_uploadCmd, &begin);
     vkBeginCommandBuffer(frame.m_cmd, &begin);
     this->m_curPipeline = VK_NULL_HANDLE;
+
+    if (this->m_dummyImage.m_image && this->m_dummyImage.m_layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+        VkClearColorValue zero = {};
+        VkImageSubresourceRange range = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        this->ITransition(frame.m_uploadCmd, this->m_dummyImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        vkCmdClearColorImage(frame.m_uploadCmd, this->m_dummyImage.m_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &zero, 1, &range);
+        this->ITransition(frame.m_uploadCmd, this->m_dummyImage, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    }
     this->m_swapIndex = UINT32_MAX;
 
     for (uint32_t attempt = 0; attempt < 2 && this->m_swapchain; attempt++) {
@@ -2016,19 +2095,164 @@ void CGxDeviceVulkan::IRsSendToHw(EGxRenderState which) {
             this->m_scissorTest = value.m_data.i[0] != 0;
             break;
 
+        case GxRs_Texture0:
+        case GxRs_Texture1:
+        case GxRs_Texture2:
+        case GxRs_Texture3:
+        case GxRs_Texture4:
+        case GxRs_Texture5:
+        case GxRs_Texture6:
+        case GxRs_Texture7:
+        case GxRs_Texture8:
+        case GxRs_Texture9:
+        case GxRs_Texture10:
+        case GxRs_Texture11:
+        case GxRs_Texture12:
+        case GxRs_Texture13:
+        case GxRs_Texture14:
+        case GxRs_Texture15:
+            if (value.m_data.p) {
+                this->ITexMarkAsUpdated(static_cast<CGxTex*>(value.m_data.p));
+            }
+
+            break;
+
+        case GxRs_TexGen0:
+        case GxRs_TexGen1:
+        case GxRs_TexGen2:
+        case GxRs_TexGen3:
+        case GxRs_TexGen4:
+        case GxRs_TexGen5:
+        case GxRs_TexGen6:
+        case GxRs_TexGen7:
+            this->ISetTexGen(which - GxRs_TexGen0, value.m_data.i[0]);
+            break;
+
+        case GxRs_VertexShader:
+        case GxRs_PixelShader: {
+            CGxShader* shader = static_cast<CGxShader*>(value.m_data.p);
+
+            if (shader && !shader->m_loaded) {
+                this->IShaderCreate(shader);
+            }
+
+            break;
+        }
+
+        case Unk84:
+            for (uint32_t i = 0; i < 4; i++) {
+                this->m_blendFactor[i] = value.m_data.f[0];
+            }
+
+            break;
+
         default:
-            // TODO(V2): textures/samplers (set 1), alpha ref and clip planes (cb1), fog, FF state.
+            // Fixed-function, fog, alpha-ref and clip-plane states are read from m_appRenderStates at draw time.
             break;
     }
 }
 
-// Pipelines are hashed on what they bake: topology class, the position attribute, blend mode, colour mask and the
-// pass formats. The stub VS reads only the position (location 0).
-VkPipeline CGxDeviceVulkan::IPipelineGet(uint32_t topologyClass, uint32_t attribType, uint32_t attribOffset) {
+// CGxDeviceD3d::ISetTexGen: the texgen matrix is taken from the view (and world) current when the state changes.
+void CGxDeviceVulkan::ISetTexGen(uint32_t tmu, int32_t texGen) {
+    C44Matrix matrix;
+
+    if (texGen == GxTexGen_ObjectLinear || texGen == GxTexGen_EyeLinear) {
+        CGxMatrixStack& view = this->m_xforms[GxXform_View];
+        matrix = view.m_mtx[view.m_level];
+        matrix = matrix.AffineInverse();
+
+        if (texGen == GxTexGen_ObjectLinear) {
+            CGxMatrixStack& world = this->m_xforms[GxXform_World];
+            matrix = matrix * world.m_mtx[world.m_level].Inverse();
+        }
+    } else if (texGen == GxTexGen_SphereMap) {
+        matrix.a0 = 0.5f;
+        matrix.b1 = 0.5f;
+        matrix.d0 = 0.5f;
+        matrix.d1 = 0.5f;
+    } else {
+        this->m_texGen[tmu].Identity();
+        return;
+    }
+
+    CGxMatrixStack& stack = this->m_texGen[tmu];
+    stack.m_dirty = 1;
+    stack.m_flags[stack.m_level] &= ~CGxMatrixStack::F_Identity;
+    stack.m_mtx[stack.m_level] = matrix;
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Pipeline state, constants, textures (phase V2). Model: CGxDeviceD3d11's IStateSync* and FF emulation.
+
+// D3D9 s_filterModes, as D3D11's s_filter11: Nearest/Linear have no mip filter there, so they get max LOD 0.
+static const VkFilter s_texFilter[GxTexFilters_Last] = { VK_FILTER_NEAREST, VK_FILTER_LINEAR, VK_FILTER_NEAREST, VK_FILTER_LINEAR, VK_FILTER_LINEAR, VK_FILTER_LINEAR };
+static const VkSamplerMipmapMode s_texMip[GxTexFilters_Last] = { VK_SAMPLER_MIPMAP_MODE_NEAREST, VK_SAMPLER_MIPMAP_MODE_NEAREST, VK_SAMPLER_MIPMAP_MODE_NEAREST, VK_SAMPLER_MIPMAP_MODE_NEAREST, VK_SAMPLER_MIPMAP_MODE_LINEAR, VK_SAMPLER_MIPMAP_MODE_LINEAR };
+static const VkFormat s_dummyAttribFormat[3] = { VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_R32G32B32A32_UINT, VK_FORMAT_R32G32B32A32_SINT };
+
+// The D3D9 type's format (s_gxAttribFormat) with its numeric class switched to the shader input's (VKS1 compType),
+// which Vulkan requires to match: UBYTE4 read as float is USCALED (D3D9 gives 0..255), SHORT2 read as float SSCALED.
+static VkFormat AttribFormat(uint32_t type, uint32_t compType) {
+    VkFormat format = s_gxAttribFormat[type < 7 ? type : 4];
+
+    if (compType == 0 && format == VK_FORMAT_R8G8B8A8_UINT) {
+        return VK_FORMAT_R8G8B8A8_USCALED;
+    }
+
+    if (compType == 0 && format == VK_FORMAT_R16G16_SINT) {
+        return VK_FORMAT_R16G16_SSCALED;
+    }
+
+    if (compType == 1 && (format == VK_FORMAT_R8G8B8A8_UNORM || format == VK_FORMAT_B8G8R8A8_UNORM)) {
+        return VK_FORMAT_R8G8B8A8_UINT;
+    }
+
+    return format;
+}
+
+// D3DDECLUSAGE + usage index (VKS1 table) -> GxVA bit, -1 when the client has no such attribute.
+static int32_t GxVaFromUsage(uint32_t usage, uint32_t index) {
+    switch (usage) {
+        case 0:
+        case 1:
+        case 2:
+        case 3:
+            return index == 0 ? static_cast<int32_t>(usage) : -1;
+        case 10:
+            return index < 2 ? GxVA_Color0 + static_cast<int32_t>(index) : -1;
+        case 5:
+            return index < 8 ? GxVA_TexCoord0 + static_cast<int32_t>(index) : -1;
+        default:
+            return -1;
+    }
+}
+
+static void ColorToFloat4(uint32_t value, float* out, float alpha = -1.0f) {
+    CImVector color;
+    memcpy(&color, &value, sizeof(color));
+    out[0] = color.r * (1.0f / 255.0f);
+    out[1] = color.g * (1.0f / 255.0f);
+    out[2] = color.b * (1.0f / 255.0f);
+    out[3] = alpha < 0.0f ? color.a * (1.0f / 255.0f) : alpha;
+}
+
+// The client's own texLodBias setting, applied in the samplers (as D3D11).
+static float TexLodBias() {
+    static CVar* cvar;
+
+    if (!cvar) {
+        cvar = CVar::Lookup("texLodBias");
+    }
+
+    return cvar ? cvar->m_floatValue : 0.0f;
+}
+
+// Pipelines are hashed on what they bake: VS, PS, topology class, vertex input (attributes and binding count; strides
+// are dynamic), blend mode, colour mask and the pass formats. The cache key uses ShaderApi::m_id, never handles.
+VkPipeline CGxDeviceVulkan::IPipelineGet(uint32_t topologyClass, const VkVertexInputAttributeDescription* attribs, uint32_t attribCount, uint32_t bindingCount) {
     VkFormat colorFormat = this->m_passColor ? this->m_passColor->m_format : VK_FORMAT_UNDEFINED;
     VkFormat depthFormat = this->m_passDepth ? this->m_passDepth->m_format : VK_FORMAT_UNDEFINED;
-    uint32_t words[7] = { topologyClass, attribType, attribOffset, this->m_blendMode, this->m_colorMask, static_cast<uint32_t>(colorFormat), static_cast<uint32_t>(depthFormat) };
-    uint64_t key = Fnv64(words, sizeof(words));
+    uint64_t words[8] = { this->m_curVs->m_id, this->m_curPs->m_id, topologyClass, this->m_blendMode, this->m_colorMask, static_cast<uint64_t>(colorFormat), static_cast<uint64_t>(depthFormat), bindingCount };
+    uint64_t key = Fnv64(attribs, attribCount * sizeof(*attribs), Fnv64(words, sizeof(words)));
     auto found = this->m_pipelines.find(key);
 
     if (found != this->m_pipelines.end()) {
@@ -2036,17 +2260,21 @@ VkPipeline CGxDeviceVulkan::IPipelineGet(uint32_t topologyClass, uint32_t attrib
     }
 
     VkPipelineShaderStageCreateInfo stages[2] = {
-        { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, this->m_stubVs, "main", nullptr },
-        { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, this->m_stubPs, "main", nullptr },
+        { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, this->m_curVs->m_module, "main", nullptr },
+        { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, this->m_curPs->m_module, "main", nullptr },
     };
 
-    VkVertexInputBindingDescription binding = { 0, 0, VK_VERTEX_INPUT_RATE_VERTEX };
-    VkVertexInputAttributeDescription attribute = { 0, 0, s_gxAttribFormat[attribType < 7 ? attribType : 4], attribOffset };
+    VkVertexInputBindingDescription bindings[GxVAs_Last + 1];
+
+    for (uint32_t i = 0; i < bindingCount; i++) {
+        bindings[i] = { i, 0, VK_VERTEX_INPUT_RATE_VERTEX };
+    }
+
     VkPipelineVertexInputStateCreateInfo vertexInput = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
-    vertexInput.vertexBindingDescriptionCount = 1;
-    vertexInput.pVertexBindingDescriptions = &binding;
-    vertexInput.vertexAttributeDescriptionCount = 1;
-    vertexInput.pVertexAttributeDescriptions = &attribute;
+    vertexInput.vertexBindingDescriptionCount = bindingCount;
+    vertexInput.pVertexBindingDescriptions = bindings;
+    vertexInput.vertexAttributeDescriptionCount = attribCount;
+    vertexInput.pVertexAttributeDescriptions = attribs;
 
     static const VkPrimitiveTopology s_classTopology[3] = { VK_PRIMITIVE_TOPOLOGY_POINT_LIST, VK_PRIMITIVE_TOPOLOGY_LINE_LIST, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST };
     VkPipelineInputAssemblyStateCreateInfo inputAssembly = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
@@ -2056,6 +2284,7 @@ VkPipeline CGxDeviceVulkan::IPipelineGet(uint32_t topologyClass, uint32_t attrib
     viewport.viewportCount = 1;
     viewport.scissorCount = 1;
 
+    // ponytail: always solid; wireframe (GxMasterEnable_PolygonFill off) needs the key + fillModeNonSolid check.
     VkPipelineRasterizationStateCreateInfo raster = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
     raster.polygonMode = VK_POLYGON_MODE_FILL;
     raster.depthBiasEnable = VK_TRUE;
@@ -2085,6 +2314,7 @@ VkPipeline CGxDeviceVulkan::IPipelineGet(uint32_t topologyClass, uint32_t attrib
         VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY, VK_DYNAMIC_STATE_CULL_MODE,
         VK_DYNAMIC_STATE_FRONT_FACE, VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE, VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE,
         VK_DYNAMIC_STATE_DEPTH_COMPARE_OP, VK_DYNAMIC_STATE_DEPTH_BIAS, VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE,
+        VK_DYNAMIC_STATE_BLEND_CONSTANTS,
     };
     VkPipelineDynamicStateCreateInfo dynamic = { VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
     dynamic.dynamicStateCount = sizeof(s_dynamic) / sizeof(s_dynamic[0]);
@@ -2112,8 +2342,8 @@ VkPipeline CGxDeviceVulkan::IPipelineGet(uint32_t topologyClass, uint32_t attrib
 
     VkPipeline pipeline = VK_NULL_HANDLE;
 
-    if (vkCreateGraphicsPipelines(this->m_vkDevice, VK_NULL_HANDLE, 1, &info, nullptr, &pipeline) != VK_SUCCESS) {
-        CGxDevice::Log("CGxDeviceVulkan: vkCreateGraphicsPipelines failed");
+    if (vkCreateGraphicsPipelines(this->m_vkDevice, this->m_pipelineCache, 1, &info, nullptr, &pipeline) != VK_SUCCESS) {
+        CGxDevice::Log("CGxDeviceVulkan: vkCreateGraphicsPipelines failed (VS %llu PS %llu)", static_cast<unsigned long long>(this->m_curVs->m_id), static_cast<unsigned long long>(this->m_curPs->m_id));
         pipeline = VK_NULL_HANDLE;
     }
 
@@ -2121,9 +2351,436 @@ VkPipeline CGxDeviceVulkan::IPipelineGet(uint32_t topologyClass, uint32_t attrib
     return pipeline;
 }
 
-// Base state sync, viewport, scissor, and the stub constants: VS b0 c0..c3 = transpose(world·view·proj), uploaded
-// into the frame's UBO ring when it changes. False skips the draw (ring full).
-bool CGxDeviceVulkan::IStateSync() {
+// Copies into the frame's UBO ring; returns the dynamic offset, UINT32_MAX when the ring is full.
+uint32_t CGxDeviceVulkan::IUboPush(const void* data, uint32_t size) {
+    Frame& frame = this->m_frames[this->m_frameSerial % kFrames];
+
+    if (frame.m_uboHead + size > kUboRingSize) {
+        static int32_t s_logged;
+
+        if (!s_logged) {
+            s_logged = 1;
+            CGxDevice::Log("CGxDeviceVulkan: UBO ring full, draws skipped until the next frame");
+        }
+
+        return UINT32_MAX;
+    }
+
+    uint32_t offset = frame.m_uboHead;
+    memcpy(frame.m_uboAlloc.m_map + offset, data, size);
+    frame.m_uboHead += static_cast<uint32_t>(AlignUp(size, this->m_physProps.limits.minUniformBufferOffsetAlignment));
+    return offset;
+}
+
+// App shaders when bound, otherwise the FF permutation for the current vertex format, lighting and textures (D3D11's
+// IStateSyncShaders). A bound shader without a module (size-0 permutation, missing pack) skips the draw (SPIRV.md).
+bool CGxDeviceVulkan::IStateSyncShaders(bool& ffVs, bool& ffPs) {
+    const CGxAppRenderState* rs = this->m_appRenderStates.m_data;
+    CGxShader* vs = static_cast<CGxShader*>(rs[GxRs_VertexShader].m_value.m_data.p);
+    CGxShader* ps = static_cast<CGxShader*>(rs[GxRs_PixelShader].m_value.m_data.p);
+    ffVs = !vs;
+    ffPs = !ps;
+
+    if ((vs && (!vs->m_valid || !vs->m_apiSpecific)) || (ps && (!ps->m_valid || !ps->m_apiSpecific))) {
+        return false;
+    }
+
+    bool lighting = rs[GxRs_Lighting].m_value.m_data.i[0] && (this->m_appMasterEnables & 0x1);
+    bool ambientOnly = !rs[GxRs_Lighting].m_value.m_data.i[0] && !(this->m_primVertexMask & (1 << GxVA_Color0)) && rs[GxRs_MatDiffuse].m_value.m_data.u[0] != 0xFFFFFFFF;
+
+    this->m_curVs = ffVs ? &this->m_ffVs[FfSelectVs(this->m_primVertexMask, lighting || ambientOnly)] : static_cast<ShaderApi*>(vs->m_apiSpecific);
+    this->m_curPs = ffPs ? &this->m_ffPs[FfSelectPs(rs[GxRs_Texture0].m_value.m_data.p != nullptr, rs[GxRs_Texture1].m_value.m_data.p != nullptr)] : static_cast<ShaderApi*>(ps->m_apiSpecific);
+    return this->m_curVs->m_module && this->m_curPs->m_module;
+}
+
+// The FF register maps of ffshaders/ff_common.hlsli, filled as D3D11's IStateSyncFixedFunction; pushed into the ring
+// when they change or the stage held app constants.
+void CGxDeviceVulkan::IStateSyncFixedFunction(bool vs, bool ps, bool lighting, bool ambientOnly) {
+    const CGxAppRenderState* rs = this->m_appRenderStates.m_data;
+    bool fog = rs[GxRs_Fog].m_value.m_data.i[0] && (this->m_appMasterEnables & 0x2);
+    bool specular = rs[GxRs_MatSpecularExp].m_value.m_data.f[0] > 0.0f && rs[GxRs_MatSpecular].m_value.m_data.i[0];
+
+    if (vs) {
+        float c[53 * 4];
+        memset(c, 0, sizeof(c));
+
+        CGxMatrixStack& world = this->m_xforms[GxXform_World];
+        CGxMatrixStack& view = this->m_xforms[GxXform_View];
+        const C44Matrix& viewMtx = view.m_mtx[view.m_level];
+        C44Matrix worldView = world.m_mtx[world.m_level] * viewMtx;
+        memcpy(&c[0 * 4], &worldView, sizeof(C44Matrix));
+        memcpy(&c[4 * 4], &this->m_projNative, sizeof(C44Matrix));
+
+        for (uint32_t tmu = 0; tmu < 2; tmu++) {
+            CGxMatrixStack& texGen = this->m_texGen[tmu];
+            CGxMatrixStack& xform = this->m_xforms[tmu];
+            int32_t gen = rs[GxRs_TexGen0 + tmu].m_value.m_data.i[0];
+            C44Matrix matrix = texGen.m_mtx[texGen.m_level];
+            float mode = 0.0f;
+
+            switch (rs[GxRs_TextureShader0 + tmu].m_value.m_data.i[0]) {
+                case 0:
+                    mode = (texGen.m_flags[texGen.m_level] & CGxMatrixStack::F_Identity) ? 0.0f : 1.0f;
+                    break;
+
+                case 1: {
+                    C44Matrix product = texGen.m_mtx[texGen.m_level] * xform.m_mtx[xform.m_level];
+                    matrix = product;
+
+                    if (!gen) {
+                        matrix.c0 = product.d0;
+                        matrix.c1 = product.d1;
+                    }
+
+                    mode = 1.0f;
+                    break;
+                }
+
+                case 2:
+                    matrix = texGen.m_mtx[texGen.m_level] * xform.m_mtx[xform.m_level];
+                    mode = 2.0f;
+                    break;
+
+                default:
+                    break;
+            }
+
+            float source;
+
+            switch (gen) {
+                case GxTexGen_ObjectLinear:
+                case GxTexGen_EyeLinear:
+                case GxTexGen_Unk3:
+                    source = 8.0f;
+                    break;
+
+                case GxTexGen_ReflectionMap:
+                case GxTexGen_SphereMap:
+                    source = 10.0f;
+                    break;
+
+                case GxTexGen_Normal:
+                    source = 9.0f;
+                    break;
+
+                default:
+                    source = static_cast<float>(rs[GxRs_TextureCoord0 + tmu].m_value.m_data.u[0] & 7);
+                    break;
+            }
+
+            memcpy(&c[(8 + tmu * 4) * 4], &matrix, sizeof(C44Matrix));
+            c[(21 + tmu) * 4 + 0] = source;
+            c[(21 + tmu) * 4 + 1] = mode;
+        }
+
+        // Material (ISetMaterial: ambient = diffuse).
+        ColorToFloat4(rs[GxRs_MatEmissive].m_value.m_data.u[0], &c[16 * 4]);
+        ColorToFloat4(rs[GxRs_MatDiffuse].m_value.m_data.u[0], &c[17 * 4]);
+        ColorToFloat4(rs[GxRs_MatSpecular].m_value.m_data.u[0], &c[18 * 4], rs[GxRs_MatSpecularExp].m_value.m_data.f[0]);
+
+        if (ambientOnly) {
+            c[19 * 4 + 0] = c[19 * 4 + 1] = c[19 * 4 + 2] = c[19 * 4 + 3] = 1.0f;
+        }
+
+        if (fog) {
+            float start = rs[GxRs_FogStart].m_value.m_data.f[0];
+            float end = rs[GxRs_FogEnd].m_value.m_data.f[0];
+            float range = end - start != 0.0f ? end - start : 1.0f;
+            c[20 * 4 + 0] = -1.0f / range;
+            c[20 * 4 + 1] = end / range;
+        } else {
+            c[20 * 4 + 1] = 1.0f;
+        }
+
+        if (this->m_primVertexMask & (1 << GxVA_Color0)) {
+            int32_t colorMaterial = rs[GxRs_ColorMaterial].m_value.m_data.i[0];
+            c[23 * 4 + 0] = colorMaterial == 0;
+            c[23 * 4 + 1] = colorMaterial == 1;
+            c[23 * 4 + 2] = colorMaterial == 2;
+        }
+
+        c[23 * 4 + 3] = specular;
+
+        for (uint32_t i = 0; lighting && !ambientOnly && i < 4; i++) {
+            const CGxApiLight& light = this->m_lights[i];
+
+            if (!light.m_enable) {
+                continue;
+            }
+
+            float* l = &c[(24 + 5 * i) * 4];
+            bool point = light.m_dir.w == 1.0f;
+            C4Vector dir;
+            dir.x = light.m_dir.x;
+            dir.y = light.m_dir.y;
+            dir.z = light.m_dir.z;
+            dir.w = point ? 1.0f : 0.0f;
+            dir = dir * viewMtx;
+
+            l[0] = dir.x;
+            l[1] = dir.y;
+            l[2] = dir.z;
+            l[3] = point ? 2.0f : 1.0f;
+            l[4] = light.m_dirColor.x;
+            l[5] = light.m_dirColor.y;
+            l[6] = light.m_dirColor.z;
+            l[7] = 1.0f;
+            l[8] = light.m_ambColor.x;
+            l[9] = light.m_ambColor.y;
+            l[10] = light.m_ambColor.z;
+            l[12] = light.m_specColor.x;
+            l[13] = light.m_specColor.y;
+            l[14] = light.m_specColor.z;
+            l[16] = light.m_constantAttenuation;
+            l[17] = light.m_linearAttenuation;
+            l[18] = light.m_quadraticAttenuation;
+            l[19] = 10000.0f;
+        }
+
+        c[50 * 4] = rs[GxRs_NormalizeNormals].m_value.m_data.u[0] != 0;
+
+        const float* attenuation = rs[GxRs_PointScaleAttenuation].m_value.m_data.f;
+        c[51 * 4 + 0] = rs[GxRs_PointScale].m_value.m_data.f[0];
+        c[51 * 4 + 1] = *reinterpret_cast<const C3Vector*>(attenuation) != CGxDevice::s_pointScaleAttenuation;
+        c[52 * 4 + 0] = attenuation[0];
+        c[52 * 4 + 1] = attenuation[1];
+        c[52 * 4 + 2] = attenuation[2];
+        c[52 * 4 + 3] = (this->m_viewport.m_y.m_h - this->m_viewport.m_y.m_l) * this->DeviceCurWindow().maxY;
+
+        if (this->m_uboOffsets[0] == UINT32_MAX || this->m_cbSource[0] != 1 || memcmp(c, this->m_ffConstants[0], sizeof(c))) {
+            memcpy(this->m_ffConstants[0], c, sizeof(c));
+            this->m_uboOffsets[0] = this->IUboPush(c, sizeof(c));
+            this->m_cbSource[0] = 1;
+        }
+    }
+
+    if (ps) {
+        float c[3 * 4];
+        memset(c, 0, sizeof(c));
+
+        ColorToFloat4(rs[GxRs_FogColor].m_value.m_data.u[0], &c[0], fog ? 1.0f : 0.0f);
+
+        for (uint32_t tmu = 0; tmu < 2; tmu++) {
+            bool enabled = rs[GxRs_Texture0 + tmu].m_value.m_data.p != nullptr;
+            c[4 + tmu * 2 + 0] = enabled ? static_cast<float>(rs[GxRs_ColorOp0 + tmu].m_value.m_data.u[0]) : 6.0f;
+            c[4 + tmu * 2 + 1] = enabled ? static_cast<float>(rs[GxRs_AlphaOp0 + tmu].m_value.m_data.u[0]) : 6.0f;
+        }
+
+        c[8] = specular;
+
+        if (this->m_uboOffsets[1] == UINT32_MAX || this->m_cbSource[1] != 1 || memcmp(c, this->m_ffConstants[1], sizeof(c))) {
+            memcpy(this->m_ffConstants[1], c, sizeof(c));
+            this->m_uboOffsets[1] = this->IUboPush(c, sizeof(c));
+            this->m_cbSource[1] = 1;
+        }
+    }
+}
+
+// Set 0 contents for the draw: VS/PS b0 (app shadow constants or FF maps) and cb1, each pushed into the frame's UBO
+// ring when it changed and bound by dynamic offset. Dynamic offsets over one set per frame need no descriptor writes
+// per draw, which is why they won over a set per draw. App b0 pushes cover registers 0..highest ever written (the
+// binding stays 4 KB; the ring keeps 4 KB of slack). False skips the draw (ring full).
+bool CGxDeviceVulkan::IStateSyncConstants(bool ffVs, bool ffPs) {
+    const CGxAppRenderState* rs = this->m_appRenderStates.m_data;
+    bool lighting = rs[GxRs_Lighting].m_value.m_data.i[0] && (this->m_appMasterEnables & 0x1);
+    bool ambientOnly = !rs[GxRs_Lighting].m_value.m_data.i[0] && !(this->m_primVertexMask & (1 << GxVA_Color0)) && rs[GxRs_MatDiffuse].m_value.m_data.u[0] != 0xFFFFFFFF;
+
+    for (uint32_t stage = 0; stage < 2; stage++) {
+        ShadowConstants& shadow = CGxDevice::s_shadowConstants[stage == 0 ? 1 : 0];
+        bool dirty = shadow.dirtyMin <= shadow.dirtyMax;
+
+        if (dirty && shadow.dirtyMax > this->m_cbHigh[stage]) {
+            this->m_cbHigh[stage] = shadow.dirtyMax < 255 ? shadow.dirtyMax : 255;
+        }
+
+        if (!(stage == 0 ? ffVs : ffPs) && (dirty || this->m_cbSource[stage] != 0 || this->m_uboOffsets[stage] == UINT32_MAX)) {
+            this->m_uboOffsets[stage] = this->IUboPush(shadow.constants, (this->m_cbHigh[stage] + 1) * 16);
+            this->m_cbSource[stage] = 0;
+        }
+
+        shadow.dirtyMin = 255;
+        shadow.dirtyMax = 0;
+    }
+
+    if (ffVs || ffPs) {
+        this->IStateSyncFixedFunction(ffVs, ffPs, lighting || ambientOnly, ambientOnly);
+    }
+
+    // cb1 as D3D11's IStateSyncDeviceConstants: int constants (none: stock shaders only use defi), alpha-test ref,
+    // user clip planes in clip space (FF planes are world space in D3D9, so they go through inv(view*proj)).
+    float dev[23 * 4];
+    memset(dev, 0, sizeof(dev));
+
+    int32_t alphaRef = rs[GxRs_AlphaRef].m_value.m_data.i[0];
+    dev[16 * 4] = alphaRef > 0 ? alphaRef * (1.0f / 255.0f) : 0.0f;
+
+    uint32_t mask = rs[GxRs_ClipPlaneMask].m_value.m_data.u[0] & 0x3F;
+
+    if (mask) {
+        C44Matrix toClip;
+
+        if (ffVs) {
+            CGxMatrixStack& view = this->m_xforms[GxXform_View];
+            toClip = (view.m_mtx[view.m_level] * this->m_projNative).Inverse().Transpose();
+        }
+
+        for (uint32_t i = 0; i < 6; i++) {
+            if (!(mask & (1 << i))) {
+                continue;
+            }
+
+            const C4Plane& plane = this->m_clipPlane[i];
+            C4Vector p;
+            p.x = plane.n.x;
+            p.y = plane.n.y;
+            p.z = plane.n.z;
+            p.w = plane.d;
+
+            if (ffVs) {
+                p = p * toClip;
+            }
+
+            memcpy(&dev[(17 + i) * 4], &p, sizeof(p));
+        }
+    }
+
+    this->m_clipPlaneMask = 0;
+
+    if (this->m_uboOffsets[2] == UINT32_MAX || memcmp(dev, this->m_devConstants, sizeof(dev))) {
+        memcpy(this->m_devConstants, dev, sizeof(dev));
+        this->m_uboOffsets[2] = this->IUboPush(dev, sizeof(dev));
+    }
+
+    return this->m_uboOffsets[0] != UINT32_MAX && this->m_uboOffsets[1] != UINT32_MAX && this->m_uboOffsets[2] != UINT32_MAX;
+}
+
+// Sampler cache keyed like D3D11's texfilter handling: filter, wrap U/V, anisotropy, texLodBias.
+VkSampler CGxDeviceVulkan::ISamplerGet(uint32_t filter, bool wrapU, bool wrapV, uint32_t anisotropy, float lodBias) {
+    filter = filter < GxTexFilters_Last ? filter : GxTex_Linear;
+    anisotropy = anisotropy < 1 ? 1 : (anisotropy > this->m_caps.m_maxTexAnisotropy ? this->m_caps.m_maxTexAnisotropy : anisotropy);
+
+    if (filter == GxTex_Anisotropic && anisotropy <= 1) {
+        filter = GxTex_LinearMipLinear;
+    }
+
+    uint32_t bias;
+    memcpy(&bias, &lodBias, sizeof(bias));
+    uint64_t key = filter | (wrapU << 3) | (wrapV << 4) | (anisotropy << 8) | (static_cast<uint64_t>(bias) << 32);
+    auto found = this->m_samplers.find(key);
+
+    if (found != this->m_samplers.end()) {
+        return found->second;
+    }
+
+    VkSamplerCreateInfo info = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+    info.magFilter = info.minFilter = s_texFilter[filter];
+    info.mipmapMode = s_texMip[filter];
+    info.addressModeU = wrapU ? VK_SAMPLER_ADDRESS_MODE_REPEAT : VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    info.addressModeV = wrapV ? VK_SAMPLER_ADDRESS_MODE_REPEAT : VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    info.mipLodBias = lodBias;
+    info.anisotropyEnable = filter == GxTex_Anisotropic;
+    info.maxAnisotropy = static_cast<float>(anisotropy);
+    info.maxLod = filter <= GxTex_Linear ? 0.0f : VK_LOD_CLAMP_NONE;
+
+    VkSampler sampler = VK_NULL_HANDLE;
+    vkCreateSampler(this->m_vkDevice, &info, nullptr, &sampler);
+    this->m_samplers[key] = sampler;
+    return sampler;
+}
+
+// Set 1 for the draw: t0..t15 / s0..s15 from GxRs_Texture0..15, shared by both stages (a VS sN lands on the same
+// binding). Empty slots get the 1x1 zero texture. A new set (from the frame's pools, reset each frame) only when a
+// view or sampler changed since the previous draw.
+VkDescriptorSet CGxDeviceVulkan::IStateSyncTextures() {
+    float lodBias = TexLodBias();
+    VkImageView views[16];
+    VkSampler samplers[16];
+
+    for (uint32_t i = 0; i < 16; i++) {
+        CGxTex* texture = static_cast<CGxTex*>(this->m_appRenderStates[GxRs_Texture0 + i].m_value.m_data.p);
+        Image* image = texture && !texture->m_needsCreation ? static_cast<Image*>(texture->m_apiSpecificData) : nullptr;
+        views[i] = image && image->m_view ? image->m_view : this->m_dummyImage.m_view;
+        samplers[i] = texture ? this->ISamplerGet(texture->m_flags.m_filter, texture->m_flags.m_wrapU, texture->m_flags.m_wrapV, texture->m_flags.m_maxAnisotropy, lodBias) : this->ISamplerGet(GxTex_Linear, false, false, 1, lodBias);
+    }
+
+    if (this->m_curTexSet && !memcmp(views, this->m_curViews, sizeof(views)) && !memcmp(samplers, this->m_curSamplers, sizeof(samplers))) {
+        return this->m_curTexSet;
+    }
+
+    Frame& frame = this->m_frames[this->m_frameSerial % kFrames];
+    VkDescriptorSet set = VK_NULL_HANDLE;
+
+    while (!set) {
+        if (frame.m_texPool == frame.m_texPools.size()) {
+            VkDescriptorPoolSize sizes[2] = { { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1024 * 16 }, { VK_DESCRIPTOR_TYPE_SAMPLER, 1024 * 16 } };
+            VkDescriptorPoolCreateInfo poolInfo = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+            poolInfo.maxSets = 1024;
+            poolInfo.poolSizeCount = 2;
+            poolInfo.pPoolSizes = sizes;
+            VkDescriptorPool pool;
+
+            if (vkCreateDescriptorPool(this->m_vkDevice, &poolInfo, nullptr, &pool) != VK_SUCCESS) {
+                return VK_NULL_HANDLE;
+            }
+
+            frame.m_texPools.push_back(pool);
+        }
+
+        VkDescriptorSetAllocateInfo allocInfo = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+        allocInfo.descriptorPool = frame.m_texPools[frame.m_texPool];
+        allocInfo.descriptorSetCount = 1;
+        allocInfo.pSetLayouts = &this->m_setLayouts[1];
+
+        if (vkAllocateDescriptorSets(this->m_vkDevice, &allocInfo, &set) != VK_SUCCESS) {
+            set = VK_NULL_HANDLE;
+            frame.m_texPool++;
+        }
+    }
+
+    VkDescriptorImageInfo imageInfo[16];
+    VkDescriptorImageInfo samplerInfo[16];
+
+    for (uint32_t i = 0; i < 16; i++) {
+        // ponytail: every sampled texture is assumed SHADER_READ_ONLY (texture targets return there after their pass).
+        imageInfo[i] = { VK_NULL_HANDLE, views[i], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        samplerInfo[i] = { samplers[i], VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED };
+    }
+
+    // Bindings 0..15 (and 16..31) have one descriptor each and the same type, so one write rolls over all 16.
+    VkWriteDescriptorSet writes[2] = { { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET }, { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET } };
+    writes[0].dstSet = writes[1].dstSet = set;
+    writes[0].dstBinding = 0;
+    writes[0].descriptorCount = 16;
+    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    writes[0].pImageInfo = imageInfo;
+    writes[1].dstBinding = 16;
+    writes[1].descriptorCount = 16;
+    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    writes[1].pImageInfo = samplerInfo;
+    vkUpdateDescriptorSets(this->m_vkDevice, 2, writes, 0, nullptr);
+
+    memcpy(this->m_curViews, views, sizeof(views));
+    memcpy(this->m_curSamplers, samplers, sizeof(samplers));
+    this->m_curTexSet = set;
+    return set;
+}
+
+static VkDeviceSize PoolBase(const CGxPool* pool, uint32_t version) {
+    return pool->m_usage == GxPoolUsage_Static ? 0 : static_cast<VkDeviceSize>(version) * pool->m_size;
+}
+
+void CGxDeviceVulkan::Draw(CGxBatch* batch, int32_t count) {
+    if (!this->m_context || this->m_intF5C) {
+        return;
+    }
+
+    this->IBeginRendering();
+
+    if (!this->m_rendering) {
+        return;
+    }
+
     this->IRsSync(0);
 
     if (this->m_viewportDirty) {
@@ -2132,75 +2789,93 @@ bool CGxDeviceVulkan::IStateSync() {
 
     this->IStateSyncScissorRect();
 
-    CGxMatrixStack& world = this->m_xforms[GxXform_World];
-    CGxMatrixStack& view = this->m_xforms[GxXform_View];
-    C44Matrix mvp = (world.m_mtx[world.m_level] * view.m_mtx[view.m_level] * this->m_projNative).Transpose();
+    bool ffVs;
+    bool ffPs;
 
-    if (this->m_uboOffsets[0] == UINT32_MAX || memcmp(&mvp, this->m_stubMvp, sizeof(this->m_stubMvp))) {
-        Frame& frame = this->m_frames[this->m_frameSerial % kFrames];
-
-        if (frame.m_uboHead > kUboRingSize) {
-            static int32_t s_logged;
-
-            if (!s_logged) {
-                s_logged = 1;
-                CGxDevice::Log("CGxDeviceVulkan: UBO ring full, draws skipped until the next frame");
-            }
-
-            return false;
-        }
-
-        memcpy(this->m_stubMvp, &mvp, sizeof(this->m_stubMvp));
-        memcpy(frame.m_uboAlloc.m_map + frame.m_uboHead, &mvp, sizeof(mvp));
-        this->m_uboOffsets[0] = frame.m_uboHead;
-        frame.m_uboHead += static_cast<uint32_t>(AlignUp(sizeof(mvp), this->m_physProps.limits.minUniformBufferOffsetAlignment));
-    }
-
-    return true;
-}
-
-static VkDeviceSize PoolBase(const CGxPool* pool, uint32_t version) {
-    return pool->m_usage == GxPoolUsage_Static ? 0 : static_cast<VkDeviceSize>(version) * pool->m_size;
-}
-
-void CGxDeviceVulkan::Draw(CGxBatch* batch, int32_t count) {
-    if (!this->m_context || this->m_intF5C || !(this->m_primVertexMask & (1 << GxVA_Position))) {
+    if (!this->IStateSyncShaders(ffVs, ffPs) || !this->IStateSyncConstants(ffVs, ffPs)) {
         return;
     }
 
-    this->IBeginRendering();
+    VkDescriptorSet texSet = this->IStateSyncTextures();
 
-    if (!this->m_rendering || !this->IStateSync()) {
+    if (!texSet) {
         return;
     }
 
-    // The position's stream: grouping and strides as CGxDeviceVulkan::IStateSyncVertexPtrs.
-    const CGxVertexAttrib& position = this->m_primVertexFormatAttrib[GxVA_Position];
-    CGxBuf* buf;
-    uint32_t stride = 0;
+    // Streams as D3D11's IStateSyncVertexPtrs: one binding per distinct buffer, stride = sum of its attributes
+    // (predefined formats: one buffer, m_primVertexSize).
+    bool predefined = this->m_primVertexFormat < GxVertexBufferFormats_Last;
+    CGxBuf* streamBufs[GxVAs_Last + 1] = {};
+    VkDeviceSize streamStrides[GxVAs_Last + 1] = {};
+    uint32_t streamOf[GxVAs_Last] = {};
+    uint32_t streamCount = 0;
 
-    if (this->m_primVertexFormat < GxVertexBufferFormats_Last) {
-        buf = this->m_primVertexBuf;
-        stride = this->m_primVertexSize;
-    } else {
-        buf = this->m_primVertexFormatBuf[GxVA_Position];
+    for (uint32_t i = 0; i < GxVAs_Last; i++) {
+        if (!(this->m_primVertexMask & (1 << i))) {
+            continue;
+        }
 
-        for (uint32_t i = 0; i < GxVAs_Last; i++) {
-            if ((this->m_primVertexMask & (1 << i)) && this->m_primVertexFormatBuf[i] == buf) {
-                stride += s_gxAttribSize[this->m_primVertexFormatAttrib[i].m_type < 7 ? this->m_primVertexFormatAttrib[i].m_type : 0];
-            }
+        CGxBuf* buf = predefined ? this->m_primVertexBuf : this->m_primVertexFormatBuf[i];
+        uint32_t stream;
+
+        for (stream = 0; stream < streamCount && streamBufs[stream] != buf; stream++) {
+        }
+
+        if (stream == streamCount) {
+            streamBufs[streamCount++] = buf;
+        }
+
+        streamOf[i] = stream;
+        streamStrides[stream] = predefined ? this->m_primVertexSize : streamStrides[stream] + s_gxAttribSize[this->m_primVertexFormatAttrib[i].m_type < 7 ? this->m_primVertexFormatAttrib[i].m_type : 0];
+    }
+
+    // Vertex input from the VS's VKS1 table: (usage, usageIndex) -> GxVA. Inputs the decl lacks read the zero buffer
+    // through one zero-stride binding after the streams.
+    VkVertexInputAttributeDescription attribs[32];
+    uint32_t attribCount = this->m_curVs->m_inputCount;
+    uint32_t bindingCount = streamCount;
+
+    for (uint32_t j = 0; j < attribCount; j++) {
+        const uint8_t* input = this->m_curVs->m_inputs[j];
+        int32_t va = GxVaFromUsage(input[0], input[1]);
+
+        if (va >= 0 && (this->m_primVertexMask & (1 << va))) {
+            const CGxVertexAttrib& attrib = this->m_primVertexFormatAttrib[va];
+            attribs[j] = { input[2], streamOf[va], AttribFormat(attrib.m_type, input[3]), attrib.m_offset };
+        } else {
+            bindingCount = streamCount + 1;
+            attribs[j] = { input[2], streamCount, s_dummyAttribFormat[input[3] < 3 ? input[3] : 0], 0 };
         }
     }
 
-    PoolApi* vertexApi = buf ? static_cast<PoolApi*>(buf->m_pool->m_apiSpecific) : nullptr;
+    VkBuffer buffers[GxVAs_Last + 1];
+    VkDeviceSize offsets[GxVAs_Last + 1];
+
+    for (uint32_t s = 0; s < streamCount; s++) {
+        PoolApi* api = streamBufs[s] ? static_cast<PoolApi*>(streamBufs[s]->m_pool->m_apiSpecific) : nullptr;
+
+        if (!api) {
+            return;
+        }
+
+        buffers[s] = api->m_buffer;
+        offsets[s] = PoolBase(streamBufs[s]->m_pool, api->m_version) + streamBufs[s]->m_index;
+    }
+
+    if (bindingCount > streamCount) {
+        buffers[streamCount] = this->m_dummyUbo;
+        offsets[streamCount] = 0;
+        streamStrides[streamCount] = 0;
+    }
+
     PoolApi* indexApi = count && this->m_primIndexBuf ? static_cast<PoolApi*>(this->m_primIndexBuf->m_pool->m_apiSpecific) : nullptr;
 
-    if (!vertexApi || (count && !indexApi)) {
+    if (count && !indexApi) {
         return;
     }
 
     uint32_t topologyClass = batch->m_primType == GxPrim_Points ? 0 : (batch->m_primType <= GxPrim_LineStrip ? 1 : 2);
-    VkPipeline pipeline = this->IPipelineGet(topologyClass, position.m_type, position.m_offset);
+    VkPipeline pipeline = this->IPipelineGet(topologyClass, attribs, attribCount, bindingCount);
 
     if (!pipeline) {
         return;
@@ -2213,8 +2888,9 @@ void CGxDeviceVulkan::Draw(CGxBatch* batch, int32_t count) {
         this->m_curPipeline = pipeline;
     }
 
-    uint32_t dynamicOffsets[4] = { this->m_uboOffsets[0], 0, 0, 0 };
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, this->m_pipelineLayout, 0, 1, &this->m_uboSets[this->m_frameSerial % kFrames], this->m_uboBindingCount, dynamicOffsets);
+    VkDescriptorSet sets[2] = { this->m_uboSets[this->m_frameSerial % kFrames], texSet };
+    uint32_t dynamicOffsets[4] = { this->m_uboOffsets[0], this->m_uboOffsets[1], this->m_uboOffsets[2], 0 };
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, this->m_pipelineLayout, 0, 2, sets, this->m_uboBindingCount, dynamicOffsets);
 
     // ponytail: every dynamic state is set on every draw; track them if command-buffer size shows up.
     VkRect2D scissor = this->m_scissorTest ? this->m_vkScissor : VkRect2D { { 0, 0 }, this->m_passExtent };
@@ -2227,10 +2903,11 @@ void CGxDeviceVulkan::Draw(CGxBatch* batch, int32_t count) {
     vkCmdSetDepthWriteEnable(cmd, this->m_depthWrite);
     vkCmdSetDepthCompareOp(cmd, this->m_depthCompare);
     vkCmdSetDepthBias(cmd, this->m_depthBias, 0.0f, 0.0f);
+    vkCmdSetBlendConstants(cmd, this->m_blendFactor);
 
-    VkDeviceSize vertexOffset = PoolBase(buf->m_pool, vertexApi->m_version) + buf->m_index;
-    VkDeviceSize vertexStride = stride;
-    vkCmdBindVertexBuffers2(cmd, 0, 1, &vertexApi->m_buffer, &vertexOffset, nullptr, &vertexStride);
+    if (bindingCount) {
+        vkCmdBindVertexBuffers2(cmd, 0, bindingCount, buffers, offsets, nullptr, streamStrides);
+    }
 
     if (count) {
         vkCmdBindIndexBuffer(cmd, indexApi->m_buffer, PoolBase(this->m_primIndexBuf->m_pool, indexApi->m_version), VK_INDEX_TYPE_UINT16);
@@ -2775,22 +3452,173 @@ bool CGxDeviceVulkan::QueryGetData(CGxQuery* query, uint32_t& data) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// Shaders. TODO(V2): load the SPIR-V pack (shader-xlate/SPIRV.md: "VKS1" header + per-input entries, then SPIR-V)
-// from Shaders\Vertex\spv / Shaders\Pixel\spv. Until then no shader is valid and every draw uses the stub pipeline.
+// Shaders: the SPIR-V pack (shader-xlate/SPIRV.md) in Shaders\Vertex\spv and Shaders\Pixel\spv of patch-Vulkan.MPQ.
+// Caps keep reporting vs_3_0 / ps_3_0 (as D3D11); only the load path moves: ShaderCreate and IShaderReload load
+// through the vs_4_0 / ps_4_0 profile slot with its folder name swapped to "spv" (IShaderLoad has no fallback below
+// those, so SM3 bytecode is never picked up).
+namespace {
+struct SpvLoadPath {
+    int32_t& m_profile;
+    int32_t m_savedProfile;
+    const char*& m_name;
+    const char* m_savedName;
 
+    SpvLoadPath(CGxDevice* device, EGxShTarget target)
+        : m_profile(device->m_caps.m_shaderTargets[target])
+        , m_name(target == GxSh_Vertex ? CGxDevice::s_vertexShaderTargetNames[4] : CGxDevice::s_pixelShaderTargetNames[5]) {
+        this->m_savedProfile = this->m_profile;
+        this->m_savedName = this->m_name;
+
+        if (target == GxSh_Vertex || target == GxSh_Pixel) {
+            this->m_profile = this->m_profile > 0 ? (target == GxSh_Vertex ? 4 : 5) : this->m_profile;
+            this->m_name = "spv";
+        }
+    }
+
+    ~SpvLoadPath() {
+        this->m_profile = this->m_savedProfile;
+        this->m_name = this->m_savedName;
+    }
+};
+}
+
+static uint64_t s_shaderApiSerial;
+
+// Parses a VKS1 body ("VKS1", nInputs, nInputs x (usage, usageIndex, location, compType), SPIR-V) into out.
+bool CGxDeviceVulkan::IShaderApiCreate(const void* body, uint32_t size, ShaderApi& out) {
+    const uint8_t* bytes = static_cast<const uint8_t*>(body);
+    memset(&out, 0, sizeof(out));
+    out.m_id = ++s_shaderApiSerial;
+
+    if (size < 8 || memcmp(bytes, "VKS1", 4)) {
+        return false;
+    }
+
+    uint32_t inputs;
+    memcpy(&inputs, bytes + 4, 4);
+    uint32_t header = 8 + 4 * inputs;
+    uint32_t magic;
+
+    if (inputs > 32 || size < header + 20 || (memcpy(&magic, bytes + header, 4), magic != 0x07230203) || (size - header) % 4) {
+        return false;
+    }
+
+    out.m_inputCount = inputs;
+    memcpy(out.m_inputs, bytes + 8, 4 * inputs);
+
+    VkShaderModuleCreateInfo info = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+    info.codeSize = size - header;
+    info.pCode = reinterpret_cast<const uint32_t*>(bytes + header);
+
+    if (vkCreateShaderModule(this->m_vkDevice, &info, nullptr, &out.m_module) != VK_SUCCESS) {
+        out.m_module = VK_NULL_HANDLE;
+        return false;
+    }
+
+    return true;
+}
+
+// Pipelines built from the module stay valid after it is destroyed; their cache entries just never match again
+// (keys use m_id).
+void CGxDeviceVulkan::IShaderApiRelease(ShaderApi& api) {
+    if (api.m_module && this->m_vkDevice) {
+        vkDestroyShaderModule(this->m_vkDevice, api.m_module, nullptr);
+    }
+
+    api.m_module = VK_NULL_HANDLE;
+}
+
+// Body is VKS1 (same 'GXSH' container). A shader whose body is empty or not VKS1 stays invalid; bound, it skips the draw.
 void CGxDeviceVulkan::IShaderCreate(CGxShader* shader) {
     shader->m_valid = 0;
+
+    if (!this->m_context || !this->m_vkDevice) {
+        return;
+    }
+
     shader->m_loaded = 1;
 
-    static int32_t s_logged;
+    if (shader->m_apiSpecific) {
+        this->IShaderApiRelease(*static_cast<ShaderApi*>(shader->m_apiSpecific));
+        delete static_cast<ShaderApi*>(shader->m_apiSpecific);
+        shader->m_apiSpecific = nullptr;
+    }
 
-    if (!s_logged) {
-        s_logged = 1;
-        CGxDevice::Log("CGxDeviceVulkan: SPIR-V shader loading is not wired yet (V1); drawing with the stub pipeline");
+    if (shader->m_target != GxSh_Vertex && shader->m_target != GxSh_Pixel) {
+        return;
+    }
+
+    uint32_t size = shader->m_code.Count();
+
+    if (size < 4 || memcmp(shader->m_code.m_data, "VKS1", 4)) {
+        static int32_t s_logged;
+
+        if (size && !s_logged) {
+            s_logged = 1;
+            CGxDevice::Log("CGxDeviceVulkan: shader without VKS1 body; is the SPIR-V pack (patch-Vulkan.MPQ, spv) installed?");
+        }
+
+        return;
+    }
+
+    ShaderApi* api = new ShaderApi;
+
+    if (!this->IShaderApiCreate(shader->m_code.m_data, size, *api)) {
+        CGxDevice::Log("CGxDeviceVulkan: bad VKS1 body (%u bytes)", size);
+        delete api;
+        return;
+    }
+
+    shader->m_apiSpecific = api;
+    shader->m_valid = 1;
+}
+
+void CGxDeviceVulkan::ShaderCreate(CGxShader** shaders, EGxShTarget target, const char* path, const char* name, uint32_t permutations) {
+    {
+        SpvLoadPath spv(this, target);
+        CGxDevice::ShaderCreate(shaders, target, path, name, permutations);
+    }
+
+    if (permutations == 1 && !shaders[0]->m_loaded) {
+        this->IShaderCreate(shaders[0]);
     }
 }
 
+void CGxDeviceVulkan::ShaderDestroy(CGxShader*& shader) {
+    if (shader->m_refCount == 1) {
+        if (shader->m_apiSpecific) {
+            // ponytail: destroyed at once; a pipeline in flight keeps working (modules are only read at creation).
+            this->IShaderApiRelease(*static_cast<ShaderApi*>(shader->m_apiSpecific));
+            delete static_cast<ShaderApi*>(shader->m_apiSpecific);
+            shader->m_apiSpecific = nullptr;
+        }
+
+        shader->m_loaded = 0;
+    }
+
+    CGxDevice::ShaderDestroy(shader);
+}
+
 void CGxDeviceVulkan::IShaderReload(CGxShader* shader, const char* path, const char* name) {
+    if (shader->m_target != GxSh_Vertex && shader->m_target != GxSh_Pixel) {
+        return;
+    }
+
+    if (shader->m_refCount == 1) {
+        if (shader->m_apiSpecific) {
+            this->IShaderApiRelease(*static_cast<ShaderApi*>(shader->m_apiSpecific));
+            delete static_cast<ShaderApi*>(shader->m_apiSpecific);
+            shader->m_apiSpecific = nullptr;
+        }
+
+        shader->m_loaded = 0;
+    }
+
+    {
+        SpvLoadPath spv(this, static_cast<EGxShTarget>(shader->m_target));
+        this->IShaderLoad(&shader, static_cast<EGxShTarget>(shader->m_target), path, name, 1);
+    }
+
     this->IShaderCreate(shader);
 }
 

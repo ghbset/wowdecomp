@@ -61,36 +61,60 @@ Contracts: `/root/d3d11-port/PLAN.md` and `/root/d3d11-port/shader-xlate/SPIRV.m
   stride, viewport and scissor are VK 1.3 dynamic state.
 - **Descriptor layouts per SPIRV.md:** set 0 = dynamic UBOs (0 VS b0 4 KB, 1 PS b0 4 KB, 2 device cb1 368 B, 3 FF
   point-sprite GS cb0 when geometry shaders exist); set 1 = t0..t15 at 0..15 and s0..s15 at 16..31, shared by all
-  stages. The pipeline layout already has both sets.
+  stages.
 
-## Stubbed in V1
-- **Shaders and pipeline state:** every draw uses **one stub pipeline per key** (topology class, position attribute,
-  blend, colour mask, pass formats): the VS reads only the position (location 0) and outputs
-  `mul(float4(pos, 1), transpose(world·view·proj))`; the PS writes solid magenta. VS b0 c0..c3 are filled from the FF
-  transforms and uploaded to the frame's UBO ring when they change; PS b0, cb1 and GS cb0 point at a zero buffer.
-  Source: `stub_vs.hlsl` / `stub_ps.hlsl`, compiled to `StubShaders.h` with
-  `/root/d3d11-port/vkd3d-install/bin/vkd3d-compiler -x hlsl -p vs_4_0 -b spirv-binary` (ps_4_0 for the PS) and
-  spirv-val clean. UI drawn by shaders that set their own constants therefore lands wherever the FF matrices put it.
-- `IShaderCreate` marks every shader invalid (logs once). No set 1 binding (textures and samplers), no alpha test,
-  clip planes, fog or FF emulation constants.
+## Real (V2): shaders, pipelines, constants, textures
+- **Shader pack:** `ShaderCreate` / `IShaderReload` load through the vs_4_0 / ps_4_0 profile slot with its folder name
+  swapped to `spv` for the call (`SpvLoadPath`), so files come from `Shaders\Vertex\spv` / `Shaders\Pixel\spv`
+  (`patch-Vulkan.MPQ`); caps keep reporting vs_3_0 / ps_3_0 as on D3D11. `IShaderCreate` parses the `VKS1` body
+  (input table + SPIR-V, entry `main`) into a `ShaderApi` (module, input table, serial `m_id`) on
+  `CGxShader::m_apiSpecific`. An empty or non-VKS1 body leaves the shader invalid, and **a bound invalid shader skips
+  the draw** (SPIRV.md "do not draw"; D3D11 falls back to FF instead). The pack was checked with libstorm (StormLib):
+  all 81 files of `build/stock-host/vulkan-mpq.list` are in the MPQ byte-identical; 2749 permutations, none empty, every
+  body a valid VKS1 header, inputs only POSITION/BLENDWEIGHT/BLENDINDICES(uint)/NORMAL/TEXCOORD0-1/COLOR0-1.
+- **FF:** `FfShadersSpv.h` (copy of `ffshaders/out/ff_shaders_spv.h`, including D3D11's `FfShaders.h` for `FfBlob` and
+  the selectors); the 48 VS + 3 PS modules are created with the device and picked with `FfSelectVs` / `FfSelectPs`
+  exactly as D3D11. FF constants: D3D11's `IStateSyncFixedFunction` maps, unchanged. No point-sprite GS (D3D11 does
+  not use one either); set 0 binding 3 stays on the zero buffer.
+- **Pipelines:** keyed on VS `m_id`, PS `m_id`, topology class, the vertex input (attribute descriptions + binding
+  count; strides are dynamic state), blend mode, colour mask and pass formats; created through one in-memory
+  `VkPipelineCache`. Blend constants (GxRs Unk84, D3D9 blend factor) are dynamic state now.
+- **Vertex input:** streams as D3D11's `IStateSyncVertexPtrs` (one binding per distinct buffer, stride = sum of its
+  attributes; predefined formats one buffer with `m_primVertexSize`). Each VKS1 entry maps (usage, usageIndex) to a
+  GxVA; the format is the D3D9 type's, switched to the shader's numeric class (UBYTE4 read as float = USCALED, SHORT2 =
+  SSCALED). Entries the decl lacks read a **zero-stride binding on the zero buffer** (R32G32B32A32 float/uint/sint).
+- **Constants:** dynamic-offset UBOs over one set 0 per frame, chosen over a set per draw because it needs no
+  descriptor writes per draw: VS b0, PS b0 and cb1 are copied into the frame's UBO ring (32 MB, 4 KB slack) only when
+  they change and bound by offset. App b0 = `s_shadowConstants` (dirty range resets as D3D11), pushing registers
+  0..highest ever written; the binding stays 4 KB. A full ring skips draws for the rest of the frame (logged once).
+- **cb1:** D3D11's `IStateSyncDeviceConstants`: alpha ref (`cb1[16].x`, the shaders `discard`), the 6 user clip planes
+  (clip space; FF planes through inv(view·proj)), ints zero.
+- **Set 1:** t0..t15 / s0..s15 from GxRs_Texture0..15 for both stages, written as one 16-descriptor write per type into
+  a set from the frame's descriptor pools (1024 sets each, reset every frame, grown on demand); a new set only when a
+  view or sampler changed since the last draw. Empty slots get a 1x1 zero R8G8B8A8 image. Sampler cache keyed on
+  filter, wrap U/V, anisotropy and texLodBias (D3D11's texfilter rules: Nearest/Linear max LOD 0, anisotropic with
+  1x = trilinear, clamped to the device limit). Texture states now call `ITexMarkAsUpdated`; TexGen states set the
+  texgen matrix (D3D11's `ISetTexGen`).
+- **Device recreation:** `IDestroyVk` releases every app shader's module (`m_loaded = 0`), so they rebuild on next use.
+
+## Not done yet
+- Never run on a GPU or under the validation layer.
+- Every sampled image is described as SHADER_READ_ONLY_OPTIMAL (depth textures sampled while still in attachment
+  layout would be wrong); no comparison samplers (`_pcf` families sample plainly, as D3D11).
+- Wireframe (PolygonFill off) draws solid. ClipDistance in every shader needs `shaderClipDistance`: a GPU without it
+  will fail pipeline creation (no fallback). USCALED/SSCALED vertex formats are not mandatory in Vulkan; no format
+  fallback if a driver lacks them.
 - Occlusion queries (caps report none), `TexCopy`/`TexStretch` (return 0), `DeviceReadPixels`/`DeviceReadDepths`
   (zero-filled), gamma ramp, stereo, MSAA (single-sampled only), device loss (a failed submit sets `m_context = 0`).
 - 1555 data where `A1R5G5B5_PACK16` is not sampleable has no fallback (Blit has no 1555 → 8888), as on D3D11.
 - `ponytail:` notes in the code mark the deliberate shortcuts (full barriers per transition, staging freed every frame,
-  every dynamic state set per draw, one scratch RT depth, stream pool overwrite after more than 2 wraps in a frame).
-- Nothing has run on a GPU yet.
+  every dynamic state set per draw, one scratch RT depth, stream pool overwrite after more than 2 wraps in a frame,
+  in-memory pipeline cache, solid fill only, shader modules destroyed immediately).
 
 ## Next steps
-1. **V2 shaders + real pipelines:** load the pack from `Shaders\Vertex\spv` / `Shaders\Pixel\spv`
-   (`patch-Vulkan.MPQ`; `ShaderCreate` bumping the target caps to the `spv` folder like D3D11 does for vs_4_0). Body
-   `VKS1` + input table (usage, usageIndex, location, compType) + SPIR-V, size-0 permutation = do not draw; entry
-   `main`. Build vertex input from the decl matched by (usage, usageIndex), zero-buffer dummy bindings for missing
-   inputs. Every VS writes PointSize, so point-list pipelines are fine. FF: `ff_shaders_spv.h` (`g_ffVsSpv[48]`,
-   `g_ffPsSpv[3]`, `g_ffGsPointSpriteSpv`) with D3D11's `FfSelectVs`/`FfSelectPs` and its FF constant fill.
-   Pipeline key adds (VS, PS, vertex layout hash); constants: port D3D11's `IShaderConstantsFlush` dirty-range upload
-   into the UBO ring for b0 (both stages) and cb1 (alpha ref, clip planes).
-2. Set 1: per-draw descriptor sets (or push descriptors) for t0..t15 / s0..s15, sampler cache keyed like D3D11's.
-3. **V3:** occlusion queries, texture copies/read-backs, device loss rebuild, MSAA, then WorldPost and in-process FSR
+1. **First in-game test:** `Wow64.exe` (or `Wow32.exe`) + `patch-Vulkan.MPQ` in `Data\`, `SET gxApi "Vulkan"` in
+   Config.wtf, Vulkan SDK validation layer installed if possible; read `Logs\gx.log` (validation messages land there).
+2. **V3:** occlusion queries, texture copies/read-backs, device loss rebuild, MSAA, then WorldPost and in-process FSR
    3.1 / FSR 4 (NATIVE-PLAN 7.3).
 
 ## Build

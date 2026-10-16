@@ -76,6 +76,17 @@ class CGxDeviceVulkan : public CGxDevice {
         std::vector<VkBuffer> m_stagingBuffers;
         std::vector<Alloc> m_stagingAllocs;
         std::vector<std::function<void()>> m_deletes;
+        std::vector<VkDescriptorPool> m_texPools; // set 1 sets, reset every frame
+        uint32_t m_texPool;
+    };
+
+    // CGxShader::m_apiSpecific (and the FF tables): the module plus the VKS1 vertex input table
+    // (usage, usageIndex, location, compType). m_id keys pipelines (handles and addresses are reused).
+    struct ShaderApi {
+        VkShaderModule m_module;
+        uint64_t m_id;
+        uint32_t m_inputCount;
+        uint8_t m_inputs[32][4];
     };
 
     HWND m_hwnd;
@@ -124,12 +135,24 @@ class CGxDeviceVulkan : public CGxDevice {
     VkDescriptorSet m_uboSets[kFrames];
     VkBuffer m_dummyUbo;
     Alloc m_dummyUboAlloc;
-    VkShaderModule m_stubVs;
-    VkShaderModule m_stubPs;
+    ShaderApi m_ffVs[48];
+    ShaderApi m_ffPs[3];
+    ShaderApi* m_curVs;
+    ShaderApi* m_curPs;
+    VkPipelineCache m_pipelineCache;
     std::unordered_map<uint64_t, VkPipeline> m_pipelines;
+    std::unordered_map<uint64_t, VkSampler> m_samplers;
     VkPipeline m_curPipeline;
-    uint32_t m_uboOffsets[3];
-    float m_stubMvp[16];
+    uint32_t m_uboOffsets[3];  // VS b0, PS b0, cb1 in the frame's UBO ring; UINT32_MAX = not in this frame's ring yet
+    int32_t m_cbSource[2];     // what VS/PS b0 hold: 0 app shadow constants, 1 FF constants
+    uint32_t m_cbHigh[2];      // highest app register ever written, per stage
+    float m_devConstants[23 * 4];
+    float m_ffConstants[2][53 * 4];
+    float m_blendFactor[4];
+    Image m_dummyImage;        // 1x1 zero texture for unbound set 1 slots
+    VkDescriptorSet m_curTexSet;
+    VkImageView m_curViews[16];
+    VkSampler m_curSamplers[16];
     uint32_t m_blendMode;
     VkCompareOp m_depthCompare;
     bool m_depthWrite;
@@ -171,6 +194,8 @@ class CGxDeviceVulkan : public CGxDevice {
     virtual bool QueryGetData(CGxQuery* query, uint32_t& data);
     virtual void IShaderReload(CGxShader* shader, const char* path, const char* name);
     virtual void IShaderCreate(CGxShader* shader);
+    virtual void ShaderCreate(CGxShader** shaders, EGxShTarget target, const char* path, const char* name, uint32_t permutations);
+    virtual void ShaderDestroy(CGxShader*& shader);
     virtual void StereoSetConvergence(float convergence);
     virtual float StereoGetConvergence();
     virtual void StereoSetSeparation(float separation);
@@ -210,9 +235,17 @@ class CGxDeviceVulkan : public CGxDevice {
     char* IStaging(uint32_t size, VkBuffer& buffer, VkDeviceSize& offset);
     void IBindRenderTargets();
     void IXformSetViewport();
-    bool IStateSync();
     void IStateSyncScissorRect();
-    VkPipeline IPipelineGet(uint32_t topologyClass, uint32_t attribType, uint32_t attribOffset);
+    VkPipeline IPipelineGet(uint32_t topologyClass, const VkVertexInputAttributeDescription* attribs, uint32_t attribCount, uint32_t bindingCount);
+    bool IShaderApiCreate(const void* body, uint32_t size, ShaderApi& out);
+    void IShaderApiRelease(ShaderApi& api);
+    bool IStateSyncShaders(bool& ffVs, bool& ffPs);
+    void IStateSyncFixedFunction(bool vs, bool ps, bool lighting, bool ambientOnly);
+    bool IStateSyncConstants(bool ffVs, bool ffPs);
+    uint32_t IUboPush(const void* data, uint32_t size);
+    VkDescriptorSet IStateSyncTextures();
+    VkSampler ISamplerGet(uint32_t filter, bool wrapU, bool wrapV, uint32_t anisotropy, float lodBias);
+    void ISetTexGen(uint32_t tmu, int32_t texGen);
     // Pools, textures
     int32_t CreatePoolAPI(CGxPool* pool);
     void IReleasePool(CGxPool* pool);
