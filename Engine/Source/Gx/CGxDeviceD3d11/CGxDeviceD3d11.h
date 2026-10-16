@@ -167,6 +167,8 @@ class CGxDeviceD3d11 : public CGxDevice {
     void IReleaseBackBuffer();
     int32_t ICreateWindow(CGxFormat& format);
     void IDestroyD3d();
+    void IRecreateD3dDevice();
+    void ISceneClearQuad(uint32_t mask, CImVector color);
     void IReleaseD3dPool(CGxPool* pool);
     void IReleaseD3dPools(int32_t freePools);
     void IReleaseD3dQueries();

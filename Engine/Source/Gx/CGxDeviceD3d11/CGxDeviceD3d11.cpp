@@ -446,13 +446,26 @@ LRESULT CALLBACK CGxDeviceD3d11::WindowProcD3d11(HWND hwnd, UINT message, WPARAM
     return DefWindowProcA(hwnd, message, wparam, lparam);
 }
 
+// 4.3.4: 0x00852310/- (x86 only). DXGI drops a fullscreen swap chain to windowed on focus loss; nothing else brings
+// it back. Only acts on a change: SetFullscreenState sends WM_SIZE, whose handler calls back in here with focus 1.
 void CGxDeviceD3d11::ISetWindowFocus(int32_t focus) {
+    int32_t changed = this->m_windowFocus != focus;
     this->m_windowFocus = focus;
 
     if (focus && !this->m_format.m_window) {
         RECT rect;
         GetWindowRect(this->m_hwnd, &rect);
         ClipCursor(&rect);
+    }
+
+    if (!changed || this->m_format.m_window || !this->m_swapChain) {
+        return;
+    }
+
+    this->m_swapChain->SetFullscreenState(focus ? TRUE : FALSE, nullptr);
+
+    if (!focus) {
+        ShowWindow(this->m_hwnd, SW_MINIMIZE);
     }
 }
 
@@ -640,7 +653,7 @@ int32_t CGxDeviceD3d11::ICreateD3dDevice(const CGxFormat& format) {
         return 0;
     }
 
-    this->m_dxgiFactory->MakeWindowAssociation(this->m_hwnd, DXGI_MWA_NO_ALT_ENTER);
+    this->m_dxgiFactory->MakeWindowAssociation(this->m_hwnd, DXGI_MWA_NO_WINDOW_CHANGES | DXGI_MWA_NO_ALT_ENTER); // 4.3.4: 0x00853EE0/0x140583C20
 
     if (format.m_fixLag) {
         IDXGIDevice1* dxgiDevice = nullptr;
@@ -1098,8 +1111,11 @@ int32_t CGxDeviceD3d11::DeviceWM(EGxWM wm, uintptr_t param1, uintptr_t param2) {
             break;
 
         case GxWM_Destroy:
-        case GxWM_KillFocus:
             this->m_windowFocus = 0;
+            break;
+
+        case GxWM_KillFocus:
+            this->ISetWindowFocus(0);
             break;
 
         case GxWM_SetFocus:
@@ -1133,15 +1149,56 @@ void CGxDeviceD3d11::ScenePresent() {
 
         if (FAILED(hr)) {
             CGxDevice::Log("CGxDeviceD3d11::ScenePresent(): Present failed: 0x%08X", static_cast<uint32_t>(hr));
-            this->m_context = 0;
+
+            // 4.3.4: 0x00870310/0x1405A5E80 rebuilds the device on DEVICE_REMOVED/RESET (TDR, driver update) instead
+            // of going dark for good. Our IDestroyD3d keeps the window and factory, so only the device is rebuilt.
+            if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
+                this->IRecreateD3dDevice();
+            } else {
+                this->m_context = 0;
+            }
         }
     }
 
     this->ShaderConstantsClear();
 }
 
-// TODO(phase 5): D3D9 Clear only clears the viewport rect; this clears the whole view. ID3D11DeviceContext1::ClearView
-// takes rects if a partial clear turns out to matter (model frames clear depth inside the UI).
+// Device removed: release every shader object (they belong to the dead device), rebuild the device, then recreate
+// the shaders from the DXBC they keep in m_code. Textures and pools are marked for recreation by IDestroyD3d.
+void CGxDeviceD3d11::IRecreateD3dDevice() {
+    for (uint32_t target = GxSh_Vertex; target <= GxSh_Pixel; target++) {
+        TSHashTable<CGxShader, HASHKEY_STRI>& list = this->m_shaderList[target];
+
+        for (CGxShader* shader = list.m_fulllist.Head(); shader; shader = list.m_fulllist.Next(shader)) {
+            SafeRelease(reinterpret_cast<IUnknown*&>(shader->m_apiSpecific));
+            shader->m_valid = 0;
+        }
+    }
+
+    CGxFormat format = this->m_format;
+    this->IDestroyD3d();
+
+    if (!this->ICreateD3dDevice(format)) {
+        return; // m_context stays 0
+    }
+
+    for (uint32_t target = GxSh_Vertex; target <= GxSh_Pixel; target++) {
+        TSHashTable<CGxShader, HASHKEY_STRI>& list = this->m_shaderList[target];
+
+        for (CGxShader* shader = list.m_fulllist.Head(); shader; shader = list.m_fulllist.Next(shader)) {
+            if (shader->m_loaded && !shader->m_apiSpecific) {
+                this->IShaderCreate(shader);
+            }
+        }
+    }
+
+    this->m_intF5C = 0;
+    this->NotifyOnDeviceRestored();
+}
+
+// D3D9 Clear(0, nullptr, ...) is clipped to the viewport; ClearRenderTargetView/ClearDepthStencilView are not.
+// A partial viewport (model frames and portraits clear depth inside the UI) is cleared with a quad instead, as
+// 4.3.4 SceneClearToViewport (0x00870400/0x1405A5F90) does. Stencil is not cleared on that path.
 void CGxDeviceD3d11::SceneClear(uint32_t mask, CImVector color) {
     if (!this->m_context) {
         return;
@@ -1149,6 +1206,14 @@ void CGxDeviceD3d11::SceneClear(uint32_t mask, CImVector color) {
 
     if (this->m_viewportDirty) {
         this->IXformSetViewport();
+    }
+
+    const CBoundingBox& vp = this->m_viewport;
+    bool partial = vp.m_x.m_l > 0.0f || vp.m_y.m_l > 0.0f || vp.m_x.m_h < 1.0f || vp.m_y.m_h < 1.0f;
+
+    if (partial && (mask & 0x3)) {
+        this->ISceneClearQuad(mask, color);
+        return;
     }
 
     if ((mask & 0x1) && this->m_curRtv) {
@@ -1159,6 +1224,72 @@ void CGxDeviceD3d11::SceneClear(uint32_t mask, CImVector color) {
     if ((mask & 0x2) && this->m_curDsv) {
         this->m_d3dContext->ClearDepthStencilView(this->m_curDsv, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
     }
+}
+
+// RsSet(void*) is the only RsSet with a stock address (0x00685F50); GxRsSet exists as several inlined copies, which
+// the stock-host resolver rejects. The int overload stores the same pointer-sized value.
+static void* IntRs(int32_t value) {
+    return reinterpret_cast<void*>(static_cast<intptr_t>(value));
+}
+
+// 4.3.4: 0x00870400/0x1405A5F90 (SceneClearToViewport): a fixed-function quad at z = 1 over the whole viewport,
+// colour and depth writes from the mask, every test off. Identity xforms: XformSetProjection maps clip z 1 to 1.0.
+void CGxDeviceD3d11::ISceneClearQuad(uint32_t mask, CImVector color) {
+    this->RsPush();
+
+    this->RsSet(GxRs_PolygonOffset, IntRs(0));
+    this->RsSet(GxRs_BlendingMode, IntRs(0));
+    this->RsSet(GxRs_AlphaRef, IntRs(0));
+    this->RsSet(GxRs_Lighting, IntRs(0));
+    this->RsSet(GxRs_Fog, IntRs(0));
+    this->RsSet(GxRs_DepthTest, IntRs(0));
+    this->RsSet(GxRs_DepthWrite, IntRs((mask & 0x2) ? 1 : 0));
+    this->RsSet(GxRs_ColorWrite, IntRs((mask & 0x1) ? 15 : 0));
+    this->RsSet(GxRs_Culling, IntRs(0));
+    this->RsSet(GxRs_ScissorTest, IntRs(0));
+    this->RsSet(GxRs_ClipPlaneMask, IntRs(0));
+    this->RsSet(GxRs_Texture0, static_cast<void*>(nullptr));
+    this->RsSet(GxRs_TexGen0, IntRs(0));
+    this->RsSet(GxRs_VertexShader, static_cast<void*>(nullptr));
+    this->RsSet(GxRs_PixelShader, static_cast<void*>(nullptr));
+
+    C44Matrix identity;
+    GxXformPush(GxXform_World, identity);
+    GxXformPush(GxXform_View, identity);
+    C44Matrix projection;
+    GxXformProjection(projection);
+    GxXformSetProjection(identity);
+
+    CGxBuf* buf = GxBufStream(GxPoolTarget_Vertex, 16, 4);
+    uint32_t* vertices = reinterpret_cast<uint32_t*>(GxBufLock(buf));
+
+    if (vertices) {
+        static const float s_corners[4][2] = { { -1.0f, 1.0f }, { -1.0f, -1.0f }, { 1.0f, 1.0f }, { 1.0f, -1.0f } };
+
+        for (uint32_t i = 0; i < 4; i++) {
+            float* v = reinterpret_cast<float*>(&vertices[i * 4]);
+            v[0] = s_corners[i][0];
+            v[1] = s_corners[i][1];
+            v[2] = 1.0f;
+            memcpy(&vertices[i * 4 + 3], &color, 4);
+        }
+
+        GxBufUnlock(buf, 0);
+        GxPrimVertexPtr(buf, GxVBF_PC);
+
+        CGxBatch batch;
+        batch.m_primType = GxPrim_TriangleStrip;
+        batch.m_start = 0;
+        batch.m_count = 4;
+        batch.m_minIndex = 0;
+        batch.m_maxIndex = 3;
+        GxDraw(&batch, 0);
+    }
+
+    GxXformSetProjection(projection);
+    GxXformPop(GxXform_View);
+    GxXformPop(GxXform_World);
+    this->RsPop();
 }
 
 // Same as CGxDeviceD3d::IXformSetViewport.
@@ -2473,7 +2604,9 @@ void CGxDeviceD3d11::ITexCreate(CGxTex* texId) {
     bool cube = texId->m_target == GxTex_CubeMap;
     bool depth = texId->m_format == GxTex_D24X8;
     bool renderTarget = texId->m_flags.m_renderTarget;
-    bool generateMips = texId->m_flags.m_generateMipMaps && !depth;
+    // GENERATE_MIPS needs RENDER_TARGET, which BC formats cannot have: DXT textures keep their uploaded mips.
+    bool compressed = texId->m_format >= GxTex_Dxt1 && texId->m_format <= GxTex_Dxt5;
+    bool generateMips = texId->m_flags.m_generateMipMaps && !depth && !compressed;
 
     D3D11_TEXTURE2D_DESC desc;
     memset(&desc, 0, sizeof(desc));
@@ -2505,8 +2638,15 @@ void CGxDeviceD3d11::ITexCreate(CGxTex* texId) {
             return;
         }
 
-        s_GxTexFormatToUse[texId->m_format] = s_tolerableTexFmtMapping[texId->m_format];
-        texId->m_format = s_GxTexFormatToUse[texId->m_format];
+        if (compressed) {
+            // BC level 0 must be a multiple of 4 in D3D10+ (D3D9 allowed 1x1/2x2 DXT). Decode just this texture to
+            // 8888 (Blit has the Dxt -> Argb8888 decoders) instead of moving every DXT texture to the fallback.
+            texId->m_format = GxTex_Argb8888;
+        } else {
+            s_GxTexFormatToUse[texId->m_format] = s_tolerableTexFmtMapping[texId->m_format];
+            texId->m_format = s_GxTexFormatToUse[texId->m_format];
+        }
+
         desc.Format = s_GxTexFmtToDxgiFmt[texId->m_format];
 
         if (FAILED(this->m_d3dDevice->CreateTexture2D(&desc, nullptr, &texture))) {
@@ -2593,8 +2733,25 @@ void CGxDeviceD3d11::ITexUpload(CGxTex* texId) {
                 RECT rect;
                 rect.left = texId->m_updateRect.minX >> mip;
                 rect.top = texId->m_updateRect.minY >> mip;
-                rect.bottom = rect.top + 1 > texId->m_updateRect.maxY >> mip ? rect.top + 1 : texId->m_updateRect.maxY >> mip;
-                rect.right = rect.left + 1 > texId->m_updateRect.maxX >> mip ? rect.left + 1 : texId->m_updateRect.maxX >> mip;
+                // 4.3.4: 0x0086C210/0x1405A0450 rounds the end up per mip; flooring dropped odd edge rows/columns.
+                rect.bottom = ((texId->m_updateRect.maxY - 1) >> mip) + 1;
+                rect.right = ((texId->m_updateRect.maxX - 1) >> mip) + 1;
+
+                if (rect.bottom > static_cast<int32_t>(mipHeight)) {
+                    rect.bottom = mipHeight;
+                }
+
+                if (rect.right > static_cast<int32_t>(mipWidth)) {
+                    rect.right = mipWidth;
+                }
+
+                if (rect.bottom <= rect.top) {
+                    rect.bottom = rect.top + 1;
+                }
+
+                if (rect.right <= rect.left) {
+                    rect.right = rect.left + 1;
+                }
 
                 if (destCompressed) {
                     rect.left &= ~3;
@@ -2664,7 +2821,7 @@ void CGxDeviceD3d11::ITexUpload(CGxTex* texId) {
         }
     }
 
-    if (texId->m_flags.m_generateMipMaps && api->m_srv && api->m_levels > 1) {
+    if (texId->m_flags.m_generateMipMaps && !destCompressed && api->m_srv && api->m_levels > 1) {
         this->m_d3dContext->GenerateMips(api->m_srv);
     }
 

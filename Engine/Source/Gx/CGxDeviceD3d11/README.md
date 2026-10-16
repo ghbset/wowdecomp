@@ -105,6 +105,13 @@ Pack `out/vs_4_0` as `Shaders\Vertex\vs_4_0\` and `out/ps_4_0` as `Shaders\Pixel
 loads, such as a `patch-<letter>.MPQ` in `Data\`. SFile reads loose files only from archives, so a folder on disk is not
 enough. The SM3 files stay where they are, and D3D9 keeps using them.
 
+## Taken from 4.3.4 (2026-10-16, see /root/d3d11-port/COMPARE-434.md)
+- Partial-viewport clears draw a quad (SceneClearToViewport); stencil is not cleared on that path.
+- Present rebuilds the device on DEVICE_REMOVED/RESET (`IRecreateD3dDevice`, shaders recreated from `m_code`).
+- Fullscreen focus: `SetFullscreenState` on focus change, minimise on loss; `DXGI_MWA_NO_WINDOW_CHANGES`.
+- Texture fixes: no GENERATE_MIPS on BC, per-mip update rect rounded up, DXT base under 4 px decodes to 8888.
+- Half-pixel: settled. Caps pixel/texel centre on edge = 1 is right for D3D10+; 4.3.4's device applies no offset either.
+
 ## Stubs and gaps (each marked `TODO(phase N)` in the code where it has a site)
 | What | Phase |
 |---|---|
@@ -112,9 +119,8 @@ enough. The SM3 files stay where they are, and D3D9 keeps using them.
 | SHORT2 attributes reach float VS inputs as R16G16_SINT bits (needs an int input in the translator, or conversion) | 5 |
 | VS inputs that are missing from the decl fail the input layout, where D3D9 supplied defaults | 5 |
 | Point sprites (caps 0; `g_ffGsPointSprite` is not bound) and vertex textures (wxl-light; SRVs are bound to PS only) | 5 / 6 |
-| Half-pixel: check whether any client path applies a D3D9 -0.5 offset (the translator README says the device must not) | 5 |
+| Hardware PCF, device half (once the translator emits `SampleCmp`): 4.3.4 IGetSamplerState 0x0086FBF0 uses `D3D11_FILTER_COMPARISON_*` + `LESS`; 12340 has no compare flag, so key it off a D24X8 texture in the slot | 5 |
 | Scaled `TexStretch` (needs a StretchRect shader) | 4 |
-| Clears are full-view, while D3D9 clears only the viewport rect (`ID3D11DeviceContext1::ClearView` if it matters) | 5 |
 | MSAA depth resolve for readers; `DeviceReadDepths` with MSAA returns zeros | 5 |
 | Argb1555/Rgb565 *data* on pre-11.1 runtimes (no 16-bit BGRA, and Blit has no 1555/565 to 8888 converter) | 5 |
 | Gamma ramp (D3D9 sets it only in fullscreen; DXGI `SetGammaControl`), stereo (no-op) | later |
