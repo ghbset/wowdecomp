@@ -219,6 +219,7 @@ int32_t CShadowCache::ValidateShadowMode(EShadowMode mode) {
 
                 case GxApi_D3d10:
                 case GxApi_D3d11:
+                case GxApi_Vulkan:
                     return depthFormat;
 
                 case GxApi_GLL:
