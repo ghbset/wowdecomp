@@ -1,5 +1,3 @@
-#if defined(WOWDECOMP_ARCH_64)
-
 #include <windows.h>
 #include <new>
 #include "WoW/Source/Battlenet/Battlenet.h"
@@ -57,4 +55,3 @@ Battlenet::WindowsLibrary::~WindowsLibrary() {
     FreeLibrary(static_cast<HMODULE>(this->m_module));
 }
 
-#endif

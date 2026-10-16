@@ -4,6 +4,8 @@ if (WOWDECOMP_ARCH_64)
     file(GLOB PLATFORM_SOURCES CONFIGURE_DEPENDS "Win64/*.cpp")
 else ()
     file(GLOB PLATFORM_SOURCES CONFIGURE_DEPENDS "Win32/*.cpp")
+    # Arch-neutral bot-check stubs; there is no Win32 copy.
+    list(APPEND PLATFORM_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/Win64/BotCheck.cpp")
 endif ()
 
 add_executable(Wow WIN32 ${PRIVATE_SOURCES} ${PLATFORM_SOURCES})
