@@ -132,11 +132,25 @@ class CParticleEmitter2 {
     static CGxPool* s_indexPool;
     static uint32_t s_initCount;
     static uint8_t s_noIndexBuffer;
-    static CSortableParticleQueue s_pq;
+    // Not stock: per thread, since CM2SceneRender::Draw builds particle vertices on the Model2 workers
+    static thread_local CSortableParticleQueue s_pq;
     static float s_rndTable[128];
     // Not stock: per thread, since CM2Scene::Animate updates emitters on the Model2 workers (set in Update, read in
     // EmitNewParticles of the same emitter tree)
     static thread_local float s_viewDist;
+
+    // Not stock: vertices of one emitter built ahead of the draw on a Model2 worker (CM2SceneRender::Draw).
+    // RenderParticles copies them instead of building them again when s_prebuilt (main thread only) matches its inputs.
+    struct Prebuilt {
+        CParticleEmitter2* m_emitter;
+        const C44Matrix* m_frameOfReference;
+        uint8_t* m_data;
+        uint32_t m_capacity;
+        uint32_t m_vertexCount;
+        CAaBox m_worldBounds;
+    };
+    static const Prebuilt* s_prebuilt;
+    static C44Matrix s_prebuiltView;
 
     static void Destroy();
     static void Init();
@@ -219,6 +233,7 @@ class CParticleEmitter2 {
     CParticleEmitter2(const CParticleEmitter2& source, int32_t copyParticles);
     CParticleEmitter2* AddRef();
     void BuildParticleVertices(ParticleVertex& vertex, uint32_t count, const C44Matrix& transform);
+    void Prebuild(Prebuilt& prebuilt);
     int32_t BuildVertex(const CParticle2& particle, ParticleVertex& vertex);
     float CalcVelocity();
     void ChangeFrameOfReference(const C44Matrix* matrix);

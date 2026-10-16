@@ -1,5 +1,7 @@
 #include <cmath>
+#include <algorithm>
 #include <cstdint>
+#include <vector>
 #include "Engine/Source/Model2/CM2SceneRender.h"
 #include "Engine/Source/Gx/CGxBuf.h"
 #include "Engine/Source/Gx/CGxDevice/CGxDevice.h"
@@ -25,6 +27,112 @@ const uint32_t s_fogModes[7] = { 1, 1, 1, 2, 2, 3, 4 };
 
 // STATIC: 0x00AF58A8
 static C44Matrix s_identity;
+
+// Not stock: particle vertices of the current top level Draw, built ahead on the Model2 workers. s_prebuiltAt maps a
+// position in Draw's index list to its s_prebuilt slot (-1: built at draw time as stock).
+#define PARTICLE_MIN_EMITTERS 8
+#define PARTICLE_MIN_PARTICLES 2000
+static std::vector<CParticleEmitter2::Prebuilt> s_prebuilt;
+static std::vector<int32_t> s_prebuiltAt;
+static std::vector<uint8_t> s_prebuiltData;
+static volatile LONG s_prebuiltNext;
+static uint32_t s_drawDepth;
+
+static void PrebuildThread(void*) {
+    while (true) {
+        uint32_t i = static_cast<uint32_t>(InterlockedIncrement(&s_prebuiltNext) - 1);
+
+        if (i >= s_prebuilt.size()) {
+            return;
+        }
+
+        s_prebuilt[i].m_emitter->Prebuild(s_prebuilt[i]);
+    }
+}
+
+// Not stock: gathers the plain (non model) particle emitters of a Draw and builds their vertices on the worker pool
+// when there are enough of them. The view is the one DrawParticle/DrawBatchedParticle set (SetupBillboardView);
+// RenderParticles checks it, the frame of reference (DrawBatchedParticle passes the first emitter's to the whole
+// batch) and the vertex count before using a slot. Only Render's vertex build moves; locks and draws stay here.
+static void PrebuildParticles(CM2SceneRender* render, M2Element* elements, uint32_t* indices, uint32_t count) {
+    s_prebuilt.clear();
+    s_prebuiltAt.assign(count, -1);
+
+    if (!(render->m_cache->m_flags & 4) || !render->m_cache->m_threadCount) {
+        return;
+    }
+
+    uint32_t particles = 0;
+    size_t bytes = 0;
+    std::vector<size_t> offsets;
+
+    for (uint32_t i = 0; i < count; i++) {
+        M2Element* element = &elements[indices[i]];
+
+        if (element->m_type != 4) {
+            continue;
+        }
+
+        CParticleEmitter2* emitter = element->m_emitter;
+        uint32_t live = emitter->m_liveList.Count();
+
+        // Over the 0x4000 vertex cap stock leaves sorted particles in s_pq; keep those on the stock path
+        if (emitter->m_params.m_hasModel || !live || live > 0x4000 / emitter->m_vertsPerParticle) {
+            continue;
+        }
+
+        CParticleEmitter2::Prebuilt prebuilt;
+        prebuilt.m_emitter = emitter;
+        prebuilt.m_frameOfReference = static_cast<const C44Matrix*>(element->m_model->m_frameOfReference);
+        prebuilt.m_data = nullptr;
+        prebuilt.m_capacity = live * emitter->m_vertsPerParticle;
+        prebuilt.m_vertexCount = 0;
+
+        s_prebuiltAt[i] = static_cast<int32_t>(s_prebuilt.size());
+        s_prebuilt.push_back(prebuilt);
+        offsets.push_back(bytes);
+        particles += live;
+        bytes += prebuilt.m_capacity * GxVertexSize((emitter->m_params.m_materialFlags & 1) ? GxVBF_PNCT : GxVBF_PCT);
+    }
+
+    // Two workers must never build the same emitter, so an emitter listed twice sends the whole Draw down the stock path
+    std::vector<CParticleEmitter2*> emitters;
+
+    for (const CParticleEmitter2::Prebuilt& prebuilt : s_prebuilt) {
+        emitters.push_back(prebuilt.m_emitter);
+    }
+
+    std::sort(emitters.begin(), emitters.end());
+
+    if (s_prebuilt.size() < 2 || (s_prebuilt.size() < PARTICLE_MIN_EMITTERS && particles < PARTICLE_MIN_PARTICLES) || std::adjacent_find(emitters.begin(), emitters.end()) != emitters.end()) {
+        s_prebuilt.clear();
+        s_prebuiltAt.assign(count, -1);
+        return;
+    }
+
+    if (s_prebuiltData.size() < bytes) {
+        s_prebuiltData.resize(bytes);
+    }
+
+    for (size_t i = 0; i < s_prebuilt.size(); i++) {
+        s_prebuilt[i].m_data = s_prebuiltData.data() + offsets[i];
+    }
+
+    CParticleEmitter2::s_prebuiltView = render->m_scene->m_view;
+    CParticleEmitter2::s_prebuiltView.Translate(*reinterpret_cast<const C3Vector*>(&render->m_scene->m_viewInv.d0));
+
+    s_prebuiltNext = 0;
+    render->m_cache->RunThreads(&PrebuildThread, nullptr, static_cast<uint32_t>(s_prebuilt.size() - 1));
+}
+
+// Not stock: the prebuilt slot for a position in the current Draw's index list, if any
+static const CParticleEmitter2::Prebuilt* PrebuiltAt(uint32_t position) {
+    if (s_drawDepth != 1 || position >= s_prebuiltAt.size() || s_prebuiltAt[position] < 0) {
+        return nullptr;
+    }
+
+    return &s_prebuilt[s_prebuiltAt[position]];
+}
 
 // VERIFY: 6a3520ef manual
 // OFFSET: 0x0081F330
@@ -824,7 +932,9 @@ uint32_t CM2SceneRender::DrawBatchedParticle(uint32_t index, M2Element* elements
 
     for (uint32_t i = 0; i < batched; i++) {
         emitter = elements[first[i]].m_emitter;
+        CParticleEmitter2::s_prebuilt = PrebuiltAt(index + i);
         emitter->Render(static_cast<const C44Matrix*>(this->m_curModel->m_frameOfReference), data, i == 0);
+        CParticleEmitter2::s_prebuilt = nullptr;
         renderedVertices += emitter->m_renderedParticles * emitter->m_vertsPerParticle;
         data += vertexSize * emitter->m_renderedParticles * emitter->m_vertsPerParticle;
         renderedIndices += emitter->m_renderedParticles * emitter->m_indicesPerParticle;
@@ -886,7 +996,9 @@ uint32_t CM2SceneRender::DrawParticle(uint32_t index, M2Element* elements, uint3
     this->SetupLighting();
     this->SetupMaterial();
     this->SetupBillboardView(*reinterpret_cast<const C3Vector*>(&this->m_scene->m_viewInv.d0));
+    CParticleEmitter2::s_prebuilt = PrebuiltAt(index);
     emitter->Render(static_cast<const C44Matrix*>(this->m_curModel->m_frameOfReference), nullptr, 1);
+    CParticleEmitter2::s_prebuilt = nullptr;
     g_theGxDevicePtr->XformSetView(s_identity);
 
     CGxMatrixStack& world = g_theGxDevicePtr->m_xforms[GxXform_World];
@@ -967,6 +1079,11 @@ void CM2SceneRender::Draw(M2PASS pass, M2Element* elements, uint32_t* indices, u
 
     this->m_pass = pass;
 
+    // Not stock: a Draw nested in a draw callback builds its particles as stock and leaves the outer slots alone
+    if (++s_drawDepth == 1) {
+        PrebuildParticles(this, elements, indices, count);
+    }
+
     for (uint32_t i = 0; i < count; i++) {
         M2Element* element = &elements[indices[i]];
 
@@ -1031,6 +1148,11 @@ void CM2SceneRender::Draw(M2PASS pass, M2Element* elements, uint32_t* indices, u
         }
 
         stack.m_dirty = 1;
+    }
+
+    if (--s_drawDepth == 0) {
+        s_prebuilt.clear();
+        s_prebuiltAt.clear();
     }
 
     g_theGxDevicePtr->XformSetView(view);

@@ -32,14 +32,16 @@ static int32_t s_particleRenderEnable = 1;
 // STATIC: 0x00B2D534
 static float s_stepRound = 0.5f;
 
+// Not stock: thread_local (with s_particleXform, s_billboardXform), since CM2SceneRender::Draw builds particle
+// vertices on the Model2 workers
 // STATIC: 0x00B2D540
-static C3Vector s_particleNormal(0.0f, 0.0f, 1.0f);
+static thread_local C3Vector s_particleNormal(0.0f, 0.0f, 1.0f);
 
 // STATIC: 0x00B2D550
-static C44Matrix s_particleXform(1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f);
+static thread_local C44Matrix s_particleXform(1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f);
 
 // STATIC: 0x00B2D590
-static C33Matrix s_billboardXform(1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f);
+static thread_local C33Matrix s_billboardXform(1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f);
 
 // STATIC: 0x00B2D5B4
 static const float s_cornerOffsets[4][2] = { { -1.0f, 1.0f }, { -1.0f, -1.0f }, { 1.0f, 1.0f }, { 1.0f, -1.0f } };
@@ -68,7 +70,10 @@ uint8_t CParticleEmitter2::s_noIndexBuffer;
 static const uint32_t s_pqParams[2] = { 32, 32 };
 
 // STATIC: 0x00DCE894
-CSortableParticleQueue CParticleEmitter2::s_pq(s_pqParams);
+thread_local CSortableParticleQueue CParticleEmitter2::s_pq(s_pqParams);
+
+const CParticleEmitter2::Prebuilt* CParticleEmitter2::s_prebuilt;
+C44Matrix CParticleEmitter2::s_prebuiltView;
 
 // STATIC: 0x00DCE8C4
 void* ParticleSystemManager::sm_projectParam;
@@ -2369,8 +2374,19 @@ void CParticleEmitter2::RenderParticles(const C44Matrix* frameOfReference, void*
 
     ParticleVertex vertex;
     vertex.m_count = 0;
-    this->FillOutParticleVertex(buffer, format, &vertex);
-    this->BuildParticleVertices(vertex, count, view.AffineInverse());
+
+    // Not stock: copy the vertices a Model2 worker built for this emitter with the same inputs
+    const Prebuilt* prebuilt = s_prebuilt;
+
+    if (prebuilt && prebuilt->m_emitter == this && prebuilt->m_frameOfReference == frameOfReference && prebuilt->m_capacity == count * this->m_vertsPerParticle && !memcmp(&view, &s_prebuiltView, sizeof(view))) {
+        memcpy(buffer, prebuilt->m_data, prebuilt->m_vertexCount * GxVertexSize(format));
+        vertex.m_count = prebuilt->m_vertexCount;
+        this->m_worldBounds = prebuilt->m_worldBounds;
+        this->m_renderedParticles = vertex.m_count / this->m_vertsPerParticle;
+    } else {
+        this->FillOutParticleVertex(buffer, format, &vertex);
+        this->BuildParticleVertices(vertex, count, view.AffineInverse());
+    }
 
     if (buf) {
         g_theGxDevicePtr->BufUnlock(buf, 0);
@@ -2381,6 +2397,36 @@ void CParticleEmitter2::RenderParticles(const C44Matrix* frameOfReference, void*
             g_theGxDevicePtr->XformSetView(view);
         }
     }
+}
+
+// Not stock: the vertex half of Render/RenderParticles for one emitter on a Model2 worker, into prebuilt.m_data
+// (prebuilt.m_capacity vertices, every live particle, so the sort queue drains). The emitter state it touches is put
+// back, so the main thread sees stock state until RenderParticles copies the result.
+void CParticleEmitter2::Prebuild(Prebuilt& prebuilt) {
+    CAaBox worldBounds = this->m_worldBounds;
+    C3Vector billboardAxis = this->m_billboardAxis;
+    uint32_t renderedParticles = this->m_renderedParticles;
+
+    this->m_worldBounds.b.x = 3.4028235e38f;
+    this->m_worldBounds.b.y = 3.4028235e38f;
+    this->m_worldBounds.t.x = -3.4028235e38f;
+    this->m_worldBounds.b.z = 3.4028235e38f;
+    this->m_worldBounds.t.y = -3.4028235e38f;
+    this->m_worldBounds.t.z = -3.4028235e38f;
+
+    this->RenderParticlesPrep(prebuilt.m_frameOfReference, s_prebuiltView);
+
+    ParticleVertex vertex;
+    vertex.m_count = 0;
+    this->FillOutParticleVertex(prebuilt.m_data, (this->m_params.m_materialFlags & 0x1) ? GxVBF_PNCT : GxVBF_PCT, &vertex);
+    this->BuildParticleVertices(vertex, prebuilt.m_capacity / this->m_vertsPerParticle, s_prebuiltView.AffineInverse());
+
+    prebuilt.m_vertexCount = vertex.m_count;
+    prebuilt.m_worldBounds = this->m_worldBounds;
+
+    this->m_worldBounds = worldBounds;
+    this->m_billboardAxis = billboardAxis;
+    this->m_renderedParticles = renderedParticles;
 }
 
 // VERIFY: 3d799495 manual
