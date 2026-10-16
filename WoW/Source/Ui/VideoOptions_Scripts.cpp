@@ -253,6 +253,10 @@ static void SetupMultisampleFormats() {
         api = GxApi_D3d11;
     }
 
+    if (CmdLineGetBool(CMD_VULKAN) && GxApiSupported(GxApi_Vulkan)) {
+        api = GxApi_Vulkan;
+    }
+
     int32_t colorBits = 0;
     int32_t depthBits = 0;
 

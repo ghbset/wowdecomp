@@ -406,6 +406,12 @@ void ConsoleDeviceInitialize(const char* title, bool unused_a2, bool unused_a3) 
         api = GxApi_D3d11;
     }
 
+    // The Vulkan backend: the gxApi CVar ("Vulkan") is matched by the loop above like every other
+    // name; "-vulkan" on the command line overrides it the way "-d3d9ex" does.
+    if (CmdLineGetBool(CMD_VULKAN) && GxApiSupported(GxApi_Vulkan)) {
+        api = GxApi_Vulkan;
+    }
+
     s_requestedFormat.m_fixLag = s_cvGxFixLag->m_intValue != 0;
     s_requestedFormat.m_hwTnL = !CmdLineGetBool(CMD_SW_TNL);
 

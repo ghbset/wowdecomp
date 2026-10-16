@@ -66,6 +66,25 @@ if (WIN32)
     endif ()
 endif ()
 
+# The Khronos Vulkan headers (vulkan-headers/VERSION names the pinned SDK tag), headers only: no vulkan-1.lib
+# and no Vulkan SDK on the build machine. VK_NO_PROTOTYPES drops the function declarations, so every entry
+# point has to come from the loader at runtime (Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Loader.cpp loads
+# vulkan-1.dll, the system component a machine with a Vulkan driver has in System32).
+if (WIN32)
+    add_library(VulkanHeaders INTERFACE)
+
+    target_include_directories(VulkanHeaders
+        INTERFACE
+            ${CMAKE_CURRENT_SOURCE_DIR}/vulkan-headers
+    )
+
+    target_compile_definitions(VulkanHeaders
+        INTERFACE
+            VK_NO_PROTOTYPES
+            VK_USE_PLATFORM_WIN32_KHR
+    )
+endif ()
+
 add_library(freetype STATIC
     freetype/src/base/ftsystem.c
     freetype/src/base/ftinit.c

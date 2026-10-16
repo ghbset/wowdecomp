@@ -24,6 +24,10 @@ enum CMDOPT {
     CMDOPTS = 16,
     // Not in 12340: -d3d11 (CGxDeviceD3d11). Past the WoW ids (WOWCMDOPT, Client.h, 16..39), so no switch shares it.
     CMD_D3D11 = 40,
+    // Not in the 3.3.5a binary: "-vulkan" selects the Vulkan backend like "-opengl" / "-d3d" select theirs.
+    // Past every id the client registers (WOWCMDOPT in WoW/Source/Client.h ends at CMD_GX_OVERRIDE = 39; 40 is our -d3d11):
+    // SCmd keys its arguments on the id, so a reused value would alias another option.
+    CMD_VULKAN = 41,
 };
 
 enum PROPERTY {
