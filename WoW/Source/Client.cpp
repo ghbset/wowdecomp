@@ -1551,6 +1551,12 @@ void ClientDestroyGame(int32_t charSelect, int32_t resumeGlue, int32_t worldLogi
     }
 
     s_botCheckEnabled = 0;
+
+    // Not stock: D3D11 only (the CVar exists only there). Dump the second frame after logout (character select).
+    if (CVar* dump = CVar::Lookup("d3d11DumpFrame")) {
+        dump->Set(2, true, false, false, false);
+    }
+
     EventUnregister(EVENT_ID_IDLE, ClientIdle);
     ClientServices::ClearMessageHandler(SMSG_NOTIFICATION);
     ClientServices::ClearMessageHandler(SMSG_PLAYED_TIME);

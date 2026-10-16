@@ -1293,7 +1293,11 @@ void CGxDeviceD3d11::ScenePresent() {
 
         CVar* dump = D3d11DumpFrameCVar();
 
-        if (dump && dump->m_intValue == 1) {
+        // N > 1 counts down one per frame, then 1 dumps the next frame as before. ClientDestroyGame sets 2 so the second
+        // frame after a logout (character select) is dumped without the console.
+        if (dump && dump->m_intValue > 1) {
+            dump->Set(dump->m_intValue - 1, true, false, false, false);
+        } else if (dump && dump->m_intValue == 1) {
             dump->Set(0, true, false, false, false);
             s_dumpFrame = true;
             s_dumpDraw = 0;
@@ -3206,6 +3210,28 @@ void CGxDeviceD3d11::ITexForceRecreation(int32_t all) {
 }
 
 void CGxDeviceD3d11::TexDestroy(CGxTex* texId) {
+    // Not stock: IStateSyncTextures dereferences every bound CGxTex* on every draw; D3D9 only touches a slot when it
+    // changes. CWorld::Destroy -> CShadowCache::Destroy frees the shadow maps while GxRs_Texture4 (and 5..7 above
+    // SHADOW_MEDIUM) still hold them, and glue never rebinds those slots, so after a logout every glue draw read a
+    // freed CGxTex, ran ITexMarkAsUpdated/ITexCreate on whatever reused the memory and bound its SRV. Forget it here.
+    for (uint32_t i = 0; i < 16; i++) {
+        if (this->m_appRenderStates[GxRs_Texture0 + i].m_value.m_data.p == texId) {
+            this->m_appRenderStates[GxRs_Texture0 + i].m_value.m_data.p = nullptr;
+        }
+
+        if (this->m_hwRenderStates[GxRs_Texture0 + i].m_data.p == texId) {
+            this->m_hwRenderStates[GxRs_Texture0 + i].m_data.p = nullptr;
+        }
+    }
+
+    for (uint32_t i = 0; i < this->m_pushedStates.Count(); i++) {
+        CGxPushedRenderState& pushed = this->m_pushedStates[i];
+
+        if (pushed.m_which >= GxRs_Texture0 && pushed.m_which < GxRs_Texture0 + 16 && pushed.m_value.m_data.p == texId) {
+            pushed.m_value.m_data.p = nullptr;
+        }
+    }
+
     for (uint32_t i = 0; i < 2; i++) {
         if (this->m_textureTarget[i].m_texture == texId && this->m_textureTarget[i].m_apiSpecific) {
             this->m_textureTarget[i].m_apiSpecific = nullptr;
