@@ -536,6 +536,7 @@ namespace gxvk::vk::present
 
     void SetGamma(const uint16_t* red, const uint16_t* green, const uint16_t* blue, bool apply)
     {
+        frame::Drain();   // RENDERTHREAD: Record() reads the ramp on the render thread
         for (uint32_t i = 0; i < kLutEntries; ++i)
         {
             s.lut[i * 4 + 0] = red[i] / 65535.0f;

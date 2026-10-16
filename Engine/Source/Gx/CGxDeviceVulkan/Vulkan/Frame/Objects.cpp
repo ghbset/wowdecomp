@@ -21,8 +21,10 @@ namespace gxvk::vk::frame::detail
         {
             // A new VkDevice: the old one is gone, so its objects are forgotten, never destroyed.
             Write(Warn, "vulkan: frame: the Vulkan device changed; the frame's old objects are forgotten, not destroyed");
+            RtStop(false);   // RENDERTHREAD: its pool and buffers went with the old device
             delete[] s.retired;
             s = State();
+            gSubmitted.store(0);
         }
         const loader::Device& d = *h.dapi;
         s.device = h.device;
@@ -100,7 +102,9 @@ namespace gxvk::vk::frame::detail
     {
         if (!s.dapi || !s.device || !s.dapi->GetFenceStatus) return;
         for (FrameSlot& slot : s.slots)
-            if (slot.serial > s.completed && slot.fence != VK_NULL_HANDLE
+            // RENDERTHREAD: a slot handed to the render thread but not yet submitted has an unsignalled
+            // fence the thread is about to submit; it is not asked about until then.
+            if (slot.serial > s.completed && slot.serial <= gSubmitted.load() && slot.fence != VK_NULL_HANDLE
                 && s.dapi->GetFenceStatus(s.device, slot.fence) == VK_SUCCESS)
                 s.completed = slot.serial;
     }

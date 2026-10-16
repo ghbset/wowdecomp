@@ -190,6 +190,8 @@ int32_t CGxDeviceVulkan::ICreateVulkan(const CGxFormat& format) {
     this->m_vulkanPending = 0;
 
     if (context::Live()) {
+        frame::Drain();   // RENDERTHREAD: nothing in flight on the old swapchain while Rebind replaces it
+
         // A device that is up and a window that is new: the format changed, or the engine restarted
         // its graphics. Rebind sees the HWND differ and rebuilds surface and swapchain.
         context::Rebind(this->m_hwnd);

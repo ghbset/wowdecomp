@@ -78,6 +78,11 @@ namespace gxvk::vk::frame::detail
 
         const loader::Device& d    = *s.dapi;
         FrameSlot&            slot = s.slots[s.fi];
+        // RENDERTHREAD: the slot may still be with the render thread; its fence is only submitted
+        // once the thread is done with it, and never after the thread failed.
+        RtWait(slot.serial);
+        RtCollect();
+        if (s.failed) return false;
         VkResult r = d.WaitForFences(s.device, 1, &slot.fence, VK_TRUE, UINT64_MAX);
         if (r != VK_SUCCESS)
         {
@@ -111,6 +116,7 @@ namespace gxvk::vk::frame::detail
         s.queryPool          = VK_NULL_HANDLE;
         s.clearColourPending = false;
         s.clearDepthPending  = false;
+        s.rtPresent          = false;
         return true;
     }
 
@@ -201,8 +207,28 @@ namespace gxvk::vk::frame::detail
         if (r == VK_SUCCESS) r = d.EndCommandBuffer(slot.cmd);
         if (r != VK_SUCCESS) return Fail("vkEndCommandBuffer", r);
 
-        r = d.ResetFences(s.device, 1, &slot.fence);
+        {
+            // RENDERTHREAD: the render thread may be waiting this fence for a swapchain image it
+            // last drew; the serial goes with the reset, so the thread can tell it was reused.
+            std::lock_guard<std::mutex> lock(gFenceLock);
+            r           = d.ResetFences(s.device, 1, &slot.fence);
+            slot.serial = s.serial;
+        }
         if (r != VK_SUCCESS) return Fail("vkResetFences", r);
+
+        // RENDERTHREAD: a presented frame goes to the render thread (acquire, present pass, submit,
+        // present); the main thread moves on to the other slot. Everything else -- a flush, a
+        // read-back, the release -- is submitted here, behind whatever the thread still holds.
+        if (present && !s.acquired && RtHandOff(s.fi, s.serial, s.rtPresent))
+        {
+            s.submitted = s.serial;
+            ++s.stats.frames;
+            s.open      = false;
+            s.rtPresent = false;
+            s.fi        = (s.fi + 1) % kFramesInFlight;
+            return;
+        }
+        Drain();
 
         // The pre-pass first, then the main buffer. The present pass's first use of the swapchain
         // image is its colour output, so that stage waits for the acquire.
@@ -223,7 +249,7 @@ namespace gxvk::vk::frame::detail
         }
         r = d.QueueSubmit(h->graphicsQueue, 1, &submit, slot.fence);
         if (r != VK_SUCCESS) return Fail("vkQueueSubmit", r);
-        slot.serial = s.serial;
+        gSubmitted.store(s.serial);
         s.submitted = s.serial;
         ++s.stats.frames;
 
@@ -359,6 +385,7 @@ namespace gxvk::vk::frame
 
     void Flush()
     {
+        Drain();   // RENDERTHREAD: what the thread holds is submitted before the open frame
         if (!s.open) return;
         FinishFrame(false);
         ++s.stats.flushes;
@@ -397,14 +424,17 @@ namespace gxvk::vk::frame
 
     uint64_t Completed() { return s.completed; }
 
-    uint64_t Submitted() { return s.submitted; }
+    // RENDERTHREAD: the serial vkQueueSubmit has seen, not the one handed to the thread: a query of
+    // a frame still with the thread is not available yet, and Result() flushes (drains) for it.
+    uint64_t Submitted() { return gSubmitted.load(); }
 
     bool UsedThisFrame(uint64_t serial) { return s.open && serial == s.serial; }
 
     bool WaitSerial(uint64_t serial)
     {
         if (serial <= s.completed) return true;
-        if (serial > s.submitted || !s.dapi) return false;
+        Drain();   // RENDERTHREAD: a serial handed to the thread has its fence submitted only then
+        if (s.failed || serial > s.submitted || !s.dapi) return false;
         for (FrameSlot& slot : s.slots)
         {
             if (slot.serial < serial) continue;
@@ -459,7 +489,18 @@ namespace gxvk::vk::frame
                 s.target = kept;
             }
             EndPass();
-            if (s.scene.handle != VK_NULL_HANDLE && s.scene.layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL && Acquire())
+            if (RtWanted())
+            {
+                // RENDERTHREAD: the render thread acquires and records the present pass; here only
+                // the swapchain's objects are made sure of (a rebuild of them drains the thread).
+                const context::Handles* h = context::Get();
+                if (s.scene.handle != VK_NULL_HANDLE && s.scene.layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL && h)
+                {
+                    if (h->swapchain == VK_NULL_HANDLE || h->extent.width == 0 || h->extent.height == 0) s.rebuild = true;
+                    else s.rtPresent = EnsureImageObjects(*h) && present::Ready();
+                }
+            }
+            else if (s.scene.handle != VK_NULL_HANDLE && s.scene.layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL && Acquire())
             {
                 if (!present::Record(s.slots[s.fi].cmd, s.image, s.fi))
                 {
@@ -476,9 +517,11 @@ namespace gxvk::vk::frame
 
         FinishFrame(true);
         memory::Tick();
+        RtCollect();   // RENDERTHREAD: a stale swapchain the thread saw is rebuilt a frame late
 
         if (s.rebuild && !s.failed)
         {
+            Drain();   // RENDERTHREAD: nothing may be acquiring or presenting while the swapchain goes
             // Out of date, suboptimal, a lost surface, or a WM_SIZE: rebuilt once, here, between
             // frames. The caller does the context's half (Rebind) with the window it owns; a lost
             // surface is dropped first so Rebind remakes it with the swapchain.
@@ -508,6 +551,7 @@ namespace gxvk::vk::frame
     {
         if (!s.dapi || !s.device || !context::Live()) return;
         FinishFrame(true);
+        Drain();   // RENDERTHREAD
         s.dapi->DeviceWaitIdle(s.device);
         s.completed = s.submitted;
         CollectRetired(true);
@@ -521,15 +565,22 @@ namespace gxvk::vk::frame
         if (context::Live())
         {
             ReleaseSwapchain();
+            RtStop(true);   // RENDERTHREAD: drained by the release; joined before its fences go
             DestroyDeviceObjects();
         }
+        else RtStop(false);
         delete[] s.retired;
         s = State();
+        gSubmitted.store(0);
     }
 
     uint64_t Count() { return s.presentedCount; }
 
     bool Failed() { return s.failed; }
 
-    void GetStats(Stats& out) { out = s.stats; }
+    void GetStats(Stats& out)
+    {
+        out = s.stats;
+        out.presented += RtPresented();
+    }
 }

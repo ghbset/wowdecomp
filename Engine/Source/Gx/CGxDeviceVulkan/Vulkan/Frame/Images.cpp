@@ -45,6 +45,7 @@ namespace gxvk::vk::frame::detail
             // Earlier frames may still be presenting from these images or drawing into the scene.
             // Only the submitted frames' retirements are collected: the open frame may have named
             // a retired resource in commands not yet submitted.
+            Drain();   // RENDERTHREAD: the thread may be acquiring from or presenting these images
             d.DeviceWaitIdle(s.device);
             s.completed = s.submitted;
             CollectRetired(false);
@@ -171,6 +172,7 @@ namespace gxvk::vk::frame::detail
         if (s.imagesInFlight[image] != VK_NULL_HANDLE && s.imagesInFlight[image] != slot.fence)
             s.dapi->WaitForFences(s.device, 1, &s.imagesInFlight[image], VK_TRUE, UINT64_MAX);
         s.imagesInFlight[image] = slot.fence;
+        s.imageSerial[image]    = s.serial;
         s.image    = image;
         s.acquired = true;
         return true;

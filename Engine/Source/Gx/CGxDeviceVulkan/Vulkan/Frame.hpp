@@ -204,6 +204,18 @@ namespace gxvk::vk::frame
     /// and memory::Shutdown().
     void Destroy();
 
+    /**
+     * RENDERTHREAD: with `on`, the frames Present() ends are handed to a render thread that acquires,
+     * records the present pass, submits and presents, while the main thread records the next frame
+     * into the other slot. Off (the default) stops the thread after it drained. Read every frame from
+     * the renderThread CVar.
+     */
+    void SetThreaded(bool on);
+
+    /// RENDERTHREAD: waits until the render thread has submitted (and presented) everything handed
+    /// to it. Anything on the main thread that needs the queue or the swapchain calls it first.
+    void Drain();
+
     /// Frames presented since the device came up.
     uint64_t Count();
 
