@@ -641,6 +641,7 @@ int32_t CGxDeviceD3d11::ICreateD3d() {
 int32_t CGxDeviceD3d11::DeviceSetFormat(const CGxFormat& format) {
     D3d11Log("CGxDeviceD3d11::DeviceSetFormat():");
     this->Log(format);
+    D3d11Log("CGxDeviceD3d11::DeviceSetFormat(): MSAA %u -> %u (quality %g -> %g): full device recreate, every texture recreated and re-uploaded", this->m_format.m_multisampleCount, format.m_multisampleCount, static_cast<double>(this->m_format.m_multisampleQuality), static_cast<double>(format.m_multisampleQuality));
 
     if (this->m_hwnd) {
         ShowWindow(this->m_hwnd, SW_HIDE);
@@ -1214,7 +1215,8 @@ void CGxDeviceD3d11::DeviceSetRenderTarget(EGxBuffer buffer, CGxTex* texture, ui
 
     CGxDevice::TextureTarget& target = this->m_textureTarget[buffer];
 
-    if (target.m_texture == texture && target.m_plane == plane) {
+    // Same target, but ITexForceRecreation (device recreate, resize) dropped its view: fall through and rebind it.
+    if (target.m_texture == texture && target.m_plane == plane && (!texture || target.m_apiSpecific)) {
         return;
     }
 
@@ -3334,8 +3336,11 @@ void CGxDeviceD3d11::ITexMarkAsUpdated(CGxTex* texId) {
 }
 
 void CGxDeviceD3d11::ITexForceRecreation(int32_t all) {
+    // 4.3.4 (0x0086C590) walks every texture, created or not. Skipping those without a D3D object (never bound yet,
+    // or released by an earlier recreation) left them with whatever partial update rect they had and without the
+    // GxTex_3 regen notice, so after a device recreate they came back with only part of their texels.
     for (CGxTex* texId = this->m_textures.Head(); texId; texId = this->m_textures.Next(texId)) {
-        if (!texId->m_apiSpecificData || !(all || texId->m_flags.m_renderTarget)) {
+        if (!(all || texId->m_flags.m_renderTarget)) {
             continue;
         }
 
@@ -3354,7 +3359,10 @@ void CGxDeviceD3d11::ITexForceRecreation(int32_t all) {
 
         uint32_t texelStrideInBytes;
         const void* texels;
-        texId->m_userFunc(GxTex_3, texId->m_width, texId->m_height, 0, 0, texId->m_userArg, texelStrideInBytes, texels);
+
+        if (texId->m_userFunc) {
+            texId->m_userFunc(GxTex_3, texId->m_width, texId->m_height, 0, 0, texId->m_userArg, texelStrideInBytes, texels);
+        }
     }
 
     if (this->m_hwnd && this->m_d3dDevice) {
