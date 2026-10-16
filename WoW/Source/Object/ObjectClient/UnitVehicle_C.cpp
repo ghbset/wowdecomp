@@ -1,17 +1,23 @@
 #include "UnitVehicle_C.h"
-#include "WoW/Source/Object/ObjectClient/Unit_C.h"
-#include "WoW/Source/Object/ObjectClient/Vehicle_C.h"
-#include "WoW/Source/Object/ObjectClient/VehiclePassenger_C.h"
-#include "WoW/Source/DB/Rec/VehicleSeatRec.h"
-#include "WoW/Source/ObjectMgrClient/ObjectMgrClient.h"
-#include "WoW/Source/Object/ObjectClient/VehicleCamera_C.h"
-#include "WoW/Source/DB/Rec/VehicleRec.h"
-#include "WoW/Source/UIUtil/InputControl.h"
+#include "Engine/Source/Base/CDataStore.h"
 #include "Engine/Source/FrameScript/FrameScript.h"
+#include "Engine/Source/Tempest/CMath.h"
+#include "WoW/Source/DB/Rec/VehicleRec.h"
+#include "WoW/Source/DB/Rec/VehicleSeatRec.h"
+#include "WoW/Source/Object/ObjectClient/Player_C.h"
+#include "WoW/Source/Object/ObjectClient/Unit_C.h"
+#include "WoW/Source/Object/ObjectClient/VehicleCamera_C.h"
+#include "WoW/Source/Object/ObjectClient/VehiclePassenger_C.h"
+#include "WoW/Source/Object/ObjectClient/Vehicle_C.h"
+#include "WoW/Source/ObjectMgrClient/ObjectMgrClient.h"
+#include "WoW/Source/UIUtil/Camera.h"
+#include "WoW/Source/UIUtil/InputControl.h"
+#include "WoW/Source/Ui/PetInfo.h"
+#include "WoW/Source/Ui/ScriptEvents.h"
 #include "WoW/Source/Ui/Types.h"
 #include "WoW/Source/Ui/WorldFrame.h"
-#include "WoW/Source/UIUtil/Camera.h"
 #include "WoW/Source/WorldClient/FrameTime.h"
+#include "WoW/Source/WowSvcs/WowSvcsClient/ClientServices.h"
 
 // VERIFY: bc21d620 manual
 // OFFSET: 0x0074C650
@@ -460,5 +466,433 @@ void CGUnit_C::VehiclePassengerOnUpdateTransport(WOWGUID transport, uint8_t seat
         }
     } else {
         this->OnVehicleCameraPossiblyNeeded();
+    }
+}
+
+// VERIFY: c6051623 auto
+// OFFSET: 0x0074B9A0
+uint32_t CGUnit_C::IsStrafingDisabled() const {
+    return this->m_movementData.m_flags2 & MOVEMENTFLAG2_NO_STRAFE;
+}
+
+// VERIFY: dcad4d49 auto
+// OFFSET: 0x0074B9B0
+void CGUnit_C::SetVehicleExitVoluntary(int32_t enable) {
+    this->m_movementData.SetVehicleExitVoluntary(enable);
+}
+
+// VERIFY: 5d120117 auto
+// OFFSET: 0x0074BB20
+void CGUnit_C::OnDismissControlledVehicleLocal(uint32_t eventTime) {
+    this->m_movementData.OnDismissControlledVehicleLocal(eventTime);
+}
+
+// VERIFY: 26b35972 auto
+// OFFSET: 0x0074BB30
+void CGUnit_C::OnChangeSeatsOnControlledVehicleLocal(uint32_t eventTime, WOWGUID transport, uint8_t seat) {
+    this->m_movementData.OnChangeSeatsOnControlledVehicleLocal(eventTime, transport, seat);
+}
+
+// VERIFY: 561780c9 auto
+// OFFSET: 0x0074BB60
+int32_t CGUnit_C::ShouldUseVehicleSeatExitAnimation(const VehicleSeatRec* seat) const {
+    return seat->m_flags & ((this->m_movementData.m_flags2 & 0x40) ? 0x8 : 0x8000);
+}
+
+// VERIFY: d8212e45 auto
+// OFFSET: 0x0074BB90
+uint32_t CGUnit_C::IsVehicleCurrentlyUnstoppable() const {
+    VehicleRec* vehicle = this->m_vehicle ? this->m_vehicle->m_vehicleRec : nullptr;
+
+    if (!vehicle) {
+        return 0;
+    }
+
+    return vehicle->m_flags & ((this->m_movement->m_flags & (MOVEMENTFLAG_SWIMMING | MOVEMENTFLAG_FLYING)) ? 0x100 : 0x80);
+}
+
+// VERIFY: 2533cf6d auto
+// OFFSET: 0x0074BBD0
+void CGUnit_C::SignalPlayerGainsVehicleDataEvent() {
+    VehicleRec* vehicleRec = this->m_vehicle ? this->m_vehicle->m_vehicleRec : nullptr;
+    WOWGUID guid = this->m_obj->m_guid;
+    int32_t count;
+    char** tokens = Script_GetTokenIDsFromGUID(guid, &count);
+
+    for (int32_t i = 0; i < count; i++) {
+        FrameScript_SignalEvent(SCRIPT_EVENT_PLAYER_GAINS_VEHICLE_DATA, "%s%d", tokens[i], vehicleRec ? vehicleRec->m_vehicleUiindicatorID : 0);
+    }
+}
+
+// VERIFY: abf1b455 auto
+// OFFSET: 0x0074BC50
+void CGUnit_C::SignalPlayerLosesVehicleDataEvent() {
+    WOWGUID guid = this->m_obj->m_guid;
+    int32_t count;
+    char** tokens = Script_GetTokenIDsFromGUID(guid, &count);
+
+    for (int32_t i = 0; i < count; i++) {
+        FrameScript_SignalEvent(SCRIPT_EVENT_PLAYER_LOSES_VEHICLE_DATA, "%s", tokens[i]);
+    }
+}
+
+// VERIFY: a7438679 auto
+// OFFSET: 0x0074C040
+int32_t CGUnit_C::DeferVehicleTransitionSpline(CDataStore* msg, uint64_t transport, uint8_t seat) {
+    if (this->m_vehiclePassenger) {
+        this->m_vehiclePassenger->DeleteAllDeferredVehicleTransitionAnimSplines();
+        this->m_vehiclePassenger->StopWaitingForVehicleTransitionAnim();
+    }
+
+    int32_t result = this->VehiclePassengerShouldWaitForVehicleTransitionAnim(transport, seat);
+
+    if (!result) {
+        return result;
+    }
+
+    this->m_movementData.FlushMoveQueue(0, 0);
+
+    if (!this->m_vehiclePassenger) {
+        this->m_vehiclePassenger = CVehiclePassenger_C::Alloc(this);
+    }
+
+    this->m_vehiclePassenger->StartDeferringVehicleTransitionAnimSpline(msg);
+
+    if (!this->VehiclePassengerStartWaitingForVehicleTransitionAnim(transport, seat)) {
+        this->m_vehiclePassenger->ExecuteAllDeferredVehicleTransitionAnimSplines();
+    }
+
+    return 1;
+}
+
+// VERIFY: cd9f8160 manual
+// OFFSET: 0x0074C0E0
+void CGUnit_C::VehiclePassengerUpdateWorldCameraState(VehicleRec* vehicleRec, VehicleSeatRec* seatRec, uint32_t startTime, uint32_t endTime) {
+    CGCamera* camera = CGWorldFrame::GetActiveCamera();
+
+    if (!camera) {
+        return;
+    }
+
+    uint32_t active = 0;
+
+    if (this->m_vehiclePassenger && (this->m_vehiclePassenger->m_state == 1 || this->m_vehiclePassenger->m_state == 2 || this->m_vehiclePassenger->m_state == 3)) {
+        active = 1;
+    }
+
+    if (CGUnit_C::s_vehiclePassengerCameraActive == active && CGUnit_C::s_vehiclePassengerCameraVehicle == vehicleRec && CGUnit_C::s_vehiclePassengerCameraSeat == seatRec) {
+        return;
+    }
+
+    uint32_t restoreZoom = camera->m_flags & 0x20;
+    CGUnit_C::s_vehiclePassengerCameraVehicle = vehicleRec;
+    CGUnit_C::s_vehiclePassengerCameraActive = active;
+    CGUnit_C::s_vehiclePassengerCameraSeat = seatRec;
+    int32_t resetMin = 1;
+    int32_t resetMax = 1;
+    float duration = static_cast<float>(endTime - startTime) * 0.001f;
+
+    if (!active) {
+        camera->SetVehicleZoomEnabled(0, duration, restoreZoom == 0);
+        camera->SetDesiredVehicleYawOffset(0.0f, startTime, endTime);
+        camera->SetDesiredVehiclePitchOffset(0.0f, startTime, endTime);
+        camera->SetVehicleTrackingStyle(0);
+    } else {
+        if (seatRec && (seatRec->m_flags & 0x1000000)) {
+            camera->SetVehicleZoomEnabled(1, duration, 1);
+            restoreZoom = 0;
+        } else if (seatRec && (seatRec->m_flagsB & 0x400)) {
+            camera->SetVehicleZoomEnabled(0, duration, 0);
+            float current = camera->m_distance;
+            float target = current;
+            uint32_t flagsB = seatRec->m_flagsB;
+            int32_t hasMin = flagsB & 0x4000;
+            int32_t hasMax = flagsB & 0x8000;
+            uint32_t wasRestore = restoreZoom;
+            restoreZoom = 0;
+            float minDistance = hasMin ? seatRec->m_field33512213054 : camera->GetDefaultZoomMinDistance();
+            float maxDistance = hasMax ? seatRec->m_field33512213055 : CGCamera::GetDefaultZoomMaxDistance();
+
+            if (seatRec->m_flagsB & 0x800) {
+                float preferred = seatRec->m_field33512213053;
+
+                if (preferred > current && !(seatRec->m_flagsB & 0x1000)) {
+                    target = preferred;
+                }
+
+                if (preferred < target && !(seatRec->m_flagsB & 0x2000)) {
+                    target = preferred;
+                }
+
+                if (!hasMin && minDistance > preferred) {
+                    hasMin = 1;
+                    minDistance = preferred;
+                }
+
+                if (!hasMax && maxDistance < preferred) {
+                    hasMax = 1;
+                    maxDistance = preferred;
+                }
+            }
+
+            if (hasMin) {
+                resetMin = 0;
+                camera->SetVehicleSeatZoomMinDistance(minDistance);
+
+                if (minDistance > target) {
+                    target = minDistance;
+                }
+            }
+
+            if (hasMax) {
+                resetMax = 0;
+                camera->SetVehicleSeatZoomMaxDistance(maxDistance);
+
+                if (maxDistance < target) {
+                    target = maxDistance;
+                }
+            }
+
+            if (fnotequalz(current, target, 0.001f)) {
+                if (!wasRestore) {
+                    camera->SetVehicleExitZoomDistance(current);
+                }
+
+                camera->ZoomToDistance(target, startTime, duration, 1);
+            }
+        } else {
+            camera->SetVehicleZoomEnabled(0, duration, restoreZoom == 0);
+        }
+
+        camera->SetDesiredVehicleYawOffset(vehicleRec ? vehicleRec->m_cameraYawOffset : 0.0f, startTime, endTime);
+        camera->SetDesiredVehiclePitchOffset(vehicleRec ? vehicleRec->m_cameraPitchOffset : 0.0f, startTime, endTime);
+
+        if (seatRec && (seatRec->m_flags & 0x800) && (seatRec->m_flagsB & 0x80001)) {
+            camera->SetVehicleTrackingStyle(1);
+        } else {
+            camera->SetVehicleTrackingStyle(2);
+        }
+    }
+
+    if (restoreZoom) {
+        camera->ZoomToDistance(camera->m_vehicleExitZoomDistance, startTime, duration, 1);
+        camera->ClearVehicleExitZoomDistance();
+    }
+
+    if (resetMin) {
+        camera->SetVehicleSeatZoomMinDistanceToDefault();
+    }
+
+    if (resetMax) {
+        camera->SetVehicleSeatZoomMaxDistanceToDefault();
+    }
+}
+
+// VERIFY: 396eb2a7 auto
+// OFFSET: 0x0074C4A0
+void CGUnit_C::VehiclePassengerUpdateWorldCameraStateInstantly() {
+    CVehiclePassenger_C* passenger = this->m_vehiclePassenger;
+    VehicleRec* vehicleRec = passenger ? passenger->m_vehicleRec : nullptr;
+
+    if (passenger) {
+        this->VehiclePassengerUpdateWorldCameraState(vehicleRec, passenger->m_seatRec, FrameTime::s_curTimeMs, FrameTime::s_curTimeMs);
+    } else {
+        this->VehiclePassengerUpdateWorldCameraState(vehicleRec, nullptr, FrameTime::s_curTimeMs, FrameTime::s_curTimeMs);
+    }
+}
+
+// VERIFY: 51ad0765 auto
+// OFFSET: 0x0074C750
+void CGUnit_C::CreateVehicleData(const CClientObjCreate* create, int32_t vehicleId) {
+    if (this->m_vehicle) {
+        this->m_vehicle->ReceiveVehicleRecIDFromServer(vehicleId);
+        return;
+    }
+
+    this->m_vehicle = CVehicle_C::Create(create, this, vehicleId);
+
+    if ((this->m_modelFlags & 0x40000) && this->IsActivePlayer()) {
+        this->SignalPlayerGainsVehicleDataEvent();
+    }
+}
+
+// VERIFY: d3f8bddf auto
+// OFFSET: 0x0074C7B0
+void CGUnit_C::DestroyVehicleData(int32_t removePassengers) {
+    if (!this->m_vehicle) {
+        return;
+    }
+
+    this->m_vehicle->Destroy(removePassengers);
+    this->m_vehicle = nullptr;
+
+    if (this->IsActivePlayer()) {
+        this->SignalPlayerLosesVehicleDataEvent();
+    }
+}
+
+// VERIFY: ab8a24d3 manual
+// OFFSET: 0x0074C7F0
+void CGUnit_C::VehicleExit() {
+    CGPlayer_C* player = ClntObjMgrGetActivePlayerObj();
+
+    if (this->m_obj->m_guid == CGUnit_C::s_activeMover && player && player->GetTransportGUID() == this->m_obj->m_guid.m_guid) {
+        CGPetInfo::PetDismiss();
+        return;
+    }
+
+    CDataStore msg;
+    msg.Put(static_cast<uint32_t>(CMSG_REQUEST_VEHICLE_EXIT));
+    msg.Finalize();
+    ClientServices::Send2(&msg);
+}
+
+// VERIFY: d32caa20 manual
+// OFFSET: 0x0074C8B0
+void CGUnit_C::VehiclePrevSeat() {
+    CGPlayer_C* player = ClntObjMgrGetActivePlayerObj();
+    WOWGUID guid = this->m_obj->m_guid;
+
+    if (guid == CGUnit_C::s_activeMover && player && player->GetTransportGUID() == guid.m_guid) {
+        if (player->m_vehiclePassenger) {
+            player->m_vehiclePassenger->StopMovement();
+        }
+
+        this->m_movementData.OnChangeSeatsOnControlledVehicleLocal(FrameTime::s_curTimeMs, WOWGUID(), 0xFF);
+        return;
+    }
+
+    CDataStore msg;
+    msg.Put(static_cast<uint32_t>(CMSG_REQUEST_VEHICLE_PREV_SEAT));
+    msg.Finalize();
+    ClientServices::Send2(&msg);
+}
+
+// VERIFY: 55253920 manual
+// OFFSET: 0x0074C9A0
+void CGUnit_C::VehicleNextSeat() {
+    CGPlayer_C* player = ClntObjMgrGetActivePlayerObj();
+    WOWGUID guid = this->m_obj->m_guid;
+
+    if (guid == CGUnit_C::s_activeMover && player && player->GetTransportGUID() == guid.m_guid) {
+        if (player->m_vehiclePassenger) {
+            player->m_vehiclePassenger->StopMovement();
+        }
+
+        this->m_movementData.OnChangeSeatsOnControlledVehicleLocal(FrameTime::s_curTimeMs, WOWGUID(), 1);
+        return;
+    }
+
+    CDataStore msg;
+    msg.Put(static_cast<uint32_t>(CMSG_REQUEST_VEHICLE_NEXT_SEAT));
+    msg.Finalize();
+    ClientServices::Send2(&msg);
+}
+
+// VERIFY: a64bdd42 manual
+// OFFSET: 0x0074CA90
+int32_t CGUnit_C::SwitchToVehicleSeat(CGUnit_C* vehicle, int32_t virtualSeat) {
+    CVehicle_C* root = vehicle->m_vehicle;
+    const CVehicle_C* target;
+    uint8_t seat;
+
+    if (!root || !root->m_vehicleRec || !root->GetVehicleAndSeatFromVirtualSeat(virtualSeat, target, seat)) {
+        return 0;
+    }
+
+    VehicleSeatRec* seatRec = target->GetVehicleSeatRec(seat);
+
+    if (!seatRec || const_cast<CVehicle_C*>(target)->FindPassengerUnit(seat) || !(seatRec->m_flags & 0x4000000) || !CGInputControl::GetActive() || !CGInputControl::GetActive()->IsVehicleSeatFlagSet(0x4000000)) {
+        return 0;
+    }
+
+    if (this->GetTransportGUID() != CGUnit_C::s_activeMover.m_guid) {
+        CDataStore msg;
+        msg.Put(static_cast<uint32_t>(CMSG_REQUEST_VEHICLE_SWITCH_SEAT));
+        SmartGUID guid;
+        guid.m_guid = target->m_unit->m_obj->m_guid.m_guid;
+        msg << guid;
+        msg.Put(seat);
+        msg.Finalize();
+        ClientServices::Send2(&msg);
+        return 1;
+    }
+
+    CGUnit_C* mover = static_cast<CGUnit_C*>(ClntObjMgrObjectPtr(CGUnit_C::s_activeMover, TYPEMASK_UNIT, __FILE__, __LINE__));
+
+    if (!mover) {
+        return 1;
+    }
+
+    if (this->m_vehiclePassenger) {
+        this->m_vehiclePassenger->StopMovement();
+    }
+
+    mover->OnChangeSeatsOnControlledVehicleLocal(FrameTime::s_curTimeMs, target->m_unit->m_obj->m_guid, seat);
+    return 1;
+}
+
+// VERIFY: 29d19ef8 manual
+// OFFSET: 0x0074CCE0
+void CGUnit_C::CheckVehicleExitOnCast() {
+    VehicleSeatRec* seat = this->m_vehiclePassenger ? this->m_vehiclePassenger->m_seatRec : nullptr;
+
+    if (!seat || !(seat->m_flagsB & 0x100000)) {
+        return;
+    }
+
+    CGPlayer_C* player = ClntObjMgrGetActivePlayerObj();
+
+    if (this->m_obj->m_guid != CGUnit_C::s_activeMover || !player || player->GetTransportGUID() != this->m_obj->m_guid.m_guid) {
+        this->VehicleExit();
+    }
+}
+
+// VERIFY: 119d11a0 auto
+// OFFSET: 0x0074CDF0
+CVehicleCamera_C* CGUnit_C::CreateVehicleCamera() {
+    this->DestroyVehicleCamera();
+    this->m_vehicleCamera = CVehicleCamera_C::Create(this, FrameTime::s_curTimeMs);
+
+    if (!this->m_vehicleCamera) {
+        return nullptr;
+    }
+
+    if (!this->m_vehicleCamera->m_state) {
+        this->DestroyVehicleCamera();
+        return nullptr;
+    }
+
+    CGCamera* camera = CGWorldFrame::GetActiveCamera();
+
+    if (camera) {
+        camera->PickVehicleCamera();
+    }
+
+    return this->m_vehicleCamera;
+}
+
+// VERIFY: 7160120e manual
+// OFFSET: 0x0074CE40
+void CGUnit_C::OnVehicleCameraPossiblyNeeded() {
+    if (!this->m_vehiclePassenger || !this->m_vehiclePassenger->m_state || this->m_vehicleCamera) {
+        return;
+    }
+
+    CGCamera* camera = CGWorldFrame::GetActiveCamera();
+
+    if (!camera) {
+        return;
+    }
+
+    CVehicleCamera_C* activeVehicleCamera = camera->m_vehicleCamera;
+    CGUnit_C* player = static_cast<CGUnit_C*>(ClntObjMgrObjectPtr(ClntObjMgrGetActivePlayer(), TYPEMASK_PLAYER, __FILE__, __LINE__));
+
+    if (this->IsActivePlayer() || this->m_obj->m_guid == camera->m_targetGUID || (player && player->FindRootVehicleOfPassengerChain(this) == this) || (activeVehicleCamera && activeVehicleCamera->m_unit && activeVehicleCamera->m_unit != player && activeVehicleCamera->m_unit->FindRootVehicleOfPassengerChain(this) == this)) {
+        this->CreateVehicleCamera();
+
+        if (this->m_vehicleCamera && this->m_vehicleCamera != camera->m_vehicleCamera && !this->m_vehicleCamera->AttachToHierarchy()) {
+            this->DestroyVehicleCamera();
+        }
     }
 }

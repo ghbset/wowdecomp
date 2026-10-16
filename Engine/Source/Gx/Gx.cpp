@@ -303,7 +303,7 @@ char* GxBufLock(CGxBuf* buf) {
 // OFFSET: 0x004829F0
 void GxBufUnlock(CGxBuf* buf, uint32_t size) {
     g_theGxDevicePtr->BufUnlock(buf, size);
-    buf->unk_001C = 1;
+    buf->m_hasData = 1;
 }
 
 // VERIFY: 13b86081 manual
@@ -492,7 +492,7 @@ void GxBufData(CGxBuf* buf, const void* data, uint32_t size, uint32_t offset) {
     }
 
     g_theGxDevicePtr->BufData(buf, data, size, offset);
-    buf->unk_001C = 1;
+    buf->m_hasData = 1;
 }
 
 // VERIFY: 9c35593e manual
@@ -605,7 +605,7 @@ void GxTexSetDataFormat(CGxTex* texId, EGxTexFormat dataFormat) {
 void GxPrimIndexPtr(uint32_t indexCount, const uint16_t* indices) {
     CGxBuf* buf = g_theGxDevicePtr->BufStream(GxPoolTarget_Index, sizeof(uint16_t), indexCount);
     g_theGxDevicePtr->BufData(buf, indices, buf->m_itemSize * buf->m_itemCount, 0);
-    buf->unk_001C = 1;
+    buf->m_hasData = 1;
     g_theGxDevicePtr->PrimIndexPtr(buf);
 }
 
@@ -628,7 +628,7 @@ void GxPrimLockIndexPtr(EGxPrim primType, uint32_t indexCount, const uint16_t* i
 
     CGxBuf* buf = g_theGxDevicePtr->BufStream(GxPoolTarget_Index, sizeof(uint16_t), indexCount);
     g_theGxDevicePtr->BufData(buf, indices, buf->m_itemSize * buf->m_itemCount, 0);
-    buf->unk_001C = 1;
+    buf->m_hasData = 1;
     g_theGxDevicePtr->PrimIndexPtr(buf);
 }
 
@@ -816,7 +816,7 @@ void GxPrimVertexPtr(uint32_t vertexCount, const C3Vector* pos, uint32_t posStri
     }
 
     g_theGxDevicePtr->BufUnlock(buf, vertexCount * vertexSize);
-    buf->unk_001C = 1;
+    buf->m_hasData = 1;
 
     const VertexBufDesc& desc = Buffer::s_vertexBufDesc[format];
     g_theGxDevicePtr->PrimVertexFormat(buf, desc.attribs, desc.attribCount);

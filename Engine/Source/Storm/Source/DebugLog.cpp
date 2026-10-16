@@ -4,6 +4,7 @@
 #include <windows.h>
 #include "Engine/Source/Storm/H/storm.h"
 
+#ifndef NDEBUG
 void DebugLog(const char* format, ...) {
 #ifdef NDEBUG
     // The original Release client compiles this out (0x005EEB70 is a bare RET); calls sit in per-batch M2 draw paths
@@ -42,3 +43,4 @@ void DebugLog(int32_t target, const char* format, ...) {
 void DebugValidate(const char* expression) {
     DebugLog("Validation failed: %s", expression);
 }
+#endif
