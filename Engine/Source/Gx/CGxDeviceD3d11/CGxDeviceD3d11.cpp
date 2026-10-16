@@ -2417,8 +2417,9 @@ void CGxDeviceD3d11::IStateSyncTextures() {
         CGxTex* texture = static_cast<CGxTex*>(this->m_appRenderStates[GxRs_Texture0 + i].m_value.m_data.p);
 
         // Not stock: IRsSync skips a bind whose CGxTex* is unchanged, so a CGxTex destroyed and made again at the same
-        // address, or given new flags, would never be created or uploaded. Every draw makes sure of it here.
-        if (texture) {
+        // address, or given new flags, would never be created or uploaded. Every draw makes sure of it here. Render
+        // targets (ShadowCache maps left in t4..t7 after a world session) are the app's to manage: never touch them.
+        if (texture && !texture->m_flags.m_renderTarget) {
             this->ITexMarkAsUpdated(texture);
         }
 
