@@ -268,6 +268,18 @@ void CGxDeviceVulkan::Draw(CGxBatch* batch, int32_t count) {
     pixelRows[15 * 4 + 1] = ((fogColour >> 8) & 0xFF) / 255.0f;
     pixelRows[15 * 4 + 2] = (fogColour & 0xFF) / 255.0f;
     pixelRows[15 * 4 + 3] = fogOn ? 1.0f : 0.0f;
+
+    // The fixed-function pixel program (Shaders/Ff.frag) applies D3D9's linear fog itself (the
+    // D3D9 device sets D3DFOG_LINEAR vertex fog): its scale and bias on view z in row 14, which
+    // that program alone reads. Without it every fogged fixed-function draw came out unfogged
+    // (the WDL horizon terrain, drawn fully fogged, was pure white).
+    if (d.fragment == pipelines::FragmentProgram::FixedFunction) {
+        const float start = this->m_appRenderStates[GxRs_FogStart].m_value.m_data.f[0];
+        const float end = this->m_appRenderStates[GxRs_FogEnd].m_value.m_data.f[0];
+        const float range = end - start != 0.0f ? end - start : 1.0f;
+        pixelRows[14 * 4 + 0] = -1.0f / range;
+        pixelRows[14 * 4 + 1] = end / range;
+    }
     d.pixelRegs = pixelRows;
     d.vertexRegs = this->m_vertexRegs;
 

@@ -201,6 +201,8 @@ namespace gxvk::vk::pipelines
         // The sampler-slot set: the pixel record's for a translated module, slots 0 and 1 for the
         // fixed-function stages, slot 0 alone otherwise.
         const bool translated = TranslatedFamily(draw.vertex) || TranslatedFamily(draw.fragment);
+        // The fixed-function pixel program reads its fog from the slice too.
+        const bool needsRegs = translated || draw.fragment == FragmentProgram::FixedFunction;
         uint32_t samplerMask = 1u;
         uint32_t cubeMask    = 0;
         if (draw.fragment == FragmentProgram::Translated && draw.fragmentRecord)
@@ -264,10 +266,10 @@ namespace gxvk::vk::pipelines
             return false;
         }
 
-        // Set 1: the constant slice, for the translated family.
+        // Set 1: the constant slice, for the translated family and the fixed-function pixel program.
         VkDescriptorSet set1    = VK_NULL_HANDLE;
         uint32_t        offset1 = 0;
-        if (translated && !RegsSlice(slot, serial, draw, set1, offset1))
+        if (needsRegs && !RegsSlice(slot, serial, draw, set1, offset1))
         {
             ++s.stats.skipped;
             return false;
@@ -302,7 +304,7 @@ namespace gxvk::vk::pipelines
             d.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout.layout, 0, 1, &set0, 0, nullptr);
             b.set0 = set0;
         }
-        if (translated && (!b.have1 || b.set1 != set1 || b.offset1 != offset1))
+        if (needsRegs && (!b.have1 || b.set1 != set1 || b.offset1 != offset1))
         {
             d.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout.layout, 1, 1, &set1, 1, &offset1);
             b.set1    = set1;

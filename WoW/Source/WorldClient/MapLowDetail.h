@@ -11,6 +11,7 @@
 #include "WoW/Source/WorldClient/FVBBList.h"
 
 class CMapObjDef;
+class CTexture;
 struct SMMapObjDef;
 
 class CMapAreaLow {
@@ -26,6 +27,9 @@ class CMapAreaLow {
     /* 004C */ TSLink<CMapAreaLow> m_horizonLink;
     /* 0054 */ FVBBList::Block* m_block;
     /* 0058 */ uint32_t m_flags;
+    // Not in 12340 (wdlTextured): the tile's minimap texture, and the tint its vertices were built with.
+    CTexture* m_minimapTex;
+    uint32_t m_builtTint;
 
     CMapAreaLow();
 };

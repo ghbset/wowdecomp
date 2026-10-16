@@ -1235,6 +1235,21 @@ static int32_t MinimapBuildSource(const int32_t* tile, char* path, uint32_t size
     return 1;
 }
 
+// Not in 12340: the md5translate.trs name of minimap tile (x, y) of a map directory, quietly (the
+// WDL horizon textures itself with the tiles; MinimapBuildSource reports a miss to the chat).
+int32_t MinimapTileTexturePath(const char* mapDirectory, int32_t x, int32_t y, char* path, uint32_t size) {
+    SStrPrintf(path, size, s_minimapTileFormat, mapDirectory, x, y);
+    MINIMAPMD5NAME* name = s_md5Names.Ptr(path);
+
+    if (!name) {
+        *path = 0;
+        return 0;
+    }
+
+    SStrPrintf(path, size, "%s\\%s", s_minimapTexturePath, name->m_md5Name);
+    return 1;
+}
+
 // VERIFY: dd828e8c manual
 // OFFSET: 0x007F5760
 static void SetupTextureHandles(const int32_t* tile, int32_t reset, MINIMAPTILE* tiles) {

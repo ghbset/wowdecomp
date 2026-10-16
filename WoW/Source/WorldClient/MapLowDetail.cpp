@@ -14,7 +14,12 @@
 #include "Engine/Source/Gx/CGxDevice/CGxDevice.h"
 #include "Engine/Source/Gx/Gx.h"
 #include "WoW/Source/WorldClient/DayNight__DNInfo.h"
-#include "Engine/Source/Gx/CGxVertexPC.h"
+#include "Engine/Source/Gx/CGxVertexPCT.h"
+#include "Engine/Source/Base/Handle.h"
+#include "Engine/Source/ConsoleBase/ConsoleVar.h"
+#include "Engine/Source/ConsoleBase/Types.h"
+#include "Engine/Source/Services/Texture.h"
+#include "WoW/Source/Ui/MinimapFrame.h"
 
 // VERIFY: 3763adce auto
 // OFFSET: 0x007C06E0
@@ -29,6 +34,8 @@ CMapAreaLow::CMapAreaLow() {
     this->m_flags = 0;
     this->m_heights = nullptr;
     this->m_holes = nullptr;
+    this->m_minimapTex = nullptr;
+    this->m_builtTint = 0xFFFFFFFF;
 }
 
 // VERIFY: 0b659a65 auto
@@ -247,6 +254,38 @@ void CMapLowDetail::Load(const char* mapPath, const char* mapName) {
     }
 }
 
+// Not in 12340 (wdlTextured): the tile's minimap texture, created on first use (asynchronously, a
+// few per frame) and freed with the tile (CMapAreaLowHeap::Delete); null until it has loaded or
+// when the map has no minimap tile there.
+static CGxTex* WdlMinimapTexture(CMapAreaLow* area) {
+    if (!area->m_minimapTex) {
+        static uint32_t s_frame;
+        static uint32_t s_requests;
+
+        if (s_frame != CWorld::frameCnt) {
+            s_frame = CWorld::frameCnt;
+            s_requests = 0;
+        }
+
+        char path[260];
+
+        // ponytail: 8 requests a frame, so a teleport does not queue the whole horizon at once.
+        if (s_requests >= 8 || !MinimapTileTexturePath(CMap::mapName, area->m_index.x, area->m_index.y, path, sizeof(path))) {
+            return nullptr;
+        }
+
+        s_requests++;
+        CStatus status;
+        area->m_minimapTex = TextureCreate(path, CGxTexFlags(GxTex_LinearMipLinear, 0, 0, 0, 0, 0, 1), &status, 1);
+
+        if (!area->m_minimapTex) {
+            return nullptr;
+        }
+    }
+
+    return TextureGetGxTex(area->m_minimapTex, 0, nullptr);
+}
+
 // VERIFY: c20afbce manual
 // OFFSET: 0x007D5E70
 void CMap::RenderLowDetail(CMapAreaLow* area) {
@@ -254,16 +293,46 @@ void CMap::RenderLowDetail(CMapAreaLow* area) {
         return;
     }
 
+    static CVar* s_wdlTextured = CVar::Register("wdlTextured", "Engine option: texture the WDL horizon terrain with the map's minimap tiles (0: the stock fog-coloured silhouette)", 0x1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+
     g_theGxDevicePtr->RsPush();
     GxRsSet(GxRs_Fog, 1);
     GxRsSet(GxRs_DepthTest, 3);
 
     DayNight::DNInfo* info = DayNight::GetInfo();
-    GxRsSet(GxRs_FogStart, 0.0f);
-    GxRsSet(GxRs_FogEnd, 1.0f);
+    CGxTex* texture = s_wdlTextured->m_intValue ? WdlMinimapTexture(area) : nullptr;
+    uint32_t tint = 0xFFFFFFFF;
+
+    if (texture) {
+        // The near terrain's fog stretched over the horizon's range: the world's fog ends at or
+        // before farclip, where the horizon begins, so unstretched it would hide the tile entirely.
+        // Full fog at farclip x horizonFarclipScale, the horizon's far plane, so it meets the sky
+        // without an edge. Then the outdoor light over the minimap's baked daylight (ambient + 0.6
+        // diffuse: the knob for night darkness).
+        float scale = World::s_horizonFarClipScale > 1.0f ? World::s_horizonFarClipScale : 1.0f;
+        GxRsSet(GxRs_FogStart, info->m_fog.m_start);
+        GxRsSet(GxRs_FogEnd, info->m_fog.m_end * scale);
+        const CImVector& a = info->m_light1.m_ambient;
+        const CImVector& d = info->m_light1.m_diffuse;
+        uint32_t r = a.r + d.r * 3 / 5;
+        uint32_t g = a.g + d.g * 3 / 5;
+        uint32_t b = a.b + d.b * 3 / 5;
+        CImVector c(static_cast<uint8_t>(b > 255 ? 255 : b), static_cast<uint8_t>(g > 255 ? 255 : g), static_cast<uint8_t>(r > 255 ? 255 : r), 0xFF);
+        tint = *reinterpret_cast<uint32_t*>(&c);
+    } else {
+        // 12340: fully fogged, a fog-coloured silhouette.
+        GxRsSet(GxRs_FogStart, 0.0f);
+        GxRsSet(GxRs_FogEnd, 1.0f);
+    }
+
     CImVector color = info->m_fog.m_color;
     GxRsSet(GxRs_FogColor, *reinterpret_cast<int32_t*>(&color));
     GxRsSet(GxRs_Lighting, 0);
+    GxRsSet(GxRs_Texture0, static_cast<void*>(texture));
+    GxRsSet(GxRs_Texture1, static_cast<void*>(nullptr));
+    GxRsSet(GxRs_ColorOp0, 0);
+    GxRsSet(GxRs_AlphaOp0, 0);
+    g_theGxDevicePtr->m_xforms[GxXform_Tex0].Identity();
 
     if (!area->m_block) {
         CMap::s_vbbList.AcquireBlock(&area->m_block);
@@ -272,16 +341,18 @@ void CMap::RenderLowDetail(CMapAreaLow* area) {
     if (area->m_block) {
         CGxBuf* buf = area->m_block->m_buf;
 
-        if (!buf->m_hasData || !buf->m_valid) {
+        if (!buf->m_hasData || !buf->m_valid || area->m_builtTint != tint) {
+            area->m_builtTint = tint;
             CMap::BuildLowDetailGridVertices(area, buf);
         }
 
         area->m_block->m_lastUsedFrame = CWorld::frameCnt;
-        GxPrimVertexPtr(area->m_block->m_buf, GxVBF_PC);
+        GxPrimVertexPtr(area->m_block->m_buf, GxVBF_PCT);
     } else {
-        CGxBuf* buf = g_theGxDevicePtr->BufStream(GxPoolTarget_Vertex, 16, 545);
+        area->m_builtTint = tint;
+        CGxBuf* buf = g_theGxDevicePtr->BufStream(GxPoolTarget_Vertex, sizeof(CGxVertexPCT), 545);
         CMap::BuildLowDetailGridVertices(area, buf);
-        GxPrimVertexPtr(buf, GxVBF_PC);
+        GxPrimVertexPtr(buf, GxVBF_PCT);
     }
 
     uint32_t count;
@@ -333,7 +404,10 @@ void CMap::RenderLowDetail(CMapAreaLow* area) {
 // VERIFY: 894a0529 manual
 // OFFSET: 0x007D5150
 void CMap::BuildLowDetailGridVertices(CMapAreaLow* area, CGxBuf* buf) {
-    CGxVertexPC* vertex = reinterpret_cast<CGxVertexPC*>(g_theGxDevicePtr->BufLock(buf));
+    // 12340 wrote CGxVertexPC in white. PCT here: the tint of the draw (white untextured) and the
+    // tile's minimap coordinates, u along the columns (the minimap's x), v along the rows.
+    CGxVertexPCT* vertex = reinterpret_cast<CGxVertexPCT*>(g_theGxDevicePtr->BufLock(buf));
+    const CImVector tint = *reinterpret_cast<const CImVector*>(&area->m_builtTint);
     uint32_t index = 0;
     float x = area->m_topLeft.x;
 
@@ -344,7 +418,8 @@ void CMap::BuildLowDetailGridVertices(CMapAreaLow* area, CGxBuf* buf) {
             vertex->p.x = x;
             vertex->p.y = y;
             vertex->p.z = area->m_heights[index++];
-            vertex->c = CImVector(0xFF, 0xFF, 0xFF, 0xFF);
+            vertex->c = tint;
+            vertex->tc = C2Vector(col * 0.0625f, row * 0.0625f);
             vertex++;
             y -= 33.333332f;
         }
@@ -361,7 +436,8 @@ void CMap::BuildLowDetailGridVertices(CMapAreaLow* area, CGxBuf* buf) {
             vertex->p.x = x;
             vertex->p.y = y;
             vertex->p.z = area->m_heights[index++];
-            vertex->c = CImVector(0xFF, 0xFF, 0xFF, 0xFF);
+            vertex->c = tint;
+            vertex->tc = C2Vector((col + 0.5f) * 0.0625f, (row + 0.5f) * 0.0625f);
             vertex++;
             y -= 33.333332f;
         }

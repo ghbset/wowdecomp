@@ -8,6 +8,7 @@
 #include <cstring>
 #include <cmath>
 #include "Engine/Source/Base/Handle.h"
+#include "Engine/Source/Gx/CGxVertexPCT.h"
 #include "Engine/Source/Base/ObjectAlloc.h"
 #include "Engine/Source/Base/RCString.h"
 #include "Engine/Source/Base/Status.h"
@@ -763,7 +764,7 @@ void CMap::Initialize() {
 
     CMap::lowDetailIndexPool = g_theGxDevicePtr->PoolCreate(GxPoolTarget_Index, GxPoolUsage_Dynamic, 0x1800, static_cast<EGxPoolHintBits>(0), "CMap::lowDetailIndexPool");
     CMap::lowDetailIndexBuf = g_theGxDevicePtr->BufCreate(CMap::lowDetailIndexPool, sizeof(uint16_t), 0xC00, 0);
-    CMap::s_vbbList.Initialize(GxPoolTarget_Vertex, GxPoolUsage_Dynamic, 16, 0x221, 24);
+    CMap::s_vbbList.Initialize(GxPoolTarget_Vertex, GxPoolUsage_Dynamic, sizeof(CGxVertexPCT), 0x221, 24); // 12340: 16 (PC); PCT for wdlTextured
 
     CMap::lightHeap = new (__FILE__, __LINE__) uint32_t(ObjectAllocAddHeap(sizeof(CMapLight), 128, "WLIGHT", true));
     CMap::cacheLightHeap = new (__FILE__, __LINE__) uint32_t(ObjectAllocAddHeap(sizeof(CMapCacheLight), 256, "WCACHELIGHT", true));
@@ -3394,6 +3395,12 @@ CMapAreaLow* CMap::AllocAreaLow() {
 // OFFSET: 0x007C0AE0
 void CMapAreaLowHeap::Delete(CMapAreaLow* areaLow) {
     areaLow->m_horizonLink.Unlink();
+
+    if (areaLow->m_minimapTex) {
+        HandleClose(reinterpret_cast<HOBJECT>(areaLow->m_minimapTex));
+        areaLow->m_minimapTex = nullptr;
+    }
+
     ObjectFree(this->m_heapId, areaLow->m_objectIndex);
 }
 
