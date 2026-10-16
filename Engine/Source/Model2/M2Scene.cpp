@@ -230,26 +230,39 @@ CM2Model* CM2ModelHeap::New() {
     return model;
 }
 
+// Not stock: snapshot of the root models (no m_attachParent) that CM2Scene::Animate shares out across the Model2
+// worker pool, a few at a time. Attachments animate inside their root's AnimateMT, so parent/child order holds.
+static TSGrowableArray<CM2Model*> s_animateRoots;
+static volatile LONG s_animateNextRoot;
+static const uint32_t ANIMATE_CHUNK = 4;
+static const uint32_t ANIMATE_MIN_PARALLEL = 8;
+
+static void AnimateRoot(CM2Model* model, const C44Matrix* view) {
+    if (model->m_fFlags & 0x1000) {
+        model->AnimateMTSimple(view, C3Vector(1.0f, 1.0f, 1.0f), C3Vector(0.0f, 0.0f, 0.0f), 1.0f, 1.0f);
+    } else {
+        model->AnimateMT(view, C3Vector(1.0f, 1.0f, 1.0f), C3Vector(0.0f, 0.0f, 0.0f), 1.0f, 1.0f);
+    }
+}
+
 // VERIFY: f41c995e auto
 // OFFSET: 0x0081CE70
 void CM2Scene::AnimateThread(void* param) {
     CM2Scene* scene = static_cast<CM2Scene*>(param);
+    uint32_t count = s_animateRoots.Count();
 
-    for (CM2Model* model = scene->m_animateList; model; model = model->m_animateNext) {
-        model = model->m_animateNext;
+    // Not stock: stock animates every other list entry; we pull chunks off the shared snapshot until it runs out
+    while (true) {
+        uint32_t begin = static_cast<uint32_t>(InterlockedExchangeAdd(&s_animateNextRoot, ANIMATE_CHUNK));
 
-        if (!model) {
+        if (begin >= count) {
             break;
         }
 
-        if (model->m_attachParent) {
-            continue;
-        }
+        uint32_t end = begin + ANIMATE_CHUNK < count ? begin + ANIMATE_CHUNK : count;
 
-        if (model->m_fFlags & 0x1000) {
-            model->AnimateMTSimple(&scene->m_view, C3Vector(1.0f, 1.0f, 1.0f), C3Vector(0.0f, 0.0f, 0.0f), 1.0f, 1.0f);
-        } else {
-            model->AnimateMT(&scene->m_view, C3Vector(1.0f, 1.0f, 1.0f), C3Vector(0.0f, 0.0f, 0.0f), 1.0f, 1.0f);
+        for (uint32_t i = begin; i < end; i++) {
+            AnimateRoot(s_animateRoots.m_data[i], &scene->m_view);
         }
     }
 }
@@ -1699,39 +1712,29 @@ int32_t CM2Scene::Animate(const C3Vector& cameraPos) {
     this->m_view.Translate(move);
     this->m_viewInv = this->m_view.Inverse(this->m_view.Determinant());
 
+    // Not stock: stock splits the list between the main thread and one worker. We snapshot the root models and
+    // share them out over the worker pool; short lists (portraits, glue scenes) stay on this thread.
+    s_animateRoots.SetCount(0);
+
     if (this->m_cache->m_flags & 4) {
-        this->m_cache->BeginThread(&CM2Scene::AnimateThread, this);
-
-        for (CM2Model* model = this->m_animateList; model; ) {
+        for (CM2Model* model = this->m_animateList; model; model = model->m_animateNext) {
             if (!model->m_attachParent) {
-                if (model->m_fFlags & 0x1000) {
-                    model->AnimateMTSimple(&this->m_view, C3Vector(1.0f, 1.0f, 1.0f), C3Vector(0.0f, 0.0f, 0.0f), 1.0f, 1.0f);
-                } else {
-                    model->AnimateMT(&this->m_view, C3Vector(1.0f, 1.0f, 1.0f), C3Vector(0.0f, 0.0f, 0.0f), 1.0f, 1.0f);
-                }
+                *s_animateRoots.New() = model;
             }
-
-            CM2Model* next = model->m_animateNext;
-
-            if (!next) {
-                break;
-            }
-
-            model = next->m_animateNext;
         }
+    }
 
-        this->m_cache->WaitThread();
+    if (s_animateRoots.Count() >= ANIMATE_MIN_PARALLEL) {
+        uint32_t chunks = (s_animateRoots.Count() + ANIMATE_CHUNK - 1) / ANIMATE_CHUNK;
+        s_animateNextRoot = 0;
+        this->m_cache->RunThreads(&CM2Scene::AnimateThread, this, chunks - 1);
     } else {
         for (CM2Model* model = this->m_animateList; model; model = model->m_animateNext) {
             if (model->m_attachParent) {
                 continue;
             }
 
-            if (model->m_fFlags & 0x1000) {
-                model->AnimateMTSimple(&this->m_view, C3Vector(1.0f, 1.0f, 1.0f), C3Vector(0.0f, 0.0f, 0.0f), 1.0f, 1.0f);
-            } else {
-                model->AnimateMT(&this->m_view, C3Vector(1.0f, 1.0f, 1.0f), C3Vector(0.0f, 0.0f, 0.0f), 1.0f, 1.0f);
-            }
+            AnimateRoot(model, &this->m_view);
         }
     }
 

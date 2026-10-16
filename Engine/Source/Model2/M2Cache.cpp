@@ -6,6 +6,7 @@
 #include "Engine/Source/Base/ObjectAlloc.h"
 #include "Engine/Source/BlizzardCore/SFile2-Core.h"
 #include "Engine/Source/Gx/CGxDevice/CGxDevice.h"
+#include "Engine/Source/Gx/Gx.h"
 #include "Engine/Source/Model2/M2Model.h"
 #include "Engine/Source/Model2/M2Scene.h"
 #include "Engine/Source/Os/Processor.h"
@@ -46,18 +47,44 @@ void CM2Cache::ClearSharedHash() {
     }
 }
 
-// VERIFY: de6dcef8 auto
-// OFFSET: 0x0081BFA0
-void CM2Cache::BeginThread(void (*func)(void*), void* param) {
+// Not stock: replaces BeginThread (0x0081BFA0) / WaitThread (0x0081BFD0). Wakes `count` pool workers (at most
+// m_threadCount), each calls func(param) once; the caller calls it too, then waits for them. func must share the
+// work out itself (atomic index), so it is fine for a worker to wake and find nothing left.
+void CM2Cache::RunThreads(void (*func)(void*), void* param, uint32_t count) {
+    if (count > this->m_threadCount) {
+        count = this->m_threadCount;
+    }
+
     this->m_threadFunc = func;
     this->m_threadParam = param;
-    this->m_threadStart.Set();
-}
+    this->m_threadPending = count;
 
-// VERIFY: b68bbc6f auto
-// OFFSET: 0x0081BFD0
-void CM2Cache::WaitThread() {
-    this->m_threadDone.Wait(0xFFFFFFFF);
+    if (count) {
+        this->m_threadStart.Signal(count);
+    }
+
+    func(param);
+
+    // Under Wine every event wait is a wineserver round trip, so spin briefly (bounded) before blocking
+    for (uint32_t spin = 0; this->m_threadPending && spin < 4096; spin++) {
+        YieldProcessor();
+    }
+
+    for (uint32_t spin = 0; this->m_threadPending && spin < 64; spin++) {
+        Sleep(0);
+    }
+
+    if (this->m_threadPending) {
+        // A worker that finishes after the check below sees m_threadWaiting and sets m_threadDone. A stale set left
+        // over from a frame where we stopped spinning in time only costs one extra loop here.
+        InterlockedExchange(&this->m_threadWaiting, 1);
+
+        while (this->m_threadPending) {
+            this->m_threadDone.Wait(0xFFFFFFFF);
+        }
+
+        this->m_threadWaiting = 0;
+    }
 }
 
 // VERIFY: 7d58516f manual
@@ -66,16 +93,22 @@ uint32_t STORMAPI CM2Cache::ThreadProc(void* param) {
     CM2Cache* cache = static_cast<CM2Cache*>(param);
 
     PropSelectContext(cache->m_propContext);
-    cache->m_flags |= 0x400;
-    cache->m_threadStart.Wait(0xFFFFFFFF);
 
-    while (!(cache->m_flags & 0x800)) {
-        cache->m_threadFunc(cache->m_threadParam);
-        cache->m_threadDone.Set();
+    // Not stock: pool worker. Stock also sets/clears m_flags 0x400 here (never read); dropped, because a plain |= on
+    // m_flags from several workers races with the main thread's writes to it.
+    while (true) {
         cache->m_threadStart.Wait(0xFFFFFFFF);
-    }
 
-    cache->m_flags &= ~0x400u;
+        if (cache->m_flags & 0x800) {
+            break;
+        }
+
+        cache->m_threadFunc(cache->m_threadParam);
+
+        if (InterlockedDecrement(&cache->m_threadPending) == 0 && cache->m_threadWaiting) {
+            cache->m_threadDone.Set();
+        }
+    }
 
     return 0;
 }
@@ -120,10 +153,26 @@ int32_t CM2Cache::Initialize(uint32_t flags) {
 
     if (this->m_flags & 4) {
         this->m_flags &= ~0xC00u;
-        this->m_threadStart.Reset();
         this->m_threadDone.Reset();
         this->m_propContext = PropGetSelectedContext();
-        SThread::Create(CM2Cache::ThreadProc, this, this->m_thread, const_cast<char*>("Model2"), 0);
+
+        // Not stock: one worker per extra CPU instead of a single worker (fewer on Wow32, where every 1 MB stack
+        // reservation comes out of a tight address space)
+#if defined(_WIN64)
+        uint32_t maxThreads = sizeof(this->m_threads) / sizeof(this->m_threads[0]);
+#else
+        uint32_t maxThreads = 7;
+#endif
+        uint32_t count = OsGetNumberOfProcessors() - 1;
+        count = count < 1 ? 1 : count > maxThreads ? maxThreads : count;
+
+        for (this->m_threadCount = 0; this->m_threadCount < count; this->m_threadCount++) {
+            if (!SThread::Create(CM2Cache::ThreadProc, this, this->m_threads[this->m_threadCount], const_cast<char*>("Model2"), 0)) {
+                break;
+            }
+        }
+
+        GxLog("Model2: %u animation worker threads (%u CPUs)", this->m_threadCount, OsGetNumberOfProcessors());
     }
 
     if (flags & 8) {
@@ -200,8 +249,21 @@ void CM2Cache::GarbageCollect(int32_t force) {
 void CM2Cache::Destroy() {
     if (this->m_flags & 4) {
         this->m_flags |= 0x800;
-        this->m_threadStart.Set();
-        this->m_thread.Wait(0xFFFFFFFF);
+
+        // Not stock (stock waits INFINITE on its one worker): bounded joins, so a stuck worker cannot hang the quit
+        GxTeardownLog("M2Destroy: join %u Model2 workers", this->m_threadCount);
+
+        if (this->m_threadCount) {
+            this->m_threadStart.Signal(this->m_threadCount);
+        }
+
+        for (uint32_t i = 0; i < this->m_threadCount; i++) {
+            if (this->m_threads[i].Wait(2000)) {
+                GxTeardownLog("M2Destroy: Model2 worker %u did not exit in 2 s", i);
+            }
+        }
+
+        GxTeardownLog("M2Destroy: Model2 workers joined");
     }
 
     while (this->m_freeList) {
@@ -433,7 +495,7 @@ CM2Cache::~CM2Cache() {
 
 // VERIFY: 902f5653 manual
 // OFFSET: 0x0081C900
-CM2Cache::CM2Cache() : m_threadStart(0, 0), m_threadDone(0, 0) {
+CM2Cache::CM2Cache() : m_threadStart(0, sizeof(m_threads) / sizeof(m_threads[0])), m_threadDone(0, 0) {
     this->m_freeList = nullptr;
     this->m_freeListTail = &this->m_freeList;
     this->m_initialized = 0;
@@ -441,6 +503,9 @@ CM2Cache::CM2Cache() : m_threadStart(0, 0), m_threadDone(0, 0) {
     memset(this->m_shared, 0, sizeof(this->m_shared));
     this->m_threadFunc = nullptr;
     this->m_threadParam = nullptr;
+    this->m_threadCount = 0;
+    this->m_threadPending = 0;
+    this->m_threadWaiting = 0;
     this->unused_101C[0] = '\0';
     this->unused_105C[0] = '\0';
 }
