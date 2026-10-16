@@ -136,6 +136,23 @@ void FFX::Destroy() {
     DestroyTex(FFX::s_screen);
 }
 
+// Not in 12340: the half-texel offset is D3D9's pixel-centre convention. D3D11 centres pixels on +0.5 already, so
+// the offset there lands every tap on a texel corner (half-texel shift, extra 2x2 blur); 4.3.4 drops it the same way.
+// d3d11Debug 5 puts the D3D9 offset back (bisect switch for the glue screens).
+static float FfxTexelOffset() {
+    if (g_theGxDevicePtr->DeviceApi() != GxApi_D3d11) {
+        return 0.5f;
+    }
+
+    static CVar* s_debug;
+
+    if (!s_debug) {
+        s_debug = CVar::Lookup("d3d11Debug");
+    }
+
+    return s_debug && s_debug->m_intValue == 5 ? 0.5f : 0.0f;
+}
+
 // VERIFY: a8690e52 manual
 // OFFSET: 0x008C0590
 void FFX::SetupGeo_Quad(const C2iVector& dstSize, const C2iVector& srcSize, const C2iVector& srcTexSize, C3Vector* pos, C2Vector* tex, bool flip) {
@@ -182,9 +199,7 @@ void FFX::SetupGeo_Quad(const C2iVector& dstSize, const C2iVector& srcSize, cons
     pos[3].y = minY;
     pos[3].z = 0.0f;
 
-    // Not in 12340: the half-texel offset is D3D9's pixel-centre convention. D3D11 centres pixels on +0.5 already, so
-    // the offset there lands every tap on a texel corner (half-texel shift, extra 2x2 blur); 4.3.4 drops it the same way.
-    float texelOffset = g_theGxDevicePtr->DeviceApi() == GxApi_D3d11 ? 0.0f : 0.5f;
+    float texelOffset = FfxTexelOffset();
     float invWidth = 1.0f / srcTexSize.x;
     float invHeight = 1.0f / srcTexSize.y;
     float maxU = (srcSize.x + texelOffset) * invWidth;
@@ -241,7 +256,7 @@ void FFX::SetupGeo_Grid(const C2iVector& dstSize, const C2iVector& srcSize, cons
 
     float invTexWidth = 1.0f / srcTexSize.x;
     float invTexHeight = 1.0f / srcTexSize.y;
-    float texelOffset = g_theGxDevicePtr->DeviceApi() == GxApi_D3d11 ? 0.0f : 0.5f; // see SetupGeo_Quad
+    float texelOffset = FfxTexelOffset();
     float minU = invTexWidth * texelOffset;
     float maxU = (srcSize.x + texelOffset) * invTexWidth;
     float maxV = invTexHeight * (srcSize.y + texelOffset);

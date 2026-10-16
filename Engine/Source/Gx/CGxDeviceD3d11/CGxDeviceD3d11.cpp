@@ -1757,8 +1757,8 @@ static int32_t D3d11Debug() {
     static CVar* cvar;
 
     if (!cvar) {
-        cvar = CVar::Register("d3d11Debug", "D3D11: 1 constants every draw, 2 skip SM2 draws, 3 sun occlusion 0, 4 unset constants 0", 0, "0", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
-        D3d11Log("CGxDeviceD3d11: d3d11Debug modes: 0 off, 1 re-upload both constant buffers every draw, 2 skip draws with an SM2 (ps_2_0/vs_2_0: FFX, weather) shader, 3 occlusion queries return 0 pixels (no sun glare dimming), 4 never-set constant registers read 0 instead of FLT_MAX");
+        cvar = CVar::Register("d3d11Debug", "D3D11: 1 constants every draw, 2 skip SM2 draws, 3 sun occlusion 0, 4 unset constants 0, 5 FFX D3D9 half-texel UVs, 6 no TEXCOORD2/3 FF VS", 0, "0", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+        D3d11Log("CGxDeviceD3d11: d3d11Debug modes: 0 off, 1 re-upload both constant buffers every draw, 2 skip draws with an SM2 (ps_2_0/vs_2_0: FFX, weather) shader, 3 occlusion queries return 0 pixels (no sun glare dimming), 4 never-set constant registers read 0 instead of FLT_MAX, 5 FFX quads use the D3D9 +0.5 texel UV offset, 6 FF VS drops TEXCOORD2/3 (pre-25fe6c1)");
     }
 
     return cvar ? cvar->m_intValue : 0;
@@ -2234,7 +2234,8 @@ bool CGxDeviceD3d11::IStateSyncShaders() {
         // D3D9's FF VS passes every texcoord set through; the FFX Box4/Gauss4/GlowWave quads read TEXCOORD2/3 in
         // their ps_2_0, which the 2-texcoord permutations left at 0 (two of four blur taps on texel 0,0, so the
         // glow took the colour of one corner pixel: sky towards the sun).
-        int32_t t34 = FfSelectVsT34(this->m_primVertexMask, lighting || ambientOnly);
+        // d3d11Debug 6: never pick them (bisect switch for the glue screens).
+        int32_t t34 = D3d11Debug() == 6 ? -1 : FfSelectVsT34(this->m_primVertexMask, lighting || ambientOnly);
         const FfBlob& blob = t34 >= 0 ? g_ffVsT34[t34] : g_ffVs[FfSelectVs(this->m_primVertexMask, lighting || ambientOnly)];
         uint32_t index = t34 >= 0 ? 48 + t34 : FfSelectVs(this->m_primVertexMask, lighting || ambientOnly);
 
