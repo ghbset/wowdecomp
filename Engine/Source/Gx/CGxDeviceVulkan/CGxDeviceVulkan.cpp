@@ -7,6 +7,7 @@
 #include "Engine/Source/Gx/CGxDeviceVulkan/CGxDeviceVulkan.h"
 #include "Engine/Source/Gx/CGxDeviceVulkan/FfShadersSpv.h"
 #include "Engine/Source/ConsoleBase/ConsoleVar.h"
+#include "Engine/Source/ConsoleBase/Types.h"
 #include "Engine/Source/Gx/Blit.h"
 #include "Engine/Source/Gx/CGxBuf.h"
 #include "Engine/Source/Gx/CGxPool.h"
@@ -2362,6 +2363,22 @@ static float TexLodBias() {
     return cvar ? cvar->m_floatValue : 0.0f;
 }
 
+// Black-world bisect switch (console or Config.wtf): 1 = fixed-function PS instead of every translated PS (no fog, tex0
+// x colour), 2 = depth test off, 3 = culling off. 0 = normal.
+static int32_t VkDebugWorld() {
+    static CVar* cvar;
+
+    if (!cvar) {
+        cvar = CVar::Register("vkDebugWorld", "Vulkan: 1 FF pixel shader, 2 no depth test, 3 no culling", 0, "0", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    }
+
+    return cvar ? cvar->m_intValue : 0;
+}
+
+// Draw outcomes, logged once (frame 1000) so a black world shows whether draws are skipped and which path they take.
+enum { Draw_Total, Draw_AppVs, Draw_AppPs, Draw_SkipShader, Draw_SkipConst, Draw_SkipTex, Draw_SkipStream, Draw_SkipPipeline, Draw_Done, Draw_Count };
+static uint32_t s_drawStats[Draw_Count];
+
 // Pipelines are hashed on what they bake: VS, PS, topology class, vertex input (attributes and binding count; strides
 // are dynamic), blend mode, colour mask and the pass formats. The cache key uses ShaderApi::m_id, never handles.
 VkPipeline CGxDeviceVulkan::IPipelineGet(uint32_t topologyClass, const VkVertexInputAttributeDescription* attribs, uint32_t attribCount, uint32_t bindingCount) {
@@ -2511,9 +2528,9 @@ bool CGxDeviceVulkan::IStateSyncShaders(bool& ffVs, bool& ffPs) {
     CGxShader* vs = static_cast<CGxShader*>(rs[GxRs_VertexShader].m_value.m_data.p);
     CGxShader* ps = static_cast<CGxShader*>(rs[GxRs_PixelShader].m_value.m_data.p);
     ffVs = !vs;
-    ffPs = !ps;
+    ffPs = !ps || VkDebugWorld() == 1;
 
-    if ((vs && (!vs->m_valid || !vs->m_apiSpecific)) || (ps && (!ps->m_valid || !ps->m_apiSpecific))) {
+    if ((vs && (!vs->m_valid || !vs->m_apiSpecific)) || (!ffPs && (!ps->m_valid || !ps->m_apiSpecific))) {
         return false;
     }
 
@@ -2921,16 +2938,38 @@ void CGxDeviceVulkan::Draw(CGxBatch* batch, int32_t count) {
 
     this->IStateSyncScissorRect();
 
+    if (this->m_frameSerial >= 1000 && s_drawStats[Draw_Total] != UINT32_MAX) {
+        const uint32_t* n = s_drawStats;
+        VkLog("CGxDeviceVulkan: draws to frame 1000: %u total, %u app VS, %u app PS, done %u; skipped: shader %u, constants %u, textures %u, stream %u, pipeline %u (vkDebugWorld %d)",
+            n[Draw_Total], n[Draw_AppVs], n[Draw_AppPs], n[Draw_Done], n[Draw_SkipShader], n[Draw_SkipConst], n[Draw_SkipTex], n[Draw_SkipStream], n[Draw_SkipPipeline], VkDebugWorld());
+        s_drawStats[Draw_Total] = UINT32_MAX;
+    }
+
+    bool stats = s_drawStats[Draw_Total] != UINT32_MAX;
+    stats && s_drawStats[Draw_Total]++;
+
     bool ffVs;
     bool ffPs;
 
-    if (!this->IStateSyncShaders(ffVs, ffPs) || !this->IStateSyncConstants(ffVs, ffPs)) {
+    if (!this->IStateSyncShaders(ffVs, ffPs)) {
+        stats && s_drawStats[Draw_SkipShader]++;
+        return;
+    }
+
+    if (stats) {
+        s_drawStats[Draw_AppVs] += !ffVs;
+        s_drawStats[Draw_AppPs] += !ffPs;
+    }
+
+    if (!this->IStateSyncConstants(ffVs, ffPs)) {
+        stats && s_drawStats[Draw_SkipConst]++;
         return;
     }
 
     VkDescriptorSet texSet = this->IStateSyncTextures();
 
     if (!texSet) {
+        stats && s_drawStats[Draw_SkipTex]++;
         return;
     }
 
@@ -2987,6 +3026,7 @@ void CGxDeviceVulkan::Draw(CGxBatch* batch, int32_t count) {
         PoolApi* api = streamBufs[s] ? static_cast<PoolApi*>(streamBufs[s]->m_pool->m_apiSpecific) : nullptr;
 
         if (!api) {
+            stats && s_drawStats[Draw_SkipStream]++;
             return;
         }
 
@@ -3003,6 +3043,7 @@ void CGxDeviceVulkan::Draw(CGxBatch* batch, int32_t count) {
     PoolApi* indexApi = count && this->m_primIndexBuf ? static_cast<PoolApi*>(this->m_primIndexBuf->m_pool->m_apiSpecific) : nullptr;
 
     if (count && !indexApi) {
+        stats && s_drawStats[Draw_SkipStream]++;
         return;
     }
 
@@ -3010,9 +3051,12 @@ void CGxDeviceVulkan::Draw(CGxBatch* batch, int32_t count) {
     VkPipeline pipeline = this->IPipelineGet(topologyClass, attribs, attribCount, bindingCount);
 
     if (!pipeline) {
+        stats && s_drawStats[Draw_SkipPipeline]++;
         return;
     }
 
+    stats && s_drawStats[Draw_Done]++;
+    int32_t debugWorld = VkDebugWorld();
     VkCommandBuffer cmd = this->m_frames[this->m_frameSerial % kFrames].m_cmd;
 
     if (this->m_curPipeline != pipeline) {
@@ -3029,9 +3073,9 @@ void CGxDeviceVulkan::Draw(CGxBatch* batch, int32_t count) {
     vkCmdSetViewport(cmd, 0, 1, &this->m_vkViewport);
     vkCmdSetScissor(cmd, 0, 1, &scissor);
     vkCmdSetPrimitiveTopology(cmd, s_primitiveConversion[batch->m_primType]);
-    vkCmdSetCullMode(cmd, this->m_cullMode);
+    vkCmdSetCullMode(cmd, debugWorld == 3 ? VK_CULL_MODE_NONE : this->m_cullMode);
     vkCmdSetFrontFace(cmd, VK_FRONT_FACE_CLOCKWISE);
-    vkCmdSetDepthTestEnable(cmd, this->m_passDepth != nullptr);
+    vkCmdSetDepthTestEnable(cmd, this->m_passDepth != nullptr && debugWorld != 2);
     vkCmdSetDepthWriteEnable(cmd, this->m_depthWrite);
     vkCmdSetDepthCompareOp(cmd, this->m_depthCompare);
     vkCmdSetDepthBias(cmd, this->m_depthBias, 0.0f, 0.0f);

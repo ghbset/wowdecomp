@@ -17,7 +17,7 @@
 // stock exe: no OFFSET tags, no wxl layout reservations. Structure mirrors CGxDeviceD3d11; see README.md here.
 class CGxDeviceVulkan : public CGxDevice {
     public:
-    enum { kFrames = 2, kPoolVersions = 3 };
+    enum { kFrames = 2, kPoolVersions = 8 };
 
     // A suballocation (VkMemoryBlock range). m_block is null for an empty Alloc.
     struct MemBlock;
