@@ -763,7 +763,7 @@ void CGxDeviceD3d11::ISetCaps(const CGxFormat& format) {
     this->m_caps.m_depthBias = 1;
     this->m_caps.m_numStreams = 16;
     // Stream offsets are always supported: buffers bind at their byte offset and draws use base vertex 0.
-    this->m_caps.unk_0010 = 1;
+    this->m_caps.m_streamOffset = 1;
 
     for (uint32_t i = 0; i < GxShTargets_Last; i++) {
         this->m_caps.m_shaderTargets[i] = 0;
@@ -814,10 +814,10 @@ void CGxDeviceD3d11::ISetCaps(const CGxFormat& format) {
     this->m_caps.m_pointScaleMax = 1.0f;
     this->m_caps.m_pointSprite = 0;
     this->m_caps.m_blendFactor = 1;
-    this->m_caps.unk_0130 = 1;
+    this->m_caps.m_shaderAlphaRef = 1;
 
     for (uint32_t i = 0; i < 5; i++) {
-        this->m_caps.unk_0114[i] = 0;
+        this->m_caps.unused_0114[i] = 0;
     }
 
     this->m_caps.unk_0134 = this->m_caps.m_shaderTargets[GxSh_Pixel] != 4;
@@ -1396,7 +1396,7 @@ int32_t CGxDeviceD3d11::CreatePoolAPI(CGxPool* pool) {
 
 void CGxDeviceD3d11::IReleaseD3dPool(CGxPool* pool) {
     if (pool->m_usage == GxPoolUsage_Stream) {
-        pool->unk_001C = 0;
+        pool->m_offset = 0;
     }
 
     pool->Invalidate();
@@ -1451,16 +1451,16 @@ char* CGxDeviceD3d11::IBufLock(CGxBuf* buf) {
     }
 
     if (pool->m_usage == GxPoolUsage_Stream) {
-        uint32_t index = (buf->m_itemSize + pool->unk_001C - 1) - (buf->m_itemSize + pool->unk_001C - 1) % buf->m_itemSize;
+        uint32_t index = (buf->m_itemSize + pool->m_offset - 1) - (buf->m_itemSize + pool->m_offset - 1) % buf->m_itemSize;
 
         if (index + buf->m_size > static_cast<uint32_t>(pool->m_size)) {
             api->m_discard = 1;
             pool->Discard();
             buf->m_index = 0;
-            pool->unk_001C = buf->m_size;
+            pool->m_offset = buf->m_size;
         } else {
             buf->m_index = index;
-            pool->unk_001C = index + buf->m_size;
+            pool->m_offset = index + buf->m_size;
         }
     }
 
@@ -1473,7 +1473,7 @@ void CGxDeviceD3d11::IBufUnlock(CGxBuf* buf) {
 
     if (emergencyMem.m_lock) {
         emergencyMem.Unlock();
-        buf->unk_001D = 0;
+        buf->m_valid = 0;
         this->m_intF5C = 1;
         return;
     }
@@ -1481,7 +1481,7 @@ void CGxDeviceD3d11::IBufUnlock(CGxBuf* buf) {
     PoolApi* api = static_cast<PoolApi*>(pool->m_apiSpecific);
 
     if (!api || !buf->m_size) {
-        buf->unk_001D = api != nullptr;
+        buf->m_valid = api != nullptr;
         return;
     }
 
@@ -1490,7 +1490,7 @@ void CGxDeviceD3d11::IBufUnlock(CGxBuf* buf) {
     if (pool->m_usage == GxPoolUsage_Static) {
         D3D11_BOX box = { buf->m_index, 0, 0, buf->m_index + buf->m_size, 1, 1 };
         this->m_d3dContext->UpdateSubresource(api->m_buffer, 0, &box, src, 0, 0);
-        buf->unk_001D = 1;
+        buf->m_valid = 1;
         return;
     }
 
@@ -1506,7 +1506,7 @@ void CGxDeviceD3d11::IBufUnlock(CGxBuf* buf) {
         api->m_discard = 0;
     }
 
-    buf->unk_001D = SUCCEEDED(hr);
+    buf->m_valid = SUCCEEDED(hr);
 }
 
 char* CGxDeviceD3d11::BufLock(CGxBuf* buf) {
