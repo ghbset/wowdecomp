@@ -60,11 +60,6 @@ int32_t DayNight::s_mapId;
 // STATIC: 0x00D38AC8
 static CVar* s_cvSkyCloudLOD;
 
-// Not stock: the sun arc (wxl-light's Sun.cpp, made source). gfxSunArc 0 is the stock sky, exactly.
-static CVar* s_cvSunArc;
-static CVar* s_cvDebugHour;   // -1 follows the game clock; 0..24 draws the sky and light for that hour
-static int32_t s_lightBody;   // which body is the world's light: 0 the sun, 1 the moon
-
 // STATIC: 0x00D38ADC
 int32_t DayNight::g_forceFullUpdate;
 
@@ -1198,28 +1193,11 @@ void DayNight::SetPlanets() {
     static C2Vector s_sunScale[4] = { C2Vector(0.25f, 2.0f), C2Vector(0.28125f, 1.0f), C2Vector(0.84375f, 1.0f), C2Vector(0.875f, 2.0f) };
     static C2Vector s_moonScale[4] = { C2Vector(0.041666672f, 1.0f), C2Vector(0.16666667f, 1.5f), C2Vector(0.91666669f, 1.5f), C2Vector(0.99930561f, 1.0f) };
 
-    // gfxSunArc: stock, the sun keeps one compass bearing all day (azimuth 45 degrees), climbs to 85 degrees at
-    // noon and comes back down the same way; the moon does the same at night. The arc keeps the key TIMES (sunrise,
-    // noon, sunset; moonrise, midnight, moonset) and changes the angles: the sun rises in the east, passes through
-    // the south 62 degrees up and sets in the west, and the moon follows the same path at night, 55 degrees up.
-    // (x is north, y is west, so east is 270 degrees.) Angles fall through the day, so the wrap from the last key
-    // to the first (the body under the horizon) stays inside 0..2pi as well.
-    //
-    // The moon's two horizon keys are moved to meet the sun's: by the stock tables it comes up at 22:18 and is
-    // down by 03:23, which left two hours after sunset and three before sunrise with neither body in the sky and
-    // so no light with a direction at all. From 07:18 and 19:36 it crosses the horizon at about 06:10 and 20:15,
-    // within minutes of the sun (06:23 and 20:11).
-    static C2Vector s_arcSunTheta[5] = { C2Vector(0.22916667f, 1.7453293f), C2Vector(0.49652779f, 0.48869219f), C2Vector(0.5f, 0.48869219f), C2Vector(0.50347221f, 0.48869219f), C2Vector(0.89583331f, 1.7453293f) };
-    static C2Vector s_arcSunPhi[3] = { C2Vector(0.22916667f, 4.712389f), C2Vector(0.5f, 3.1415927f), C2Vector(0.89583331f, 1.5707964f) };
-    static C2Vector s_arcMoonTheta[5] = { C2Vector(0.0f, 0.61086524f), C2Vector(0.0034722222f, 0.61086524f), C2Vector(7.3f / 24.0f, 1.7453293f), C2Vector(19.6f / 24.0f, 1.7453293f), C2Vector(0.99652779f, 0.61086524f) };
-    static C2Vector s_arcMoonPhi[3] = { C2Vector(0.0f, 3.1415927f), C2Vector(7.3f / 24.0f, 1.5707964f), C2Vector(19.6f / 24.0f, 4.712389f) };
-
     DNInfo& info = DayNight::g_dnInfo;
     DNPlanets& planets = DayNight::g_planets;
-    const bool arc = s_cvSunArc && s_cvSunArc->m_intValue;
 
-    float theta = DayNight::InterpTable(arc ? s_arcSunTheta : s_sunTheta, 5, info.m_dayProgression);
-    float phi = DayNight::InterpTable(arc ? s_arcSunPhi : s_sunPhi, 3, info.m_dayProgression);
+    float theta = DayNight::InterpTable(s_sunTheta, 5, info.m_dayProgression);
+    float phi = DayNight::InterpTable(s_sunPhi, 3, info.m_dayProgression);
     float sinTheta = CMath::sin_(theta);
     float cosTheta = CMath::cos_(theta);
     float sinPhi = CMath::sin_(phi);
@@ -1233,8 +1211,8 @@ void DayNight::SetPlanets() {
     planets.m_sun.m_scale = DayNight::InterpTable(s_sunScale, 4, info.m_dayProgression) * planets.m_sun.m_baseScale;
     DayNight::g_sunGlare.m_position = planets.m_sun.m_position;
 
-    theta = DayNight::InterpTable(arc ? s_arcMoonTheta : s_moonTheta, 5, info.m_dayProgression);
-    phi = DayNight::InterpTable(arc ? s_arcMoonPhi : s_moonPhi, 3, info.m_dayProgression);
+    theta = DayNight::InterpTable(s_moonTheta, 5, info.m_dayProgression);
+    phi = DayNight::InterpTable(s_moonPhi, 3, info.m_dayProgression);
     sinTheta = CMath::sin_(theta);
     cosTheta = CMath::cos_(theta);
     sinPhi = CMath::sin_(phi);
@@ -2590,8 +2568,6 @@ void DayNight::LoadMap(int32_t mapId) {
     info.m_flashBlend = 0;
     DayNight::s_lightFlags = 0;
     s_cvSkyCloudLOD = CVar::Register("SkyCloudLOD", nullptr, 0, "0", CWorldParam::CloudLODCallback, 1, false, nullptr, false);
-    s_cvSunArc = CVar::Register("gfxSunArc", "Sun and moon cross the sky east to south to west (0 = stock)", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
-    s_cvDebugHour = CVar::Register("gfxDebugHour", "Draw the sky and light for this hour (0-24); -1 follows the game clock", 0, "-1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     ConsoleCommandRegister("SkySunGlare", SkySunGlare, CATEGORY_GRAPHICS, "0, 1");
     DayNight::g_forceFullUpdate = 1;
 }
@@ -2822,123 +2798,10 @@ void DayNight::SetColors() {
     info.m_curve1 = DayNight::InterpTable(s_curveTable1, 2, info.m_dayProgression);
 }
 
-/// How much of its light a body gives by its own height: all of it from 4 degrees up, none a degree under the horizon.
-static float BodyWeight(float elevDeg) {
-    float t = (elevDeg + 1.0f) / 5.0f;
-    t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
-    return t * t * (3.0f - 2.0f * t);
-}
-
-/// The sun's and moon's directions (unit, toward them) and heights in degrees, from where SetPlanets put the discs.
-static bool BodyDirs(C3Vector dir[2], float elev[2]) {
-    const C3Vector& origin = DayNight::g_dnInfo.m_cameraPos;
-    const C3Vector* disc[2] = { &DayNight::g_planets.m_sun.m_position, &DayNight::g_planets.m_moon.m_position };
-
-    for (int32_t b = 0; b < 2; b++) {
-        C3Vector d(disc[b]->x - origin.x, disc[b]->y - origin.y, disc[b]->z - origin.z);
-        float len = sqrtf(d.x * d.x + d.y * d.y + d.z * d.z);
-
-        if (!(len > 1e-3f) || !std::isfinite(len)) {
-            return false;
-        }
-
-        dir[b] = C3Vector(d.x / len, d.y / len, d.z / len);
-        float z = dir[b].z < -1.0f ? -1.0f : (dir[b].z > 1.0f ? 1.0f : dir[b].z);
-        elev[b] = asinf(z) * 57.29578f;
-    }
-
-    return true;
-}
-
-// Sunrise and sunset: one light at a time (gfxSunArc).
-//
-// The world is lit by the sun or by the moon, never by something between them: the stock light keeps its own
-// fixed bearing, and blended between two discs on an east-west arc it would point straight up half way. Each
-// body's light is worth BodyWeight of its own height; the body with the larger weight is the light. Its direction
-// is the body's own bearing, no lower than 10 degrees (the ground is not lit from under itself), and that weight is
-// how much of the frame's directional light is left -- the rest of it, by the sine of the light's height, goes to
-// the ambient, so the world dims no further than it did but lies flat for a while. So the sun's light sinks and
-// fades out where the sun sets; for a few minutes the sky alone lights the world; then the moon's comes up from
-// the moon's own side. The change of side happens with both weights near nothing, where there is nothing left to
-// show it. The shadow light (CShadowQuery::Update) follows the same body and changes sides on the same frame.
-static void ArcHandover() {
-    C3Vector dir[2];
-    float elev[2];
-
-    if (!BodyDirs(dir, elev)) {
-        return;
-    }
-
-    const float w[2] = { BodyWeight(elev[0]), BodyWeight(elev[1]) };
-
-    // A body keeps the light until the other's is clearly over it, so the two do not swap back and forth on the
-    // frame they cross.
-    if (w[1 - s_lightBody] > w[s_lightBody] + 0.02f) {
-        s_lightBody = 1 - s_lightBody;
-    }
-
-    const int32_t b = s_lightBody;
-    const float k = w[b];
-    const float el = (elev[b] > 10.0f ? elev[b] : 10.0f) * 0.017453292f;
-    const float h = sqrtf(dir[b].x * dir[b].x + dir[b].y * dir[b].y);
-    DNLightState& light = DayNight::g_dnInfo.m_light1;
-
-    if (h > 1e-4f) {
-        light.m_dir.x = -dir[b].x / h * cosf(el);
-        light.m_dir.y = -dir[b].y / h * cosf(el);
-        light.m_dir.z = -sinf(el);
-    }
-
-    if (k >= 0.999f) {
-        return;
-    }
-
-    const float share = sinf(el) * 0.6f + 0.1f;
-    uint8_t* d[3] = { &light.m_diffuse.r, &light.m_diffuse.g, &light.m_diffuse.b };
-    uint8_t* a[3] = { &light.m_ambient.r, &light.m_ambient.g, &light.m_ambient.b };
-
-    for (int32_t i = 0; i < 3; i++) {
-        const float dc = *d[i], ac = *a[i];
-        const float na = ac + dc * (1.0f - k) * share;
-        *d[i] = static_cast<uint8_t>(dc * k + 0.5f);
-        *a[i] = static_cast<uint8_t>((na < 255.0f ? na : 255.0f) + 0.5f);
-    }
-}
-
-/// The body the shadow light stands for and its direction (unit, toward it) and height in degrees. Under gfxSunArc
-/// it is the one ArcHandover made the world's light; without it, the sun while it is up, else the moon, else the
-/// last. False before the sky is placed.
-int32_t DayNight::GetLightBody(C3Vector& toward, float& elevDeg) {
-    C3Vector dir[2];
-    float elev[2];
-
-    if (!BodyDirs(dir, elev)) {
-        return 0;
-    }
-
-    if (!(s_cvSunArc && s_cvSunArc->m_intValue)) {
-        if (elev[0] > 0.0f) {
-            s_lightBody = 0;
-        } else if (elev[1] > 0.0f) {
-            s_lightBody = 1;
-        }
-    }
-
-    toward = dir[s_lightBody];
-    elevDeg = elev[s_lightBody];
-    return 1;
-}
-
 // VERIFY: d95f0d18 auto
 // OFFSET: 0x007F3920
 void DayNight::UpdateLighting() {
     DNInfo& info = DayNight::g_dnInfo;
-
-    // gfxDebugHour: everything in this step reads the day fraction, so setting it here moves the whole lighting
-    // clock and nothing else.
-    if (s_cvDebugHour && s_cvDebugHour->m_floatValue >= 0.0f) {
-        info.m_dayProgression = fmodf(s_cvDebugHour->m_floatValue, 24.0f) / 24.0f;
-    }
     float x = info.m_cameraDir.x;
     float y = info.m_cameraDir.y;
     float angle;
@@ -2965,10 +2828,6 @@ void DayNight::UpdateLighting() {
     DayNight::SetColors();
     DayNight::SetDirection();
     DayNight::SetPlanets();
-
-    if (s_cvSunArc && s_cvSunArc->m_intValue) {
-        ArcHandover();
-    }
 }
 
 // VERIFY: dbc89d6c auto

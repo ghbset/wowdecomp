@@ -69,7 +69,6 @@ class CShadowCache {
     static CTexture* s_intDynShadow;
     static ShadowMatrixCallback s_matrixCallback;
     static int32_t s_needsRebuild;
-    static uint32_t s_bandRedraw;   // not stock: bit i = redraw cached band i once, wherever the camera is
     static C4Vector s_pcfOffsets[8];
     static ShadowQueryCallback s_queryCallback;
     static int32_t s_recreateTextures;

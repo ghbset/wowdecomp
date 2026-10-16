@@ -2,8 +2,10 @@
 #include <cmath>
 #include <cstdarg>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <unordered_set>
 #include "Engine/Source/Gx/CGxDeviceD3d11/CGxDeviceD3d11.h"
 #include "Engine/Source/ConsoleBase/ConsoleVar.h"
 #include "Engine/Source/ConsoleBase/Types.h"
@@ -56,7 +58,8 @@ const DXGI_FORMAT CGxDeviceD3d11::s_GxTexFmtToDxgiFmt[GxTexFormats_Last] = {
     DXGI_FORMAT_R24G8_TYPELESS
 };
 
-EGxTexFormat CGxDeviceD3d11::s_GxTexFormatToUse[GxTexFormats_Last] = { GxTex_Unknown, GxTex_Abgr8888, GxTex_Argb8888, GxTex_Argb4444, GxTex_Argb1555, GxTex_Rgb565, GxTex_Dxt1, GxTex_Dxt3, GxTex_Dxt5, GxTex_Uv88, GxTex_Gr1616F, GxTex_R32F, GxTex_D24X8 };
+// Constant like 4.3.4's (0x00BD67E8 is read-only there): a failed create falls back for that one texture only.
+const EGxTexFormat CGxDeviceD3d11::s_GxTexFormatToUse[GxTexFormats_Last] = { GxTex_Unknown, GxTex_Abgr8888, GxTex_Argb8888, GxTex_Argb4444, GxTex_Argb1555, GxTex_Rgb565, GxTex_Dxt1, GxTex_Dxt3, GxTex_Dxt5, GxTex_Uv88, GxTex_Gr1616F, GxTex_R32F, GxTex_D24X8 };
 
 // 4.3.4 widens every 16-bit format to 8888 (table 0x00BD67E8). Blit has Argb8888/Argb4444 -> Abgr8888 converters.
 // TODO(phase 5): Argb1555/Rgb565 data has no converter to 8888; on pre-11.1 runtimes those textures fail to create.
@@ -77,6 +80,20 @@ static void D3d11Log(const char* format, ...) {
 
     if (CGxDevice::m_log) {
         SLogFlush(CGxDevice::m_log);
+    }
+}
+
+// Once per distinct message, so a failure repeated every frame shows up once in gx.log.
+static void D3d11LogOnce(const char* format, ...) {
+    static std::unordered_set<std::string> s_seen;
+    char buffer[512];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(buffer, sizeof(buffer), format, args);
+    va_end(args);
+
+    if (s_seen.insert(buffer).second) {
+        D3d11Log("%s", buffer);
     }
 }
 
@@ -2315,12 +2332,20 @@ void CGxDeviceD3d11::IStateSyncTextures() {
 
     for (uint32_t i = 0; i < 16; i++) {
         CGxTex* texture = static_cast<CGxTex*>(this->m_appRenderStates[GxRs_Texture0 + i].m_value.m_data.p);
+
+        // Not stock: IRsSync skips a bind whose CGxTex* is unchanged, so a CGxTex destroyed and made again at the same
+        // address, or given new flags, would never be created or uploaded. Every draw makes sure of it here.
+        if (texture) {
+            this->ITexMarkAsUpdated(texture);
+        }
+
         TexApi* api = texture && !texture->m_needsCreation ? static_cast<TexApi*>(texture->m_apiSpecificData) : nullptr;
         ID3D11ShaderResourceView* srv = api ? api->m_srv : nullptr;
 
         if (srv != this->m_curSrv[i]) {
             this->m_d3dContext->PSSetShaderResources(i, 1, &srv);
             this->m_curSrv[i] = srv;
+            this->m_samplerDirty |= 1 << i;
         }
 
         if (!texture || !(this->m_samplerDirty & (1 << i))) {
@@ -2711,31 +2736,26 @@ void CGxDeviceD3d11::ITexRelease(CGxTex* texId) {
     texId->m_apiSpecificData = nullptr;
 }
 
-// 4.3.4 ITexCreate (0x0086B0C0) shape: colour textures typed, D24X8 typeless with a DSV and an SRV.
-void CGxDeviceD3d11::ITexCreate(CGxTex* texId) {
-    this->ITexRelease(texId);
-
+// The texture ITexCreate makes for texId as it stands now (flags, format, base mip).
+void CGxDeviceD3d11::ITexDesc(CGxTex* texId, D3D11_TEXTURE2D_DESC& desc) {
     uint32_t width;
     uint32_t height;
     uint32_t baseMip;
     uint32_t mipCount;
     this->ITexWHDStartEnd(texId, width, height, baseMip, mipCount);
 
-    texId->m_format = s_GxTexFormatToUse[texId->m_format];
-
     bool cube = texId->m_target == GxTex_CubeMap;
     bool depth = texId->m_format == GxTex_D24X8;
-    bool renderTarget = texId->m_flags.m_renderTarget;
     // GENERATE_MIPS needs RENDER_TARGET, which BC formats cannot have: DXT textures keep their uploaded mips.
     bool compressed = texId->m_format >= GxTex_Dxt1 && texId->m_format <= GxTex_Dxt5;
     bool generateMips = texId->m_flags.m_generateMipMaps && !depth && !compressed;
 
-    D3D11_TEXTURE2D_DESC desc;
     memset(&desc, 0, sizeof(desc));
     desc.Width = width ? width : 1;
     desc.Height = height ? height : 1;
     desc.MipLevels = depth ? 1 : (generateMips ? 0 : mipCount - baseMip);
     desc.ArraySize = cube ? 6 : 1;
+    desc.Format = s_GxTexFmtToDxgiFmt[texId->m_format];
     desc.SampleDesc.Count = 1;
     desc.Usage = D3D11_USAGE_DEFAULT;
     desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
@@ -2743,45 +2763,71 @@ void CGxDeviceD3d11::ITexCreate(CGxTex* texId) {
 
     if (depth) {
         desc.BindFlags |= D3D11_BIND_DEPTH_STENCIL;
-    } else if (renderTarget || generateMips) {
+    } else if (texId->m_flags.m_renderTarget || generateMips) {
         desc.BindFlags |= D3D11_BIND_RENDER_TARGET;
     }
 
     if (generateMips) {
         desc.MiscFlags |= D3D11_RESOURCE_MISC_GENERATE_MIPS;
     }
+}
 
-    desc.Format = s_GxTexFmtToDxgiFmt[texId->m_format];
+// 4.3.4 ITexCreate (0x0086B0C0) shape: colour textures typed, D24X8 typeless with a DSV and an SRV.
+void CGxDeviceD3d11::ITexCreate(CGxTex* texId) {
+    this->ITexRelease(texId);
+
+    texId->m_format = s_GxTexFormatToUse[texId->m_format];
+
+    bool cube = texId->m_target == GxTex_CubeMap;
+    bool depth = texId->m_format == GxTex_D24X8;
+    bool renderTarget = texId->m_flags.m_renderTarget;
+
+    D3D11_TEXTURE2D_DESC desc;
+    this->ITexDesc(texId, desc);
 
     ID3D11Texture2D* texture = nullptr;
+    HRESULT hr = this->m_d3dDevice->CreateTexture2D(&desc, nullptr, &texture);
 
-    if (FAILED(this->m_d3dDevice->CreateTexture2D(&desc, nullptr, &texture))) {
+    if (FAILED(hr)) {
+        // 4.3.4 logs the failure (D3d11Error 0x0086B0A0) with these fields.
+        D3d11LogOnce("CGxDeviceD3d11: CreateTexture2D failed 0x%08X: gx format %d dxgi %d %ux%u mips %u array %u bind 0x%X misc 0x%X", static_cast<uint32_t>(hr), texId->m_format, desc.Format, desc.Width, desc.Height, desc.MipLevels, desc.ArraySize, desc.BindFlags, desc.MiscFlags);
+
         if (renderTarget || depth) {
             return;
         }
 
-        if (compressed) {
-            // BC level 0 must be a multiple of 4 in D3D10+ (D3D9 allowed 1x1/2x2 DXT). Decode just this texture to
-            // 8888 (Blit has the Dxt -> Argb8888 decoders) instead of moving every DXT texture to the fallback.
+        EGxTexFormat from = texId->m_format;
+
+        // Only this texture falls back; the next one of the same format tries its own format again. BC level 0 must
+        // be a multiple of 4 in D3D10+ (D3D9 allowed 1x1/2x2 DXT): decode to 8888, Blit has Dxt -> Argb8888.
+        if (from >= GxTex_Dxt1 && from <= GxTex_Dxt5) {
             texId->m_format = GxTex_Argb8888;
         } else {
-            s_GxTexFormatToUse[texId->m_format] = s_tolerableTexFmtMapping[texId->m_format];
-            texId->m_format = s_GxTexFormatToUse[texId->m_format];
+            texId->m_format = s_tolerableTexFmtMapping[from];
         }
 
-        desc.Format = s_GxTexFmtToDxgiFmt[texId->m_format];
+        if (texId->m_format == from) {
+            return;
+        }
 
-        if (FAILED(this->m_d3dDevice->CreateTexture2D(&desc, nullptr, &texture))) {
+        D3d11LogOnce("CGxDeviceD3d11: texture format remap %d -> %d (%ux%u, this texture only)", from, texId->m_format, desc.Width, desc.Height);
+        this->ITexDesc(texId, desc);
+        hr = this->m_d3dDevice->CreateTexture2D(&desc, nullptr, &texture);
+
+        if (FAILED(hr)) {
+            D3d11LogOnce("CGxDeviceD3d11: CreateTexture2D fallback failed 0x%08X: gx format %d dxgi %d %ux%u mips %u bind 0x%X", static_cast<uint32_t>(hr), texId->m_format, desc.Format, desc.Width, desc.Height, desc.MipLevels, desc.BindFlags);
             return;
         }
     }
 
+    D3D11_TEXTURE2D_DESC wanted = desc;
     texture->GetDesc(&desc);
 
     TexApi* api = new TexApi;
     memset(api, 0, sizeof(*api));
     api->m_texture = texture;
     api->m_levels = desc.MipLevels;
+    api->m_wanted = wanted;
 
     D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc;
     memset(&srvDesc, 0, sizeof(srvDesc));
@@ -2795,7 +2841,11 @@ void CGxDeviceD3d11::ITexCreate(CGxTex* texId) {
         srvDesc.Texture2D.MipLevels = desc.MipLevels;
     }
 
-    this->m_d3dDevice->CreateShaderResourceView(texture, &srvDesc, &api->m_srv);
+    hr = this->m_d3dDevice->CreateShaderResourceView(texture, &srvDesc, &api->m_srv);
+
+    if (FAILED(hr)) {
+        D3d11LogOnce("CGxDeviceD3d11: CreateShaderResourceView failed 0x%08X: gx format %d dxgi %d %ux%u mips %u dim %d", static_cast<uint32_t>(hr), texId->m_format, srvDesc.Format, desc.Width, desc.Height, desc.MipLevels, srvDesc.ViewDimension);
+    }
 
     if (depth) {
         D3D11_DEPTH_STENCIL_VIEW_DESC dsvDesc;
@@ -2953,7 +3003,29 @@ done:
 }
 
 void CGxDeviceD3d11::ITexMarkAsUpdated(CGxTex* texId) {
-    if (!texId->m_needsUpdate || !this->m_context) {
+    if (!this->m_context) {
+        return;
+    }
+
+    // Not stock: D3D9 textures take new flags as sampler state, a D3D11 texture's mip count, bind flags and format
+    // are fixed at creation. A CGxTex given new flags (TexSetFlags, or reused by the texture cache) whose texture no
+    // longer matches is made again and re-uploaded. Current render targets are left alone.
+    TexApi* api = static_cast<TexApi*>(texId->m_apiSpecificData);
+
+    if (api && !texId->m_needsCreation && this->m_textureTarget[0].m_texture != texId && this->m_textureTarget[1].m_texture != texId) {
+        D3D11_TEXTURE2D_DESC wanted;
+        this->ITexDesc(texId, wanted);
+
+        if (memcmp(&wanted, &api->m_wanted, sizeof(wanted)) != 0) {
+            D3d11LogOnce("CGxDeviceD3d11: texture recreated for new flags: %ux%u -> %ux%u, dxgi %d -> %d, mips %u -> %u, bind 0x%X -> 0x%X, misc 0x%X -> 0x%X", api->m_wanted.Width, api->m_wanted.Height, wanted.Width, wanted.Height, api->m_wanted.Format, wanted.Format, api->m_wanted.MipLevels, wanted.MipLevels, api->m_wanted.BindFlags, wanted.BindFlags, api->m_wanted.MiscFlags, wanted.MiscFlags);
+            this->ITexRelease(texId);
+            texId->m_needsCreation = 1;
+            static CiRect s_updateRect;
+            this->TexMarkForUpdate(texId, s_updateRect, 0);
+        }
+    }
+
+    if (!texId->m_needsUpdate) {
         return;
     }
 
@@ -3033,11 +3105,43 @@ void CGxDeviceD3d11::DeviceCopyTex(CGxTex* source, uint32_t sourcePlane, CGxTex*
     }
 
     TexApi* src = static_cast<TexApi*>(source->m_apiSpecificData);
+
+    if (!src || !this->ITexMatchFormat(dest, src->m_wanted.Format)) {
+        return;
+    }
+
     TexApi* dst = static_cast<TexApi*>(dest->m_apiSpecificData);
 
-    if (src && dst) {
+    if (dst) {
         this->m_d3dContext->CopySubresourceRegion(dst->m_texture, D3D11CalcSubresource(0, destPlane, dst->m_levels), 0, 0, 0, src->m_texture, D3D11CalcSubresource(0, sourcePlane, src->m_levels), nullptr);
     }
+}
+
+// CopySubresourceRegion needs both sides in one format group and drops the copy silently otherwise (black). A copy
+// target in another format is made again in the source's (it holds nothing a copy is not about to overwrite).
+bool CGxDeviceD3d11::ITexMatchFormat(CGxTex* texId, DXGI_FORMAT format) {
+    TexApi* api = static_cast<TexApi*>(texId->m_apiSpecificData);
+
+    if (!api) {
+        return false;
+    }
+
+    if (api->m_wanted.Format == format) {
+        return true;
+    }
+
+    for (uint32_t f = GxTex_Abgr8888; f < GxTexFormats_Last; f++) {
+        if (s_GxTexFmtToDxgiFmt[f] == format && f != GxTex_D24X8) {
+            D3d11LogOnce("CGxDeviceD3d11: copy target %ux%u remapped dxgi %d -> %d (gx format %d -> %u) to match its source", api->m_wanted.Width, api->m_wanted.Height, api->m_wanted.Format, format, texId->m_format, f);
+            texId->m_format = static_cast<EGxTexFormat>(f);
+            this->ITexCreate(texId);
+            api = static_cast<TexApi*>(texId->m_apiSpecificData);
+            return api && api->m_wanted.Format == format;
+        }
+    }
+
+    D3d11LogOnce("CGxDeviceD3d11: copy dropped, target dxgi %d cannot take source dxgi %d", api->m_wanted.Format, format);
+    return false;
 }
 
 // Back buffer region -> texture (D3D9 StretchRect with equal rects).
@@ -3050,12 +3154,20 @@ int32_t CGxDeviceD3d11::TexCopy(CGxTex* dest, const C2iVector& destPos, const C2
         this->ITexCreate(dest);
     }
 
-    TexApi* api = static_cast<TexApi*>(dest->m_apiSpecificData);
     ID3D11Texture2D* source = this->IResolvedBackBuffer();
 
-    if (dest->m_needsCreation || !api || !source) {
+    if (dest->m_needsCreation || !dest->m_apiSpecificData || !source) {
         return 0;
     }
+
+    D3D11_TEXTURE2D_DESC sourceDesc;
+    source->GetDesc(&sourceDesc);
+
+    if (!this->ITexMatchFormat(dest, sourceDesc.Format)) {
+        return 0;
+    }
+
+    TexApi* api = static_cast<TexApi*>(dest->m_apiSpecificData);
 
     D3D11_BOX box = { static_cast<UINT>(sourcePos.x), static_cast<UINT>(sourcePos.y), 0, static_cast<UINT>(sourcePos.x + size.x), static_cast<UINT>(sourcePos.y + size.y), 1 };
     this->m_d3dContext->CopySubresourceRegion(api->m_texture, D3D11CalcSubresource(level, plane, api->m_levels), destPos.x, destPos.y, 0, source, 0, &box);

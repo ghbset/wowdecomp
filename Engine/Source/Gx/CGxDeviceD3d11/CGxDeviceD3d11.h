@@ -31,6 +31,9 @@ class CGxDeviceD3d11 : public CGxDevice {
         ID3D11RenderTargetView* m_rtv[6];
         ID3D11DepthStencilView* m_dsv;
         uint32_t m_levels;
+        // What ITexDesc asked for at creation: a CGxTex whose flags have since changed (TexSetFlags, the texture
+        // cache reusing it) is recreated when ITexDesc now asks for something else.
+        D3D11_TEXTURE2D_DESC m_wanted;
     };
 
     HWND m_hwnd;
@@ -150,7 +153,7 @@ class CGxDeviceD3d11 : public CGxDevice {
     static const DXGI_FORMAT s_GxFormatToDxgiColor[CGxFormat::Formats_Last];
     static const DXGI_FORMAT s_GxFormatToDxgiDepth[CGxFormat::Formats_Last][3];
     static const DXGI_FORMAT s_GxTexFmtToDxgiFmt[GxTexFormats_Last];
-    static EGxTexFormat s_GxTexFormatToUse[GxTexFormats_Last];
+    static const EGxTexFormat s_GxTexFormatToUse[GxTexFormats_Last];
     static const EGxTexFormat s_tolerableTexFmtMapping[GxTexFormats_Last];
     static const D3D11_PRIMITIVE_TOPOLOGY s_primitiveConversion[GxPrims_Last];
 
@@ -194,7 +197,9 @@ class CGxDeviceD3d11 : public CGxDevice {
     void IStateSyncInputLayout();
     void IStateSyncVertexPtrs();
     void ISetVertexBuffer(uint32_t stream, CGxBuf* buf, uint32_t stride);
+    void ITexDesc(CGxTex* texId, D3D11_TEXTURE2D_DESC& desc);
     void ITexCreate(CGxTex* texId);
+    bool ITexMatchFormat(CGxTex* texId, DXGI_FORMAT format);
     void ITexForceRecreation(int32_t all);
     void ITexRelease(CGxTex* texId);
     void ITexUpload(CGxTex* texId);

@@ -1495,7 +1495,7 @@ void CGxDevice::Log(const char* format, va_list args) {
     _vsnprintf(buffer, sizeof(buffer), format, args);
 
     if (CGxDevice::m_logBytes < 0x200000) {
-        SLogWrite(CGxDevice::m_log, buffer);
+        SLogWrite(CGxDevice::m_log, "%s", buffer);
         CGxDevice::m_logBytes += static_cast<uint32_t>(strlen(buffer));
     }
 }
