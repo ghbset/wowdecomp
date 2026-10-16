@@ -36,6 +36,14 @@ class CGxDeviceD3d11 : public CGxDevice {
         D3D11_TEXTURE2D_DESC m_wanted;
     };
 
+    // CGxTex::m_apiSpecificData2, followed by the texels. Not stock: a CPU copy of what ITexUpload sent, for textures
+    // whose callback has no file to reload from. A full device recreate refills them from it (ITexCreate), as D3D9
+    // managed textures survive a Reset; the callbacks alone gave stale or partial texels.
+    struct TexShadow {
+        D3D11_TEXTURE2D_DESC m_wanted;
+        uint32_t m_levels;
+    };
+
     HWND m_hwnd;
     ATOM m_hwndClass;
     int32_t m_ownhwnd;
@@ -214,6 +222,7 @@ class CGxDeviceD3d11 : public CGxDevice {
     void ITexForceRecreation(int32_t all);
     void ITexRelease(CGxTex* texId);
     void ITexUpload(CGxTex* texId);
+    TexShadow* ITexShadow(CGxTex* texId, const TexApi* api, bool make);
     ID3D11Texture2D* IResolvedBackBuffer();
     int32_t IBlit(ID3D11ShaderResourceView* source, uint32_t sourceWidth, uint32_t sourceHeight, const CiRect* sourceRect, CGxTex* dest, uint32_t level, uint32_t face, const CiRect* destRect, bool linear);
     int32_t IBlitBackBuffer(CGxTex* dest, uint32_t level, uint32_t face, const CiRect* sourceRect, const CiRect* destRect, bool linear);

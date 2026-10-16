@@ -16,6 +16,8 @@
 #include "Engine/Source/Gx/CGxTex.h"
 #include "Engine/Source/Gx/Gx.h"
 #include "Engine/Source/Os/Error.h"
+#include "Engine/Source/Services/Texture.h"
+#include "Engine/Source/Services/TextureBlob.h"
 #include "Engine/Source/Storm/H/storm.h"
 
 // Phase status (see README.md): device, swap chain, back buffer, readable depth, clear/present/resize, buffer pools,
@@ -3103,6 +3105,62 @@ void CGxDeviceD3d11::ITexDesc(CGxTex* texId, D3D11_TEXTURE2D_DESC& desc) {
     }
 }
 
+// Byte offset, row pitch and row count of subresource sub (D3D11CalcSubresource order) in a TexShadow's texels.
+static uint32_t TexShadowLayout(const D3D11_TEXTURE2D_DESC& desc, uint32_t levels, EGxTexFormat format, uint32_t sub, uint32_t& pitch, uint32_t& rows) {
+    bool compressed = format >= GxTex_Dxt1 && format <= GxTex_Dxt5;
+    uint32_t offset = 0;
+
+    for (uint32_t i = 0;; i++) {
+        uint32_t level = i % levels;
+        uint32_t width = desc.Width >> level ? desc.Width >> level : 1;
+        uint32_t height = desc.Height >> level ? desc.Height >> level : 1;
+
+        if (compressed) {
+            pitch = ((width + 3) >> 2) * CGxDevice::s_texFormatBytesPerBlock[format];
+            rows = (height + 3) >> 2;
+        } else {
+            pitch = (width * CGxDevice::s_texFormatBitDepth[format] + 7) >> 3;
+            rows = height;
+        }
+
+        if (i == sub) {
+            return offset;
+        }
+
+        offset += pitch * rows;
+    }
+}
+
+// texId's shadow, made (zeroed) on its first upload when make is set. A shadow that no longer fits the texture is
+// dropped. None for render targets, depth and file-backed textures, whose callback reloads the file on GxTex_Lock:
+// those are most of the texture memory and a copy would only double it (Wow32 address space).
+CGxDeviceD3d11::TexShadow* CGxDeviceD3d11::ITexShadow(CGxTex* texId, const TexApi* api, bool make) {
+    TexShadow* shadow = static_cast<TexShadow*>(texId->m_apiSpecificData2);
+    bool fileBacked = texId->m_userFunc == UpdateBlpTextureAsync || texId->m_userFunc == UpdateTgaTexture || texId->m_userFunc == UpdateBlobTexture;
+    bool wanted = !fileBacked && !texId->m_flags.m_renderTarget && texId->m_format != GxTex_D24X8;
+
+    if (shadow && (!wanted || shadow->m_levels != api->m_levels || memcmp(&shadow->m_wanted, &api->m_wanted, sizeof(shadow->m_wanted)) != 0)) {
+        free(shadow);
+        shadow = nullptr;
+        texId->m_apiSpecificData2 = nullptr;
+    }
+
+    if (!shadow && wanted && make) {
+        uint32_t pitch;
+        uint32_t rows;
+        uint32_t size = TexShadowLayout(api->m_wanted, api->m_levels, texId->m_format, api->m_levels * api->m_wanted.ArraySize, pitch, rows);
+        shadow = static_cast<TexShadow*>(calloc(1, sizeof(TexShadow) + size));
+
+        if (shadow) {
+            shadow->m_wanted = api->m_wanted;
+            shadow->m_levels = api->m_levels;
+            texId->m_apiSpecificData2 = shadow;
+        }
+    }
+
+    return shadow;
+}
+
 // 4.3.4 ITexCreate (0x0086B0C0) shape: colour textures typed, D24X8 typeless with a DSV and an SRV.
 void CGxDeviceD3d11::ITexCreate(CGxTex* texId) {
     this->ITexRelease(texId);
@@ -3204,6 +3262,22 @@ void CGxDeviceD3d11::ITexCreate(CGxTex* texId) {
 
     texId->m_apiSpecificData = api;
     texId->m_needsCreation = 0;
+
+    // Refill from the shadow: a full device recreate released the texture and its callback may not have the texels.
+    if (TexShadow* shadow = this->ITexShadow(texId, api, false)) {
+        const uint8_t* bits = reinterpret_cast<const uint8_t*>(shadow + 1);
+
+        for (uint32_t sub = 0; sub < api->m_levels * desc.ArraySize; sub++) {
+            uint32_t pitch;
+            uint32_t rows;
+            uint32_t offset = TexShadowLayout(shadow->m_wanted, shadow->m_levels, texId->m_format, sub, pitch, rows);
+            this->m_d3dContext->UpdateSubresource(texture, sub, nullptr, bits + offset, pitch, 0);
+        }
+
+        if ((desc.MiscFlags & D3D11_RESOURCE_MISC_GENERATE_MIPS) && api->m_srv) {
+            this->m_d3dContext->GenerateMips(api->m_srv);
+        }
+    }
 }
 
 // CGxDeviceD3d::ITexUpload with LockRect replaced by Blit into a scratch block + UpdateSubresource.
@@ -3222,6 +3296,7 @@ void CGxDeviceD3d11::ITexUpload(CGxTex* texId) {
     int32_t compressed = texId->m_dataFormat >= GxTex_Dxt1 && texId->m_dataFormat <= GxTex_Dxt5;
     int32_t destCompressed = texId->m_format >= GxTex_Dxt1 && texId->m_format <= GxTex_Dxt5;
     uint32_t faceCount = texId->m_target == GxTex_CubeMap ? 6 : 1;
+    TexShadow* shadow = this->ITexShadow(texId, api, true);
 
     for (uint32_t face = 0; face < faceCount; face++) {
         uint32_t mipWidth = width;
@@ -3311,6 +3386,18 @@ void CGxDeviceD3d11::ITexUpload(CGxTex* texId) {
                     D3d11LogOnce("CGxDeviceD3d11: texture upload has no conversion %d -> %d (%dx%d mip %u)", texId->m_dataFormat, texId->m_format, size.x, size.y, mip);
                 }
 
+                if (shadow) {
+                    uint32_t shadowPitch;
+                    uint32_t shadowRows;
+                    uint8_t* dest = reinterpret_cast<uint8_t*>(shadow + 1) + TexShadowLayout(shadow->m_wanted, shadow->m_levels, texId->m_format, D3D11CalcSubresource(level, face, api->m_levels), shadowPitch, shadowRows);
+                    uint32_t x = destCompressed ? (rect.left >> 2) * s_texFormatBytesPerBlock[texId->m_format] : (rect.left * s_texFormatBitDepth[texId->m_format]) >> 3;
+                    uint32_t y = destCompressed ? rect.top >> 2 : rect.top;
+
+                    for (uint32_t row = 0; row < rows; row++) {
+                        memcpy(dest + (y + row) * shadowPitch + x, static_cast<uint8_t*>(scratch) + row * pitch, pitch);
+                    }
+                }
+
                 D3D11_BOX box = { static_cast<UINT>(rect.left), static_cast<UINT>(rect.top), 0, static_cast<UINT>(rect.right), static_cast<UINT>(rect.bottom), 1 };
                 this->m_d3dContext->UpdateSubresource(api->m_texture, D3D11CalcSubresource(level, face, api->m_levels), &box, scratch, pitch, 0);
                 free(scratch);
@@ -3367,10 +3454,16 @@ void CGxDeviceD3d11::ITexMarkAsUpdated(CGxTex* texId) {
 
     if (texId->m_needsCreation || !texId->m_apiSpecificData) {
         this->ITexCreate(texId);
+
+        // An empty rect is ITexForceRecreation's "refilled from the shadow". The shadow did not fit the new texture
+        // (base mip change): refill it through the callback instead.
+        if (!texId->m_apiSpecificData2 && texId->m_updateRect.maxX <= texId->m_updateRect.minX) {
+            texId->m_updateRect = CiRect(0, 0, texId->m_height, texId->m_width);
+        }
     }
 
     if (!texId->m_needsCreation && texId->m_apiSpecificData) {
-        if (texId->m_userFunc) {
+        if (texId->m_userFunc && texId->m_updateRect.maxX > texId->m_updateRect.minX) {
             this->ITexUpload(texId);
         }
 
@@ -3398,7 +3491,14 @@ void CGxDeviceD3d11::ITexForceRecreation(int32_t all) {
 
         this->ITexRelease(texId);
         texId->m_needsCreation = 1;
+        int8_t pending = texId->m_needsUpdate;
         this->TexMarkForUpdate(texId, s_updateRect, 0);
+
+        // Shadowed: ITexCreate refills it, so nothing to upload until the app updates it again. An update still
+        // pending is not in the shadow yet: that one keeps the full re-upload through the callback.
+        if (texId->m_apiSpecificData2 && !pending) {
+            texId->m_updateRect = CiRect(0, 0, 0, 0);
+        }
 
         uint32_t texelStrideInBytes;
         const void* texels;
@@ -3451,6 +3551,8 @@ void CGxDeviceD3d11::TexDestroy(CGxTex* texId) {
     }
 
     this->ITexRelease(texId);
+    free(texId->m_apiSpecificData2);
+    texId->m_apiSpecificData2 = nullptr;
     CGxDevice::TexDestroy(texId);
 }
 
