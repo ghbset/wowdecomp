@@ -1114,6 +1114,27 @@ void CGxDeviceD3d11::IBindRenderTargets() {
 
     this->m_curRtv = rtv;
     this->m_curDsv = dsv;
+
+    // Diagnostic (glue-shadow): D3D11 drops OMSetRenderTargets when the RTV and DSV sizes differ (D3D9 accepted a
+    // larger depth surface), leaving the previous targets bound while m_curRtv/m_curDsv say otherwise.
+    if (rtv && dsv) {
+        ID3D11Resource* r = nullptr;
+        ID3D11Resource* d = nullptr;
+        rtv->GetResource(&r);
+        dsv->GetResource(&d);
+        D3D11_TEXTURE2D_DESC rd;
+        D3D11_TEXTURE2D_DESC dd;
+        static_cast<ID3D11Texture2D*>(r)->GetDesc(&rd);
+        static_cast<ID3D11Texture2D*>(d)->GetDesc(&dd);
+
+        if (rd.Width != dd.Width || rd.Height != dd.Height || rd.SampleDesc.Count != dd.SampleDesc.Count) {
+            D3d11Log("CGxDeviceD3d11: RTV %ux%u x%u / DSV %ux%u x%u mismatch (color tex %p, depth tex %p): bind dropped", rd.Width, rd.Height, rd.SampleDesc.Count, dd.Width, dd.Height, dd.SampleDesc.Count, static_cast<void*>(this->m_textureTarget[GxBuffers_Color].m_texture), static_cast<void*>(this->m_textureTarget[GxBuffers_Depth].m_texture));
+        }
+
+        r->Release();
+        d->Release();
+    }
+
     this->m_d3dContext->OMSetRenderTargets(rtv ? 1 : 0, rtv ? &rtv : nullptr, dsv);
 }
 
@@ -2425,6 +2446,12 @@ void CGxDeviceD3d11::IStateSyncTextures() {
         // targets (ShadowCache maps left in t4..t7 after a world session) are the app's to manage: never touch them.
         if (texture && !texture->m_flags.m_renderTarget) {
             this->ITexMarkAsUpdated(texture);
+        }
+
+        // Diagnostic (glue-shadow): the runtime silently nulls an SRV whose resource is the bound RTV/DSV, while
+        // m_curSrv records it as bound until the next IBindRenderTargets.
+        if (texture && (texture == this->m_textureTarget[GxBuffers_Color].m_texture || texture == this->m_textureTarget[GxBuffers_Depth].m_texture)) {
+            D3d11LogOnce("CGxDeviceD3d11: t%u samples the current render target %p (%ux%u f%d)", i, static_cast<void*>(texture), texture->m_width, texture->m_height, texture->m_format);
         }
 
         TexApi* api = texture && !texture->m_needsCreation ? static_cast<TexApi*>(texture->m_apiSpecificData) : nullptr;
