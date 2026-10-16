@@ -227,7 +227,9 @@ class CGxDeviceVulkan : public CGxDevice {
     void IDefer(std::function<void()> fn);
     // Frames and commands
     void IBeginFrame();
-    void IWaitSerial(uint64_t serial);
+    bool IWaitSerial(uint64_t serial);
+    bool IWaitFence(VkFence fence, const char* what);
+    void IWaitIdle(const char* what);
     void IBeginRendering();
     void IReleaseRtDepth();
     void IEndRendering();

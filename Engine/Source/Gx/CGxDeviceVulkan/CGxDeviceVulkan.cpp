@@ -1,6 +1,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstdarg>
 #include <cstring>
 #include <iterator>
 #include "Engine/Source/Gx/CGxDeviceVulkan/CGxDeviceVulkan.h"
@@ -96,6 +97,22 @@ static VkDeviceSize AlignUp(VkDeviceSize value, VkDeviceSize align) {
     return (value + align - 1) / align * align;
 }
 
+// Every Vulkan log line goes to disk at once (SLogFlush = WriteFile + FlushFileBuffers): a hang that ends with
+// Windows killing the process must still leave gx.log behind.
+static void VkLog(const char* format, ...) {
+    va_list args;
+    va_start(args, format);
+    CGxDevice::Log(format, args);
+    va_end(args);
+
+    if (CGxDevice::m_log) {
+        SLogFlush(CGxDevice::m_log);
+    }
+}
+
+// Finite waits only: 2 s, then the caller logs and gives up instead of hanging the window thread.
+static const uint64_t kWaitTimeoutNs = 2000000000ull;
+
 static uint64_t Fnv64(const void* data, size_t size, uint64_t hash = 0xCBF29CE484222325ull) {
     const uint8_t* bytes = static_cast<const uint8_t*>(data);
     for (size_t i = 0; i < size; i++) {
@@ -106,7 +123,7 @@ static uint64_t Fnv64(const void* data, size_t size, uint64_t hash = 0xCBF29CE48
 
 static VKAPI_ATTR VkBool32 VKAPI_CALL DebugCallback(VkDebugUtilsMessageSeverityFlagBitsEXT severity, VkDebugUtilsMessageTypeFlagsEXT, const VkDebugUtilsMessengerCallbackDataEXT* data, void*) {
     if (severity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) {
-        CGxDevice::Log("Vulkan: %s", data->pMessage);
+        VkLog("Vulkan: %s", data->pMessage);
     }
     return VK_FALSE;
 }
@@ -763,7 +780,7 @@ int32_t CGxDeviceVulkan::DeviceCreate(GxWindowProc windowProc, const CGxFormat& 
 
     if (!this->m_hwndClass) {
         char* error = OsGetLastErrorStr();
-        CGxDevice::Log("CGxDeviceVulkan::DeviceCreate(): WindowClassCreate() failed: %s", error);
+        VkLog("CGxDeviceVulkan::DeviceCreate(): WindowClassCreate() failed: %s", error);
         OsFreeLastErrorStr(error);
         this->DeviceDestroy();
         return 0;
@@ -791,7 +808,7 @@ int32_t CGxDeviceVulkan::DeviceCreate(void* window, const CGxFormat& format) {
 }
 
 int32_t CGxDeviceVulkan::DeviceSetFormat(const CGxFormat& format) {
-    CGxDevice::Log("CGxDeviceVulkan::DeviceSetFormat():");
+    VkLog("CGxDeviceVulkan::DeviceSetFormat():");
     this->Log(format);
 
     if (this->m_hwnd) {
@@ -814,7 +831,7 @@ int32_t CGxDeviceVulkan::DeviceSetFormat(const CGxFormat& format) {
         return 1;
     }
 
-    CGxDevice::Log("CGxDeviceVulkan::DeviceSetFormat(): unable to set format!");
+    VkLog("CGxDeviceVulkan::DeviceSetFormat(): unable to set format!");
     this->IDestroyVk();
 
     if (this->m_hwnd) {
@@ -850,10 +867,12 @@ int32_t CGxDeviceVulkan::ICreateVkInstance() {
         return 1;
     }
 
+    VkLog("CGxDeviceVulkan: LoadLibrary vulkan-1.dll ...");
     this->m_vkLib = LoadLibraryA("vulkan-1.dll");
+    VkLog("CGxDeviceVulkan: LoadLibrary vulkan-1.dll -> %p", this->m_vkLib);
 
     if (!this->m_vkLib) {
-        CGxDevice::Log("CGxDeviceVulkan: vulkan-1.dll not found");
+        VkLog("CGxDeviceVulkan: vulkan-1.dll not found");
         return 0;
     }
 
@@ -903,10 +922,18 @@ int32_t CGxDeviceVulkan::ICreateVkInstance() {
     info.enabledLayerCount = validation ? 1 : 0;
     info.ppEnabledLayerNames = &layerName;
 
+    VkLog("CGxDeviceVulkan: vkCreateInstance ... (API 1.3, %u layers available, %u extensions available)", layerCount, extCount);
+    VkLog("CGxDeviceVulkan:   layers: %s", validation ? layerName : "(none)");
+
+    for (uint32_t i = 0; i < info.enabledExtensionCount; i++) {
+        VkLog("CGxDeviceVulkan:   extension: %s", extNames[i]);
+    }
+
     VkResult result = vkCreateInstance(&info, nullptr, &this->m_instance);
+    VkLog("CGxDeviceVulkan: vkCreateInstance -> %d", result);
 
     if (result != VK_SUCCESS) {
-        CGxDevice::Log("CGxDeviceVulkan: vkCreateInstance failed: %d", result);
+        VkLog("CGxDeviceVulkan: vkCreateInstance failed: %d", result);
         this->m_instance = VK_NULL_HANDLE;
         return 0;
     }
@@ -916,7 +943,7 @@ int32_t CGxDeviceVulkan::ICreateVkInstance() {
     VK_DEBUG_FUNCS(VK_LOAD)
 #undef VK_LOAD
 
-    CGxDevice::Log("CGxDeviceVulkan: instance created (validation %d, debug utils %d)", validation, debugUtils);
+    VkLog("CGxDeviceVulkan: instance created (validation %d, debug utils %d)", validation, debugUtils);
 
     if (debugUtils && vkCreateDebugUtilsMessengerEXT) {
         VkDebugUtilsMessengerCreateInfoEXT messenger = { VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT };
@@ -953,14 +980,20 @@ int32_t CGxDeviceVulkan::ICreateVkDevice(const CGxFormat& format) {
     surfaceInfo.hinstance = GetModuleHandleA(nullptr);
     surfaceInfo.hwnd = this->m_hwnd;
 
-    if (vkCreateWin32SurfaceKHR(this->m_instance, &surfaceInfo, nullptr, &this->m_surface) != VK_SUCCESS) {
-        CGxDevice::Log("CGxDeviceVulkan: vkCreateWin32SurfaceKHR failed");
+    VkLog("CGxDeviceVulkan: vkCreateWin32SurfaceKHR ... (hwnd %p, visible %d)", this->m_hwnd, this->m_hwnd ? IsWindowVisible(this->m_hwnd) : 0);
+    VkResult surfaceResult = vkCreateWin32SurfaceKHR(this->m_instance, &surfaceInfo, nullptr, &this->m_surface);
+    VkLog("CGxDeviceVulkan: vkCreateWin32SurfaceKHR -> %d", surfaceResult);
+
+    if (surfaceResult != VK_SUCCESS) {
+        VkLog("CGxDeviceVulkan: vkCreateWin32SurfaceKHR failed");
         this->m_surface = VK_NULL_HANDLE;
         return 0;
     }
 
     uint32_t count = 0;
+    VkLog("CGxDeviceVulkan: enumerating physical devices ...");
     vkEnumeratePhysicalDevices(this->m_instance, &count, nullptr);
+    VkLog("CGxDeviceVulkan: %u physical devices", count);
     std::vector<VkPhysicalDevice> devices(count);
     vkEnumeratePhysicalDevices(this->m_instance, &count, devices.data());
     int32_t bestScore = -1;
@@ -999,13 +1032,13 @@ int32_t CGxDeviceVulkan::ICreateVkDevice(const CGxFormat& format) {
     }
 
     if (bestScore < 0) {
-        CGxDevice::Log("CGxDeviceVulkan: no Vulkan 1.3 device with a graphics+present queue");
+        VkLog("CGxDeviceVulkan: no Vulkan 1.3 device with a graphics+present queue");
         return 0;
     }
 
     vkGetPhysicalDeviceProperties(this->m_physDevice, &this->m_physProps);
     vkGetPhysicalDeviceMemoryProperties(this->m_physDevice, &this->m_memProps);
-    CGxDevice::Log("CGxDeviceVulkan: %s (vendor 0x%04X device 0x%04X, API %u.%u.%u)", this->m_physProps.deviceName, this->m_physProps.vendorID, this->m_physProps.deviceID, VK_API_VERSION_MAJOR(this->m_physProps.apiVersion), VK_API_VERSION_MINOR(this->m_physProps.apiVersion), VK_API_VERSION_PATCH(this->m_physProps.apiVersion));
+    VkLog("CGxDeviceVulkan: %s (vendor 0x%04X device 0x%04X, API %u.%u.%u)", this->m_physProps.deviceName, this->m_physProps.vendorID, this->m_physProps.deviceID, VK_API_VERSION_MAJOR(this->m_physProps.apiVersion), VK_API_VERSION_MINOR(this->m_physProps.apiVersion), VK_API_VERSION_PATCH(this->m_physProps.apiVersion));
 
     VkPhysicalDeviceFeatures supported;
     vkGetPhysicalDeviceFeatures(this->m_physDevice, &supported);
@@ -1035,10 +1068,12 @@ int32_t CGxDeviceVulkan::ICreateVkDevice(const CGxFormat& format) {
     deviceInfo.enabledExtensionCount = 1;
     deviceInfo.ppEnabledExtensionNames = &deviceExt;
 
+    VkLog("CGxDeviceVulkan: vkCreateDevice ... (queue family %u, %u extensions)", this->m_queueFamily, deviceInfo.enabledExtensionCount);
     VkResult result = vkCreateDevice(this->m_physDevice, &deviceInfo, nullptr, &this->m_vkDevice);
+    VkLog("CGxDeviceVulkan: vkCreateDevice -> %d", result);
 
     if (result != VK_SUCCESS) {
-        CGxDevice::Log("CGxDeviceVulkan: vkCreateDevice failed: %d", result);
+        VkLog("CGxDeviceVulkan: vkCreateDevice failed: %d", result);
         this->m_vkDevice = VK_NULL_HANDLE;
         return 0;
     }
@@ -1169,11 +1204,14 @@ int32_t CGxDeviceVulkan::ICreateVkDevice(const CGxFormat& format) {
         this->IShaderApiCreate(g_ffPsSpv[i].data, static_cast<uint32_t>(g_ffPsSpv[i].size), this->m_ffPs[i]);
     }
 
+    VkLog("CGxDeviceVulkan: fixed-function shader modules created");
     this->m_format = format;
 
     if (!this->ICreateSwapchain()) {
         return 0;
     }
+
+    VkLog("CGxDeviceVulkan: device ready");
 
     this->m_context = 1;
     this->ISetCaps(format);
@@ -1215,6 +1253,8 @@ void CGxDeviceVulkan::IDestroyVk() {
     }
 
     if (this->m_vkDevice) {
+        this->IWaitIdle("destroy"); // before closing the open frame: its reset fence was never submitted
+
         if (this->m_recording) {
             // Close the open frame without submitting it.
             this->m_rendering = false;
@@ -1222,8 +1262,6 @@ void CGxDeviceVulkan::IDestroyVk() {
             vkEndCommandBuffer(this->m_frames[this->m_frameSerial % kFrames].m_cmd);
             this->m_recording = false;
         }
-
-        vkDeviceWaitIdle(this->m_vkDevice);
     }
 
     this->ITexForceRecreation(1);
@@ -1388,11 +1426,13 @@ int32_t CGxDeviceVulkan::ICreateSwapchain() {
     info.oldSwapchain = this->m_swapchain;
 
     VkSwapchainKHR swapchain = VK_NULL_HANDLE;
+    VkLog("CGxDeviceVulkan: vkCreateSwapchainKHR ... (%ux%u, %u images, present mode %d, format %d)", info.imageExtent.width, info.imageExtent.height, info.minImageCount, info.presentMode, info.imageFormat);
     VkResult result = vkCreateSwapchainKHR(this->m_vkDevice, &info, nullptr, &swapchain);
+    VkLog("CGxDeviceVulkan: vkCreateSwapchainKHR -> %d", result);
     this->IReleaseSwapchain();
 
     if (result != VK_SUCCESS) {
-        CGxDevice::Log("CGxDeviceVulkan: vkCreateSwapchainKHR failed: %d", result);
+        VkLog("CGxDeviceVulkan: vkCreateSwapchainKHR failed: %d", result);
         return 0;
     }
 
@@ -1439,7 +1479,7 @@ void CGxDeviceVulkan::IReleaseSwapchain() {
         return;
     }
 
-    vkDeviceWaitIdle(this->m_vkDevice);
+    this->IWaitIdle("swapchain release");
 
     for (size_t i = 0; i < this->m_swapImages.size(); i++) {
         vkDestroyImageView(this->m_vkDevice, this->m_swapImages[i].m_rtView[0], nullptr);
@@ -1547,13 +1587,59 @@ void CGxDeviceVulkan::ISetCaps(const CGxFormat& format) {
 // Frames: kFrames in flight. Each has an upload command buffer (staging copies, mip generation) submitted ahead of
 // the main one in the same vkQueueSubmit, so uploads made mid-frame land before every draw of that frame.
 
-void CGxDeviceVulkan::IWaitSerial(uint64_t serial) {
-    if (serial >= this->m_frameSerial) {
-        return; // the frame being recorded: nothing to wait for yet
+// Fence waits time out after 2 s. A timeout means the GPU never finished (or the fence was never submitted): it is
+// logged and the device is marked lost (m_context = 0) so the window stays alive and gx.log says why.
+bool CGxDeviceVulkan::IWaitFence(VkFence fence, const char* what) {
+    VkResult result = vkWaitForFences(this->m_vkDevice, 1, &fence, VK_TRUE, kWaitTimeoutNs);
+
+    if (result == VK_SUCCESS) {
+        return true;
     }
 
-    // The slot fence may already belong to a later frame; waiting for that over-waits but stays correct.
-    vkWaitForFences(this->m_vkDevice, 1, &this->m_frames[serial % kFrames].m_fence, VK_TRUE, UINT64_MAX);
+    VkLog("CGxDeviceVulkan: FREEZE AVOIDED: fence wait (%s) returned %d after 2 s at frame %llu; device marked lost", what, result, static_cast<unsigned long long>(this->m_frameSerial));
+    this->m_context = 0;
+    return false;
+}
+
+// Completed-frame test. IBeginFrame resets the slot fence of the frame being recorded, so a serial that shares that
+// slot (serial + kFrames == m_frameSerial while recording) was already waited for there; waiting on the fence again
+// would wait on an unsubmitted fence forever (the frame-2 hang: a stream pool wrap in frame N waiting for N - 2).
+bool CGxDeviceVulkan::IWaitSerial(uint64_t serial) {
+    if (serial >= this->m_frameSerial) {
+        return true; // the frame being recorded: nothing to wait for yet
+    }
+
+    if (serial + kFrames < this->m_frameSerial || (serial + kFrames == this->m_frameSerial && this->m_recording)) {
+        return true; // its slot fence was waited for by a later IBeginFrame
+    }
+
+    // Here the slot fence belongs to exactly this (submitted) serial.
+    return this->IWaitFence(this->m_frames[serial % kFrames].m_fence, "IWaitSerial");
+}
+
+// vkDeviceWaitIdle has no timeout. Every queue submission carries a frame fence, so waiting for the submitted frames'
+// fences is device idle; only then is vkDeviceWaitIdle (presents) called.
+void CGxDeviceVulkan::IWaitIdle(const char* what) {
+    if (!this->m_vkDevice) {
+        return;
+    }
+
+    VkLog("CGxDeviceVulkan: wait idle (%s)", what);
+    bool ok = true;
+
+    for (uint64_t serial = this->m_frameSerial >= kFrames ? this->m_frameSerial - kFrames : 0; serial < this->m_frameSerial && ok; serial++) {
+        if (serial + kFrames == this->m_frameSerial && this->m_recording) {
+            continue; // the slot being recorded: reset, not submitted
+        }
+
+        ok = this->IWaitFence(this->m_frames[serial % kFrames].m_fence, what);
+    }
+
+    if (ok) {
+        vkDeviceWaitIdle(this->m_vkDevice);
+    }
+
+    VkLog("CGxDeviceVulkan: wait idle (%s) done", what);
 }
 
 void CGxDeviceVulkan::IBeginFrame() {
@@ -1566,8 +1652,18 @@ void CGxDeviceVulkan::IBeginFrame() {
     }
 
     Frame& frame = this->m_frames[this->m_frameSerial % kFrames];
-    vkWaitForFences(this->m_vkDevice, 1, &frame.m_fence, VK_TRUE, UINT64_MAX);
-    vkResetFences(this->m_vkDevice, 1, &frame.m_fence);
+
+    if (this->m_frameSerial < kFrames + 3) {
+        VkLog("CGxDeviceVulkan: frame %llu begin (slot %llu)", static_cast<unsigned long long>(this->m_frameSerial), static_cast<unsigned long long>(this->m_frameSerial % kFrames));
+    }
+
+    // A timed-out fence is never reset (resetting a fence a pending submit still uses is invalid); the device is lost.
+    if (this->IWaitFence(frame.m_fence, "frame begin")) {
+        vkResetFences(this->m_vkDevice, 1, &frame.m_fence);
+    }
+
+    // Recording from here on: IWaitIdle (swapchain recreation below) must skip this slot's reset, unsubmitted fence.
+    this->m_recording = true;
 
     for (std::function<void()>& fn : frame.m_deletes) {
         fn();
@@ -1613,7 +1709,15 @@ void CGxDeviceVulkan::IBeginFrame() {
 
     for (uint32_t attempt = 0; attempt < 2 && this->m_swapchain; attempt++) {
         uint32_t index = 0;
-        VkResult result = vkAcquireNextImageKHR(this->m_vkDevice, this->m_swapchain, UINT64_MAX, frame.m_acquired, VK_NULL_HANDLE, &index);
+        if (this->m_frameSerial < kFrames + 3) {
+            VkLog("CGxDeviceVulkan: frame %llu acquire ...", static_cast<unsigned long long>(this->m_frameSerial));
+        }
+
+        VkResult result = vkAcquireNextImageKHR(this->m_vkDevice, this->m_swapchain, kWaitTimeoutNs, frame.m_acquired, VK_NULL_HANDLE, &index);
+
+        if (this->m_frameSerial < kFrames + 3 || result == VK_TIMEOUT || result == VK_NOT_READY) {
+            VkLog("CGxDeviceVulkan: frame %llu acquire -> %d (image %u)%s", static_cast<unsigned long long>(this->m_frameSerial), result, index, result == VK_TIMEOUT ? ": FREEZE AVOIDED, no image after 2 s, frame not presented" : "");
+        }
 
         if (result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR) {
             this->m_swapIndex = index;
@@ -1623,14 +1727,12 @@ void CGxDeviceVulkan::IBeginFrame() {
         }
 
         if (result != VK_ERROR_OUT_OF_DATE_KHR) {
-            CGxDevice::Log("CGxDeviceVulkan: vkAcquireNextImageKHR failed: %d", result);
+            VkLog("CGxDeviceVulkan: vkAcquireNextImageKHR failed: %d", result);
             break;
         }
 
         this->ICreateSwapchain();
     }
-
-    this->m_recording = true;
 }
 
 // ponytail: one full barrier (all commands → all commands) per transition; narrow the stages per layout if
@@ -1923,11 +2025,21 @@ void CGxDeviceVulkan::ScenePresent() {
             submit.pCommandBuffers = cmds;
             submit.signalSemaphoreCount = image ? 1 : 0;
             submit.pSignalSemaphores = image ? &this->m_swapReady[this->m_swapIndex] : nullptr;
+            bool early = this->m_frameSerial < kFrames + 3;
+
+            if (early) {
+                VkLog("CGxDeviceVulkan: frame %llu submit ... (image %d)", static_cast<unsigned long long>(this->m_frameSerial), image ? static_cast<int32_t>(this->m_swapIndex) : -1);
+            }
+
             VkResult result = vkQueueSubmit(this->m_queue, 1, &submit, frame.m_fence);
+
+            if (early) {
+                VkLog("CGxDeviceVulkan: frame %llu submit -> %d", static_cast<unsigned long long>(this->m_frameSerial), result);
+            }
 
             if (result != VK_SUCCESS) {
                 // TODO(V3): device loss → rebuild, as D3D11's IRecreateD3dDevice.
-                CGxDevice::Log("CGxDeviceVulkan::ScenePresent(): vkQueueSubmit failed: %d", result);
+                VkLog("CGxDeviceVulkan::ScenePresent(): vkQueueSubmit failed: %d", result);
                 this->m_context = 0;
             } else if (image) {
                 VkPresentInfoKHR present = { VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
@@ -1938,10 +2050,14 @@ void CGxDeviceVulkan::ScenePresent() {
                 present.pImageIndices = &this->m_swapIndex;
                 result = vkQueuePresentKHR(this->m_queue, &present);
 
+                if (early) {
+                    VkLog("CGxDeviceVulkan: frame %llu present -> %d", static_cast<unsigned long long>(this->m_frameSerial), result);
+                }
+
                 if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
                     this->m_swapDirty = true;
                 } else if (result != VK_SUCCESS) {
-                    CGxDevice::Log("CGxDeviceVulkan::ScenePresent(): vkQueuePresentKHR failed: %d", result);
+                    VkLog("CGxDeviceVulkan::ScenePresent(): vkQueuePresentKHR failed: %d", result);
                 }
             }
 
@@ -2342,8 +2458,24 @@ VkPipeline CGxDeviceVulkan::IPipelineGet(uint32_t topologyClass, const VkVertexI
 
     VkPipeline pipeline = VK_NULL_HANDLE;
 
-    if (vkCreateGraphicsPipelines(this->m_vkDevice, this->m_pipelineCache, 1, &info, nullptr, &pipeline) != VK_SUCCESS) {
-        CGxDevice::Log("CGxDeviceVulkan: vkCreateGraphicsPipelines failed (VS %llu PS %llu)", static_cast<unsigned long long>(this->m_curVs->m_id), static_cast<unsigned long long>(this->m_curPs->m_id));
+    // Pipeline creation storms look like freezes: count them and log slow ones.
+    static uint32_t s_pipelines;
+    static double s_pipelineMs;
+    LARGE_INTEGER t0, t1, freq;
+    QueryPerformanceCounter(&t0);
+    VkResult pipelineResult = vkCreateGraphicsPipelines(this->m_vkDevice, this->m_pipelineCache, 1, &info, nullptr, &pipeline);
+    QueryPerformanceCounter(&t1);
+    QueryPerformanceFrequency(&freq);
+    double ms = static_cast<double>(t1.QuadPart - t0.QuadPart) * 1000.0 / static_cast<double>(freq.QuadPart);
+    s_pipelines++;
+    s_pipelineMs += ms;
+
+    if (s_pipelines <= 5 || s_pipelines % 100 == 0 || ms > 50.0) {
+        VkLog("CGxDeviceVulkan: pipeline %u at frame %llu took %.1f ms (%.0f ms total)", s_pipelines, static_cast<unsigned long long>(this->m_frameSerial), ms, s_pipelineMs);
+    }
+
+    if (pipelineResult != VK_SUCCESS) {
+        VkLog("CGxDeviceVulkan: vkCreateGraphicsPipelines failed (VS %llu PS %llu)", static_cast<unsigned long long>(this->m_curVs->m_id), static_cast<unsigned long long>(this->m_curPs->m_id));
         pipeline = VK_NULL_HANDLE;
     }
 
@@ -2360,7 +2492,7 @@ uint32_t CGxDeviceVulkan::IUboPush(const void* data, uint32_t size) {
 
         if (!s_logged) {
             s_logged = 1;
-            CGxDevice::Log("CGxDeviceVulkan: UBO ring full, draws skipped until the next frame");
+            VkLog("CGxDeviceVulkan: UBO ring full, draws skipped until the next frame");
         }
 
         return UINT32_MAX;
@@ -3072,7 +3204,7 @@ char* CGxDeviceVulkan::IBufLock(CGxBuf* buf) {
 
                 if (!s_logged) {
                     s_logged = 1;
-                    CGxDevice::Log("CGxDeviceVulkan: stream pool wrapped %u times in one frame", kPoolVersions);
+                    VkLog("CGxDeviceVulkan: stream pool wrapped %u times in one frame", kPoolVersions);
                 }
             }
 
@@ -3531,6 +3663,11 @@ void CGxDeviceVulkan::IShaderApiRelease(ShaderApi& api) {
 // Body is VKS1 (same 'GXSH' container). A shader whose body is empty or not VKS1 stays invalid; bound, it skips the draw.
 void CGxDeviceVulkan::IShaderCreate(CGxShader* shader) {
     shader->m_valid = 0;
+    static uint32_t s_shaders;
+
+    if (++s_shaders <= 3 || s_shaders % 250 == 0) {
+        VkLog("CGxDeviceVulkan: shader pack load #%u at frame %llu", s_shaders, static_cast<unsigned long long>(this->m_frameSerial));
+    }
 
     if (!this->m_context || !this->m_vkDevice) {
         return;
@@ -3555,7 +3692,7 @@ void CGxDeviceVulkan::IShaderCreate(CGxShader* shader) {
 
         if (size && !s_logged) {
             s_logged = 1;
-            CGxDevice::Log("CGxDeviceVulkan: shader without VKS1 body; is the SPIR-V pack (patch-Vulkan.MPQ, spv) installed?");
+            VkLog("CGxDeviceVulkan: shader without VKS1 body; is the SPIR-V pack (patch-Vulkan.MPQ, spv) installed?");
         }
 
         return;
@@ -3564,7 +3701,7 @@ void CGxDeviceVulkan::IShaderCreate(CGxShader* shader) {
     ShaderApi* api = new ShaderApi;
 
     if (!this->IShaderApiCreate(shader->m_code.m_data, size, *api)) {
-        CGxDevice::Log("CGxDeviceVulkan: bad VKS1 body (%u bytes)", size);
+        VkLog("CGxDeviceVulkan: bad VKS1 body (%u bytes)", size);
         delete api;
         return;
     }
