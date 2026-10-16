@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <windows.h>
 #include "ConsoleDevice.h"
 #include "ConsoleDetect.h"
 #include "Engine/Source/Base/CmdLine.h"
@@ -430,7 +431,19 @@ void ConsoleDeviceInitialize(const char* title, bool unused_a2, bool unused_a3) 
     CGxFormat format = s_requestedFormat;
     ValidateFormatMonitor(format);
 
+    bool vulkanFellBack = false;
+
     for (s_device = CreateGxDevice(api, OsWindowProc, format); !s_device; s_device = CreateGxDevice(api, OsWindowProc, format)) {
+        // Not 12340: Vulkan is the default; a machine that cannot run it gets D3d9 with the format it asked for.
+        if (api == GxApi_Vulkan) {
+            GxLog("ConsoleDeviceInitialize(): the Vulkan device could not be created; falling back to D3d9");
+            api = GxApi_D3d9;
+            format = s_requestedFormat;
+            ValidateFormatMonitor(format);
+            vulkanFellBack = true;
+            continue;
+        }
+
         if (format.m_multisampleCount > 1) {
             if (format.m_multisampleCount - 2 <= 1) {
                 format.m_multisampleCount = 1;
@@ -475,6 +488,11 @@ void ConsoleDeviceInitialize(const char* title, bool unused_a2, bool unused_a3) 
     s_requestedFormat = format;
     s_lastGoodFormat = format;
     SetGxCVars(s_requestedFormat);
+
+    if (vulkanFellBack) {
+        SetWindowTextA(static_cast<HWND>(g_theGxDevicePtr->DeviceWindow()), "World of Warcraft (Direct3D 9: Vulkan failed, see Logs\\gx.log)");
+        ConsoleWrite("Vulkan could not start; running on Direct3D 9 (see Logs\\gx.log)", DEFAULT_COLOR);
+    }
 
     if (g_theGxDevicePtr->Caps().m_numTmus < 2) {
         GxDevDestroy(s_device);

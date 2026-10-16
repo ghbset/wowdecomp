@@ -209,6 +209,13 @@ int32_t CGxDeviceVulkan::ICreateVulkan(const CGxFormat& format) {
 
             default:
                 this->ICreateDrawPath();
+
+                // Without the draw path or the translated shaders nothing of the world is drawn:
+                // decline, so ConsoleDeviceInitialize can fall back to D3d9.
+                if (!this->m_drawPath || !manifest::Loaded()) {
+                    CGxDevice::Log("CGxDeviceVulkan::ICreateVulkan(): no draw path or no shader manifest; declining");
+                    return 0;
+                }
                 break;
         }
     }

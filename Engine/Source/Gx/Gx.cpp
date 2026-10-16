@@ -117,7 +117,9 @@ static int (*s_drawListSorters[GxuSorts_Last])(const void*, const void*) = { Dra
 // VERIFY: 0b88acbc auto
 // OFFSET: 0x008C8DE0
 EGxApi GxDefaultApi() {
-    return GxApi_D3d9;
+    // Not 12340 (D3d9): Wow32/Wow64 default to the Vulkan backend. ConsoleDeviceInitialize falls back
+    // to D3d9 when the Vulkan device or its shader manifest cannot be brought up.
+    return GxApi_Vulkan;
 }
 
 // VERIFY: cef2b995 auto
