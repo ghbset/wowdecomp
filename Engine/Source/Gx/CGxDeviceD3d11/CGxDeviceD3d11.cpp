@@ -83,6 +83,29 @@ static void D3d11Log(const char* format, ...) {
     }
 }
 
+// d3d11DumpFrame 1: log every draw of the next frame to gx.log, one line each, then the CVar resets to 0.
+static bool s_dumpFrame;
+static uint32_t s_dumpDraw;
+
+static CVar* D3d11DumpFrameCVar() {
+    static CVar* cvar;
+
+    if (!cvar) {
+        cvar = CVar::Register("d3d11DumpFrame", "D3D11: 1 logs every draw of the next frame to gx.log, then resets to 0", 0, "0", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    }
+
+    return cvar;
+}
+
+static const char* DumpShaderName(const void* shader, bool ff) {
+    if (ff || !shader) {
+        return "FF";
+    }
+
+    const char* name = static_cast<const CGxShader*>(shader)->m_key.m_str;
+    return name ? name : "?";
+}
+
 // Once per distinct message, so a failure repeated every frame shows up once in gx.log.
 static void D3d11LogOnce(const char* format, ...) {
     static std::unordered_set<std::string> s_seen;
@@ -1216,6 +1239,20 @@ void CGxDeviceD3d11::ScenePresent() {
         }
 
         this->WaitForFPSCap();
+
+        if (s_dumpFrame) {
+            s_dumpFrame = false;
+            D3d11Log("dump: end of frame, %u draws", s_dumpDraw);
+        }
+
+        CVar* dump = D3d11DumpFrameCVar();
+
+        if (dump && dump->m_intValue == 1) {
+            dump->Set(0, true, false, false, false);
+            s_dumpFrame = true;
+            s_dumpDraw = 0;
+            D3d11Log("dump: next frame (vs/ps FF = fixed function; t#=CGxTex/SRV:WxH:GxTexFormat; blend=enable:src/dst; depth f=D3D11_COMPARISON w=write; aref/255 GREATEREQUAL, 0 off; ts=TextureShader tg=TexGen tgid=texgen matrix identity tc=TextureCoord; vp x,y,z)");
+        }
 
         uint32_t vsync = this->m_format.m_vsync;
         UINT interval = vsync ? (this->m_format.m_window ? 1 : (vsync > 4 ? 4 : vsync)) : 0;
@@ -2613,6 +2650,51 @@ void CGxDeviceD3d11::Draw(CGxBatch* batch, int32_t count) {
     }
 
     this->IStateSync();
+
+    if (s_dumpFrame) {
+        const CGxAppRenderState* rs = this->m_appRenderStates.m_data;
+        const CGxShader* vs = static_cast<const CGxShader*>(rs[GxRs_VertexShader].m_value.m_data.p);
+        const CGxShader* ps = static_cast<const CGxShader*>(rs[GxRs_PixelShader].m_value.m_data.p);
+        bool ffVs = !vs || !vs->m_valid || !vs->m_apiSpecific;
+        bool ffPs = !ps || !ps->m_valid || !ps->m_apiSpecific;
+        bool lighting = rs[GxRs_Lighting].m_value.m_data.i[0] && (this->m_appMasterEnables & 0x1);
+        uint32_t lights = 0;
+
+        for (uint32_t i = 0; i < 4; i++) {
+            lights += lighting && this->m_lights[i].m_enable;
+        }
+
+        char srvs[256];
+        int32_t used = 0;
+        srvs[0] = '\0';
+
+        for (uint32_t i = 0; i < 8 && used < static_cast<int32_t>(sizeof(srvs)) - 48; i++) {
+            const CGxTex* tex = static_cast<const CGxTex*>(rs[GxRs_Texture0 + i].m_value.m_data.p);
+
+            if (tex || this->m_curSrv[i]) {
+                used += snprintf(srvs + used, sizeof(srvs) - used, " t%u=%p/%p:%ux%u:f%d", i, static_cast<const void*>(tex), static_cast<void*>(this->m_curSrv[i]), tex ? tex->m_width : 0, tex ? tex->m_height : 0, tex ? static_cast<int32_t>(tex->m_format) : -1);
+            }
+        }
+
+        const D3D11_RENDER_TARGET_BLEND_DESC& blend = this->m_blendDesc.RenderTarget[0];
+        const CGxMatrixStack& tg0 = this->m_texGen[0];
+        const CGxMatrixStack& tg1 = this->m_texGen[1];
+
+        D3d11Log("dump %u: vs=%s ps=%s%s%s vtx=%u prim=%d blend=%d:%d/%d wm=%X depth=f%d w%d aref=%d(ge) bm=%d clip=%X fog=%d c=%08X %g-%g lights=%u%s ts=%d,%d tg=%d,%d tgid=%d,%d tc=%u,%u vp=%.3f-%.3f,%.3f-%.3f,%.2f-%.2f",
+            s_dumpDraw++, DumpShaderName(vs, ffVs), DumpShaderName(ps, ffPs), ffVs || ffPs ? " vmask=" : "", ffVs || ffPs ? std::to_string(this->m_primVertexMask).c_str() : "",
+            batch->m_count, batch->m_primType,
+            blend.BlendEnable, blend.SrcBlend, blend.DestBlend, blend.RenderTargetWriteMask,
+            this->m_dsDesc.DepthFunc, this->m_dsDesc.DepthWriteMask,
+            rs[GxRs_AlphaRef].m_value.m_data.i[0], rs[GxRs_BlendingMode].m_value.m_data.i[0],
+            rs[GxRs_ClipPlaneMask].m_value.m_data.u[0],
+            rs[GxRs_Fog].m_value.m_data.i[0] && (this->m_appMasterEnables & 0x2), rs[GxRs_FogColor].m_value.m_data.u[0], rs[GxRs_FogStart].m_value.m_data.f[0], rs[GxRs_FogEnd].m_value.m_data.f[0],
+            lights, srvs,
+            rs[GxRs_TextureShader0].m_value.m_data.i[0], rs[GxRs_TextureShader1].m_value.m_data.i[0],
+            rs[GxRs_TexGen0].m_value.m_data.i[0], rs[GxRs_TexGen1].m_value.m_data.i[0],
+            (tg0.m_flags[tg0.m_level] & CGxMatrixStack::F_Identity) != 0, (tg1.m_flags[tg1.m_level] & CGxMatrixStack::F_Identity) != 0,
+            rs[GxRs_TextureCoord0].m_value.m_data.u[0], rs[GxRs_TextureCoord1].m_value.m_data.u[0],
+            this->m_viewport.m_x.m_l, this->m_viewport.m_x.m_h, this->m_viewport.m_y.m_l, this->m_viewport.m_y.m_h, this->m_viewport.m_z.m_l, this->m_viewport.m_z.m_h);
+    }
 
     if (!this->m_sm2Shaders.empty()) {
         const CGxAppRenderState* rs = this->m_appRenderStates.m_data;

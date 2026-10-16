@@ -88,6 +88,20 @@ static MipBits* s_mipBits;
 // STATIC: 0x00B49C94
 static int32_t s_pumping;
 
+// Not stock: bytes allocated for s_mipBits. Stock sizes it once for 1024x1024 ARGB8888 and decodes every BLP into it,
+// so a larger texture (custom HD assets, 2048+) overran the heap block and garbled whatever lived next to it.
+static uint32_t s_mipBitsSize;
+
+static void MipBitsReserve(uint32_t format, uint32_t width, uint32_t height) {
+    uint32_t size = MippedImgCalcSize(format, width, height);
+
+    if (size > s_mipBitsSize) {
+        SMemFree(s_mipBits, __FILE__, __LINE__, 0);
+        s_mipBits = static_cast<MipBits*>(SMemAlloc(size, __FILE__, __LINE__, 0));
+        s_mipBitsSize = size;
+    }
+}
+
 // STATIC: 0x00B49C98
 static int32_t s_gxTexCacheSize;
 
@@ -713,6 +727,10 @@ int32_t TextureLoadBlpMips(char* fileName, char* extension, int32_t flags, MipBi
 
     if (pixelFormat) {
         *pixelFormat = pixels;
+    }
+
+    if (images == &s_mipBits) {
+        MipBitsReserve(pixels, image.m_header.m_width, image.m_header.m_height);
     }
 
     if (!image.LockChain(pixels, *images, bestMip)) {
@@ -1795,6 +1813,7 @@ int32_t PumpBlpTextureAsync(CTexture* texture, void* data) {
     TextureGetTextureFormats(pixelFormat, gxTexFormat, static_cast<PIXEL_FORMAT>(image.m_header.m_preferredFormat), image.m_header.m_alphaSize);
 
     s_pumping = 1;
+    MipBitsReserve(pixelFormat, image.m_header.m_width, image.m_header.m_height);
 
     if (!image.LockChain2(texture->m_filename, pixelFormat, s_mipBits, texture->m_bestMip, 1)) {
         s_pumping = 0;
@@ -1890,7 +1909,8 @@ int32_t AsyncTextureStatus() {
 // VERIFY: f4a9a3e6 manual
 // OFFSET: 0x004B7F80
 void TextureInitialize() {
-    s_mipBits = static_cast<MipBits*>(SMemAlloc(MippedImgCalcSize(PIXEL_ARGB8888, 1024, 1024), __FILE__, __LINE__, 0));
+    s_mipBitsSize = MippedImgCalcSize(PIXEL_ARGB8888, 1024, 1024);
+    s_mipBits = static_cast<MipBits*>(SMemAlloc(s_mipBitsSize, __FILE__, __LINE__, 0));
     AsyncFileReadAddPollHandler(AsyncTextureHandler);
     AsyncFileReadAddStatusHandler(AsyncTextureStatus);
     s_currentTime = OsGetAsyncTimeMs();
@@ -2041,6 +2061,7 @@ void TextureDestroy() {
     s_gxTexCacheFree.Clear();
     SMemFree(s_mipBits, __FILE__, __LINE__, 0);
     s_mipBits = nullptr;
+    s_mipBitsSize = 0;
 
     for (int32_t x = 0; x < 6; x++) {
         for (int32_t y = 0; y < 6; y++) {
