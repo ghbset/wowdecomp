@@ -586,7 +586,8 @@ bool IOMpqReadUnit::Read(void* buffer, int64_t offset, uint32_t count, uint32_t*
     if (sectors >= 8) {
         workerCount = sectors >> 2;
         Blizzard::Hardware::GetProcessorFeatures();
-        workerCount = std::min(std::min(workerCount, System_Hardware::s_processorFeatures.m_processorCount), 8u) - 1;
+        // Not stock: up to 16 jobs (stock 8), still bounded by the core count.
+        workerCount = std::min(std::min(workerCount, System_Hardware::s_processorFeatures.m_processorCount), 16u) - 1;
     } else {
         workerCount = 0;
     }
@@ -597,17 +598,17 @@ bool IOMpqReadUnit::Read(void* buffer, int64_t offset, uint32_t count, uint32_t*
         workerCount = 0;
     }
 
-    System_MPQGlobals::Worker* workers[7];
+    System_MPQGlobals::Worker* workers[15];
     System_MPQGlobals::GetWorkerPool()->Acquire(workerCount, workers);
 
     uint32_t perJob = sectors / (workerCount + 1);
     uint32_t extra = sectors % (workerCount + 1);
-    bool dispatched[7] = {};
+    bool dispatched[15] = {};
     Blizzard::Memory::TempBuffer<uint8_t, 0x20000> scratch(0x20000);
     uint8_t* scratchPtr = scratch.m_data;
     uint32_t scratchSize = 0x20000;
     uint8_t* dest = static_cast<uint8_t*>(buffer);
-    SectorJob jobs[8];
+    SectorJob jobs[16];
 
     for (uint32_t i = 0;; i++) {
         SectorJob* job = &jobs[i];

@@ -4,6 +4,7 @@
 #include "Client.h"
 #include "Engine/Source/BlizzardCore/Source/Packages/Streaming/Streaming.h"
 #include "Engine/Source/BlizzardCore/SFile2-Core.h"
+#include "Engine/Source/BlizzardCore/Source/Packages/Mopaq/SFile.h"
 #include "Engine/Source/ConsoleBase/ConsoleCommand.h"
 #include "Engine/Source/ConsoleBase/ConsoleVar.h"
 #include "Engine/Source/ConsoleBase/IConsole.h"
@@ -133,6 +134,9 @@ static CVar* s_cvAsyncThreadSleep;
 
 // STATIC: 0x00B2FA08
 static CVar* s_cvAsyncHandlerTimeout;
+
+// Not stock
+static CVar* s_cvMpqThreads;
 
 // STATIC: 0x00C5DE88
 char s_localeCode[5];
@@ -683,9 +687,18 @@ void ClientRegisterConsoleCommands() {
     CVar::Register("accounttype", "Account Type", 0, "", nullptr, CATEGORY_GAME, false, nullptr, false);
 }
 
+// Not stock: mpqThreads 1 = decompress MPQ sectors on the Mopaq worker pool (threading mode 0), 0 = stock mode 2.
+static bool MpqThreadsCallback(CVar* var, const char* oldValue, const char* value, void* arg) {
+    Blizzard::Mopaq::SFileSetThreadingMode(SStrToInt(value) ? 0 : 2);
+    return true;
+}
+
 // VERIFY: dd31cf34 auto
 // OFFSET: 0x004026B0
 void AsyncFileReadRegisterCVars() {
+    s_cvMpqThreads = CVar::Register("mpqThreads", "Engine option: Decompress MPQ files on several threads", 1, "1", MpqThreadsCallback, CATEGORY_DEBUG, false, nullptr, false);
+    Blizzard::Mopaq::SFileSetThreadingMode(s_cvMpqThreads->m_intValue ? 0 : 2);
+
     s_cvAsyncThreadSleep = CVar::Register("asyncThreadSleep", "Engine option: Async read thread sleep", 1, "0", AsyncFileReadThreadSleepCallback, CATEGORY_DEBUG, false, nullptr, false);
     s_cvAsyncHandlerTimeout = CVar::Register("asyncHandlerTimeout", "Engine option: Async read main thread timeout", 1, "100", AsyncFileReadHandlerTimeoutCallback, CATEGORY_DEBUG, false, nullptr, false);
     AsyncFileReadInitialize(s_cvAsyncThreadSleep->m_intValue, s_cvAsyncHandlerTimeout->m_intValue);

@@ -4,6 +4,7 @@
 #include "Engine/Source/Services/AsyncFile.h"
 #include "Engine/Source/Base/Prop.h"
 #include "Engine/Source/BlizzardCore/SFile2-Core.h"
+#include "Engine/Source/BlizzardCore/Source/System/Hardware/Hardware.h"
 #include "Engine/Source/Event/Event.h"
 #include "Engine/Source/Gx/CGxDevice/CGxDevice.h"
 #include "Engine/Source/Os/TimeManager.h"
@@ -258,6 +259,7 @@ int32_t NetQueuePromoteLocalFiles(const void* data, void* param) {
                 if (SFile::FileIsLocal(object->m_file, 6) == 1) {
                     s_asyncQueues[0]->m_readList.LinkToTail(object);
                     object->m_queue = s_asyncQueues[0];
+                    s_asyncQueues[0]->m_wakeEvent.Set();
                 }
 
                 object = next;
@@ -437,6 +439,12 @@ uint32_t STORMAPI AsyncFileReadThread(void* param) {
             }
 
             object->m_link.Unlink();
+
+            // Not stock: pass the wake on so a sibling reader on this queue takes the next request in parallel.
+            if (queue->m_readList.Head() || queue->m_staleList.Head()) {
+                queue->m_wakeEvent.Set();
+            }
+
             object->m_queue = nullptr;
             object->m_isCurrent = 1;
             thread->m_currentObject = object;
@@ -474,7 +482,10 @@ uint32_t STORMAPI AsyncFileReadThread(void* param) {
         }
 
         g_queueLock.Leave();
-        OsSleep(1);
+
+        // Not stock (stock: OsSleep(1) poll): sleep until a request is queued. The timeout is a safety net for
+        // anything that queues without signalling, and bounds how long shutdown waits to be noticed.
+        queue->m_wakeEvent.Wait(10);
     }
 
     return 0;
@@ -525,9 +536,18 @@ void AsyncFileReadInitialize(uint32_t threadSleep, uint32_t handlerTimeout) {
 
     int32_t queues = SFile::IsStreamingMode() ? 3 : 1;
 
+    // Not stock: the disk queue gets clamp(cores / 2, 2, 4) readers instead of one. Archive reads are positional
+    // (ReadFile + OVERLAPPED offset) and SFile locks per handle, so readers on different requests do not serialise.
+    Blizzard::Hardware::GetProcessorFeatures();
+    uint32_t diskThreads = System_Hardware::s_processorFeatures.m_processorCount / 2;
+    diskThreads = diskThreads < 2 ? 2 : diskThreads > 4 ? 4 : diskThreads;
+
     for (int32_t i = 0; i < queues; i++) {
         s_asyncQueues[i] = AsyncFileReadCreateQueue();
-        AsyncFileReadCreateThread(s_asyncQueues[i], s_asyncQueueNames[i]);
+
+        for (uint32_t t = 0; t < (i == 0 ? diskThreads : 1); t++) {
+            AsyncFileReadCreateThread(s_asyncQueues[i], s_asyncQueueNames[i]);
+        }
     }
 
     if (SFile::IsStreamingMode()) {
@@ -565,6 +585,7 @@ void AsyncFileReadObject(CAsyncObject* object, int32_t urgent) {
         AsyncFileReadLinkObject(object, urgent);
     }
 
+    queue->m_wakeEvent.Set();
     g_queueLock.Leave();
 
     if (SFile::IsStreamingMode()) {

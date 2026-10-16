@@ -5,6 +5,7 @@
 #include <cstdint>
 #include "Engine/Source/Services/Types.h"
 #include "Engine/Source/Storm/H/stpl.h"
+#include "Engine/Source/Storm/Source/SLock.h"
 #include "Engine/Source/Storm/Source/SThread.h"
 
 class CAsyncQueue : public TSLinkedNode<CAsyncQueue> {
@@ -12,6 +13,8 @@ class CAsyncQueue : public TSLinkedNode<CAsyncQueue> {
     /* 0008 */ TSExplicitList<CAsyncObject, offsetof(CAsyncObject, m_link)> m_readList;
     /* 0014 */ TSExplicitList<CAsyncObject, offsetof(CAsyncObject, m_link)> m_staleList;
     /* 0020 */ int32_t m_frameLimited;
+    // Not stock: auto-reset wake for the queue's reader threads (stock polled with OsSleep(1)).
+    SEvent m_wakeEvent{0, 0};
 
     ~CAsyncQueue();
 };
