@@ -132,7 +132,7 @@ class CCharacterComponent {
     static void PasteTransparent8Bit(void* texture, const BlpPalPixel* pal, MipBits* dstMips, C2iVector& dstPos, uint32_t dstStride, C2iVector& srcPos, C2iVector& srcSize, TCTEXTUREINFO& srcInfo, uint32_t srcMipLevel, int32_t dstMipOffset);
     static void PasteTransparent8BitScale(void* texture, MipBits* dstMips, C2iVector& dstPos, uint32_t dstStride, C2iVector& srcPos, C2iVector& srcSize, TCTEXTUREINFO& srcInfo);
     static void ProcessComponentFinishedList(int32_t all);
-    static void ProcessComponentRequest(CComponentRequest* request);
+    static void ProcessComponentRequest(CComponentRequest* request, MipBits* scratch);
     static void RemoveHandItem(CM2Model* model, INVENTORY_SLOTS invSlot, SHEATHE_TYPE sheatheType, bool shield);
     static void RemoveLinkpt(CM2Model* model, GEOCOMPONENTLINKS link);
     static void RemoveVisuals(CM2Model* model);

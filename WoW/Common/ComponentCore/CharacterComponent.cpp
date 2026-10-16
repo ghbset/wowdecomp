@@ -144,7 +144,6 @@ uint32_t* CCharacterComponent::s_characterFacialHairStylesList;
 st_race* CCharacterComponent::s_chrVarArray;
 
 // STATIC: 0x00B6B868
-static MipBits* s_threadTextureBuffer;
 
 // STATIC: 0x00B6B86C
 static MipBits* s_compressedTextureBuffer;
@@ -182,7 +181,12 @@ CompSectionInfo CCharacterComponent::s_sectionInfoRaw[NUM_COMPONENT_SECTIONS] = 
 };
 
 // STATIC: 0x00B6B9C8
-static SThread s_thread;
+// Not stock: a pool of Component workers instead of one, each with its own ARGB scratch buffer for the DXT1 path
+// (stock shared one s_threadTextureBuffer between its single worker's requests)
+static SThread s_threads[8];
+static MipBits* s_threadTextureBuffers[8];
+static uint32_t s_threadCount;
+static CVar* s_componentThreadsVar;
 
 // STATIC: 0x00B6B9CC
 static SEvent s_threadBeginEvent(0, 0);
@@ -202,6 +206,8 @@ bool CCharacterComponent::Initialize() {
     CCharacterComponent::g_componentTextureLevelVar = CVar::Register("componentTextureLevel", "Number of mip levels used for character component textures", 0x1, "8", &ComponentVarHandler, 0, false, nullptr, false);
     CCharacterComponent::g_componentThreadVar = CVar::Register("componentThread", "Multi thread character component processing", 0x1, "1", &ComponentVarHandler, 0, false, nullptr, false);
     CCharacterComponent::g_componentCompressVar = CVar::Register("componentCompress", "Character component texture compression", 0x1, "1", &ComponentVarHandler, 0, false, nullptr, false);
+    // Not stock: 1 = one Component worker per two CPUs, 0 = the stock single worker
+    s_componentThreadsVar = CVar::Register("componentThreads", "Engine option: Composite character textures on several threads", 0x1, "1", &ComponentVarHandler, 0, false, nullptr, false);
 
     uint32_t mipLevels = CCharacterComponent::g_componentTextureLevelVar->m_intValue;
     int32_t useThread = CCharacterComponent::g_componentThreadVar->m_intValue;
@@ -4930,11 +4936,11 @@ void CCharacterComponent::ProcessFinishedRequest() {
 
 // VERIFY: f8ef570f auto
 // OFFSET: 0x004F0EE0
-void CCharacterComponent::ProcessComponentRequest(CComponentRequest* request) {
+void CCharacterComponent::ProcessComponentRequest(CComponentRequest* request, MipBits* scratch) {
     MipBits* dstMips = request->m_mipBits->m_mipBits;
 
     if (request->m_format == GxTex_Dxt1) {
-        dstMips = s_threadTextureBuffer;
+        dstMips = scratch;
     }
 
     for (int32_t section = 0; section < NUM_COMPONENT_SECTIONS; section++) {
@@ -5050,9 +5056,9 @@ uint32_t STORMAPI CCharacterComponent::ThreadProc(void* param) {
 
             if (!(request->m_flags & 0x1)) {
                 s_finishedListCritSect.Enter();
+                request->m_flags |= 0x2;
                 s_finishedList.LinkToTail(request);
                 s_finishedListCritSect.Leave();
-                request->m_flags |= 0x2;
                 continue;
             }
 
@@ -5067,11 +5073,13 @@ uint32_t STORMAPI CCharacterComponent::ThreadProc(void* param) {
             }
 
             request->m_mipBits = mipBits;
-            CCharacterComponent::ProcessComponentRequest(request);
+            CCharacterComponent::ProcessComponentRequest(request, static_cast<MipBits*>(param));
             s_finishedListCritSect.Enter();
+            // Not stock: flag before linking, under the lock, so the main thread can never recycle the request
+            // through ProcessComponentFinishedList before this write lands
+            request->m_flags |= 0x2;
             s_finishedList.LinkToTail(request);
             s_finishedListCritSect.Leave();
-            request->m_flags |= 0x2;
             OsSleep(1);
         }
 
@@ -5177,7 +5185,32 @@ int32_t CCharacterComponent::ThreadInitialize() {
     s_threadBeginEvent.Reset();
     s_threadPropContext = PropGetSelectedContext();
 
-    return SThread::Create(&CCharacterComponent::ThreadProc, nullptr, s_thread, const_cast<char*>("Component"), 0);
+    // Not stock: clamp(CPUs / 2, 1, cap) workers instead of one. Compositing is bursty (zoning into a crowd) and shares
+    // the CPU with the Model2 pool (CPUs - 1), so half the cores; the mip-bits free list (9 DXT1 / 10 ARGB) bounds the
+    // useful concurrency anyway. Wow32 caps at 3: each worker reserves a stack plus a scratch image.
+#if defined(_WIN64)
+    uint32_t maxThreads = sizeof(s_threads) / sizeof(s_threads[0]);
+#else
+    uint32_t maxThreads = 3;
+#endif
+    uint32_t count = s_componentThreadsVar && s_componentThreadsVar->m_intValue ? OsGetNumberOfProcessors() / 2 : 1;
+    count = count < 1 ? 1 : count > maxThreads ? maxThreads : count;
+
+    for (s_threadCount = 0; s_threadCount < count; s_threadCount++) {
+        MipBits* scratch = CCharacterComponent::s_bComponentCompression ? TextureAllocMippedImg(PIXEL_ARGB8888, s_textureSize, s_textureSize) : nullptr;
+        s_threadTextureBuffers[s_threadCount] = scratch;
+
+        if (!SThread::Create(&CCharacterComponent::ThreadProc, scratch, s_threads[s_threadCount], const_cast<char*>("Component"), 0)) {
+            if (scratch) {
+                TextureFreeMippedImg(scratch, PIXEL_ARGB8888, s_textureSize, s_textureSize);
+                s_threadTextureBuffers[s_threadCount] = nullptr;
+            }
+
+            break;
+        }
+    }
+
+    return s_threadCount != 0;
 }
 
 // VERIFY: 672afabf manual
@@ -5324,15 +5357,10 @@ bool CCharacterComponent::Initialize(EGxTexFormat format, uint32_t mipLevels, in
     CCharacterComponent::s_gxFormatHigh = GxTex_Argb8888;
     CCharacterComponent::s_textureBuffer = nullptr;
     s_compressedTextureBuffer = nullptr;
-    s_threadTextureBuffer = nullptr;
     CCharacterComponent::s_textureBuffer = TextureAllocMippedImg(PIXEL_ARGB8888, s_textureSize, s_textureSize);
 
     if (CCharacterComponent::s_bComponentCompression) {
         s_compressedTextureBuffer = TextureAllocMippedImg(PIXEL_DXT1, s_textureSize, s_textureSize);
-    }
-
-    if (CCharacterComponent::s_bComponentThread && CCharacterComponent::s_bComponentCompression) {
-        s_threadTextureBuffer = TextureAllocMippedImg(PIXEL_ARGB8888, s_textureSize, s_textureSize);
     }
 
     EventRegisterEx(EVENT_ID_POLL, &CCharacterComponent::Update, nullptr, 0.0f);
@@ -5344,8 +5372,20 @@ bool CCharacterComponent::Initialize(EGxTexFormat format, uint32_t mipLevels, in
 // OFFSET: 0x004F1ED0
 void CCharacterComponent::ThreadDestroy() {
     CCharacterComponent::s_bComponentThread = 0;
-    s_threadBeginEvent.Set();
-    s_thread.Wait(0xFFFFFFFF);
+
+    // Not stock: the begin event is auto-reset and wakes one waiter per Set, so keep setting it until each worker exits
+    for (uint32_t i = 0; i < s_threadCount; i++) {
+        do {
+            s_threadBeginEvent.Set();
+        } while (s_threads[i].Wait(10) == WAIT_TIMEOUT);
+
+        if (s_threadTextureBuffers[i]) {
+            TextureFreeMippedImg(s_threadTextureBuffers[i], PIXEL_ARGB8888, s_textureSize, s_textureSize);
+            s_threadTextureBuffers[i] = nullptr;
+        }
+    }
+
+    s_threadCount = 0;
 
     for (CComponentRequest* request = s_requestList.Head(); request;) {
         CComponentRequest* next = s_requestList.Next(request);
@@ -5468,11 +5508,6 @@ bool CCharacterComponent::Destroy() {
     if (s_compressedTextureBuffer) {
         TextureFreeMippedImg(s_compressedTextureBuffer, PIXEL_DXT1, s_textureSize, s_textureSize);
         s_compressedTextureBuffer = nullptr;
-    }
-
-    if (s_threadTextureBuffer) {
-        TextureFreeMippedImg(s_threadTextureBuffer, PIXEL_ARGB8888, s_textureSize, s_textureSize);
-        s_threadTextureBuffer = nullptr;
     }
 
     for (uint32_t i = 0; i < CCharacterComponent::s_chrVarArrayLength; i++) {
