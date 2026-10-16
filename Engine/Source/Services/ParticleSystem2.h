@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include "Engine/Source/Gx/GxParticleQuads.h"
 #include "Engine/Source/Gx/Types.h"
 #include "Engine/Source/Model2/M2Data.h"
 #include "Engine/Source/Storm/H/stpl.h"
@@ -148,9 +149,16 @@ class CParticleEmitter2 {
         uint32_t m_capacity;
         uint32_t m_vertexCount;
         CAaBox m_worldBounds;
+        // GPUPARTICLES: m_data holds GxParticleQuad records (m_capacity and m_vertexCount still count vertices, 4 per quad)
+        uint8_t m_quads;
     };
     static const Prebuilt* s_prebuilt;
     static C44Matrix s_prebuiltView;
+
+    // GPUPARTICLES: set by CM2SceneRender around an emitter's (or a batch's) Render: the particle buffer gets
+    // GxParticleQuad records, which the Vulkan backend expands on the GPU, instead of four vertices per quad. Main
+    // thread only.
+    static uint8_t s_quads;
 
     static void Destroy();
     static void Init();
@@ -233,6 +241,8 @@ class CParticleEmitter2 {
     CParticleEmitter2(const CParticleEmitter2& source, int32_t copyParticles);
     CParticleEmitter2* AddRef();
     void BuildParticleVertices(ParticleVertex& vertex, uint32_t count, const C44Matrix& transform);
+    void BuildParticleQuads(GxParticleQuad* quads, uint32_t& quadCount, uint32_t count, const C44Matrix& transform);   // GPUPARTICLES: quad records
+    uint32_t BuildQuads(const CParticle2& particle, GxParticleQuad* quad);   // GPUPARTICLES: quad records
     void Prebuild(Prebuilt& prebuilt);
     int32_t BuildVertex(const CParticle2& particle, ParticleVertex& vertex);
     float CalcVelocity();

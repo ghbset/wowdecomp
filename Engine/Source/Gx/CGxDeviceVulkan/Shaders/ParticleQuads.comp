@@ -1,0 +1,70 @@
+// GPUPARTICLES: expands the M2 particle quads the CPU writes (GxParticleQuad, Engine/Source/Gx/GxParticleQuads.h,
+// 14 words each) into the four vertices CParticleEmitter2::BuildVertex would have written, in the
+// engine's vertex layout (PCT or PNCT; the word offsets come from the draw's attribute table). The
+// draw then runs unchanged: the same translated vertex and pixel programs, fog, blend and alpha test.
+//
+//   corner i = (cx[i] * axisX + cy[i] * axisY) + center, (cx, cy) the stock s_cornerOffsets;
+//   texcoord i = (u0 | u1, v0 | v1) by the stock s_cornerTexCoords.
+//
+// `precise` keeps the sums unfused and in that order, which is the order BuildVertex adds in for its
+// flat, billboarded and velocity-aligned quads (bit-identical there).
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer Records { uint rec[]; };
+layout(std430, set = 0, binding = 1) writeonly buffer Vertices { uint vtx[]; };
+
+layout(push_constant) uniform Push
+{
+    uint inBase;    // first word of the first record
+    uint outBase;   // first word of the first vertex
+    uint count;     // quads
+    uint stride;    // words per vertex
+    uint normalOff; // word offset of the normal inside a vertex; 0xFFFFFFFF: the vertex has none
+    uint colorOff;
+    uint uvOff;
+    uint pad;
+    vec4 normal;    // s_particleNormal, written to every vertex that has a normal
+} pc;
+
+const vec2 kCorner[4] = vec2[4](vec2(-1.0, 1.0), vec2(-1.0, -1.0), vec2(1.0, 1.0), vec2(1.0, -1.0));
+
+vec3 Vec3At(uint w)
+{
+    return uintBitsToFloat(uvec3(rec[w], rec[w + 1u], rec[w + 2u]));
+}
+
+void main()
+{
+    uint q = gl_GlobalInvocationID.x;
+    if (q >= pc.count) return;
+
+    uint r = pc.inBase + q * 14u;
+    vec3 center = Vec3At(r);
+    uint color  = rec[r + 3u];
+    vec3 axisX  = Vec3At(r + 4u);
+    uint u0     = rec[r + 7u];
+    vec3 axisY  = Vec3At(r + 8u);
+    uint v0     = rec[r + 11u];
+    uint u1     = rec[r + 12u];
+    uint v1     = rec[r + 13u];
+
+    for (uint i = 0u; i < 4u; i++)
+    {
+        precise vec3 p = (kCorner[i].x * axisX + kCorner[i].y * axisY) + center;
+        uint o = pc.outBase + (q * 4u + i) * pc.stride;
+        vtx[o]      = floatBitsToUint(p.x);
+        vtx[o + 1u] = floatBitsToUint(p.y);
+        vtx[o + 2u] = floatBitsToUint(p.z);
+        if (pc.normalOff != 0xFFFFFFFFu)
+        {
+            vtx[o + pc.normalOff]      = floatBitsToUint(pc.normal.x);
+            vtx[o + pc.normalOff + 1u] = floatBitsToUint(pc.normal.y);
+            vtx[o + pc.normalOff + 2u] = floatBitsToUint(pc.normal.z);
+        }
+        vtx[o + pc.colorOff]      = color;
+        vtx[o + pc.uvOff]         = i < 2u ? u0 : u1;
+        vtx[o + pc.uvOff + 1u]    = (i & 1u) == 0u ? v0 : v1;
+    }
+}

@@ -32,6 +32,10 @@ OUTPUTS = [
         ("Present.vert", "kPresentVert"),
         ("Present.frag", "kPresentFrag"),
     ]),
+    # GPUPARTICLES: the particle quad expansion (Vulkan/ParticleQuads.cpp)
+    ("ParticleSpirv.inc", [
+        ("ParticleQuads.comp", "kParticleQuadsComp"),
+    ]),
 ]
 
 

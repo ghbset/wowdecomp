@@ -8,13 +8,33 @@
 #include <cstring>
 #include "Engine/Source/Gx/CGxDeviceVulkan/CGxDeviceVulkan.h"
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Frame.hpp"
+#include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/ParticleQuads.hpp"
+#include "Engine/Source/Gx/GxParticleQuads.h"
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Pipelines.hpp"
 #include "Engine/Source/Gx/CGxBuf.h"
 #include "Engine/Source/Gx/CGxPool.h"
 #include "Engine/Source/Gx/CGxTex.h"
 
 namespace frame     = gxvk::vk::frame;
+namespace particles = gxvk::vk::particles;
 namespace pipelines = gxvk::vk::pipelines;
+
+// GPUPARTICLES: the stream buf the engine said holds particle quad records (GxVkParticleQuadsBind), and the normal
+// its expanded vertices carry. Main thread.
+static const CGxBuf* s_particleRecords;
+static float s_particleNormal[3];
+
+bool GxVkParticleQuadsReady() {
+    return particles::Ready();
+}
+
+void GxVkParticleQuadsBind(const CGxBuf* records, const float* normal) {
+    s_particleRecords = records;
+
+    if (normal) {
+        memcpy(s_particleNormal, normal, sizeof(s_particleNormal));
+    }
+}
 
 namespace {
     // The byte size of each CGxVertexAttrib::m_type, as CGxDeviceD3d::s_gxAttribToD3dAttribSize: a
@@ -158,6 +178,36 @@ void CGxDeviceVulkan::Draw(CGxBatch* batch, int32_t count) {
 
     if (!havePosition) {
         return;
+    }
+
+    // GPUPARTICLES: a stream of particle quad records is expanded into its vertices on the GPU (in the frame's
+    // pre-pass) and the draw binds those instead, in the layout its attribute table names. 4 vertices per quad.
+    if (s_particleRecords) {
+        for (uint32_t stream = 0; stream < d.streamCount; stream++) {
+            if (streamBufs[stream] != s_particleRecords) {
+                continue;
+            }
+
+            particles::Layout layout;
+            layout.stride = d.streams[stream].stride;
+            layout.normalOff = (d.attribMask & (1u << GxVA_Normal)) ? d.attribs[GxVA_Normal].offset : UINT32_MAX;
+            layout.colorOff = d.attribs[GxVA_Color0].offset;
+            layout.uvOff = d.attribs[GxVA_TexCoord0].offset;
+
+            if (!(d.attribMask & (1u << GxVA_Color0)) || !(d.attribMask & (1u << GxVA_TexCoord0)) || d.attribs[GxVA_Position].offset != 0) {
+                return;
+            }
+
+            VkBuffer out;
+            VkDeviceSize outOffset;
+
+            if (!particles::Expand(d.streams[stream].buffer, d.streams[stream].offset, (batch->m_maxIndex + 1) / 4, layout, s_particleNormal, out, outOffset)) {
+                return;
+            }
+
+            d.streams[stream].buffer = out;
+            d.streams[stream].offset = outOffset;
+        }
     }
 
     CGxBuf* indexBuf = nullptr;

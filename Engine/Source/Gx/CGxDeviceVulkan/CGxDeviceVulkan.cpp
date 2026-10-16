@@ -12,6 +12,7 @@
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Frame.hpp"
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Manifest.hpp"
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Memory.hpp"
+#include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/ParticleQuads.hpp"
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Pipelines.hpp"
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Present.hpp"
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Queries.hpp"
@@ -26,6 +27,7 @@ namespace context   = gxvk::vk::context;
 namespace frame     = gxvk::vk::frame;
 namespace manifest  = gxvk::vk::manifest;
 namespace memory    = gxvk::vk::memory;
+namespace particles = gxvk::vk::particles;
 namespace pipelines = gxvk::vk::pipelines;
 namespace present   = gxvk::vk::present;
 namespace queries   = gxvk::vk::queries;
@@ -252,6 +254,11 @@ void CGxDeviceVulkan::ICreateDrawPath() {
 
     this->m_drawPath = memory::Init() && texture::Init() && shaders::Init(folder) && pipelines::Init() && present::Init() && queries::Init();
 
+    // GPUPARTICLES: optional; without it the particle quads stay on the CPU
+    if (this->m_drawPath) {
+        particles::Init();
+    }
+
     if (!this->m_drawPath) {
         CGxDevice::Log("CGxDeviceVulkan::ICreateDrawPath(): device memory, the textures, the shaders, the pipelines, the present pass or the queries could not be brought up (the lines above say why); nothing is drawn");
     }
@@ -301,6 +308,7 @@ void CGxDeviceVulkan::IDestroyVulkan() {
     this->IReleasePools();
     this->IReleaseTextures();
     frame::Destroy();
+    particles::Shutdown();   // GPUPARTICLES: quad records
     pipelines::Shutdown();
     present::Shutdown();
     queries::Shutdown();

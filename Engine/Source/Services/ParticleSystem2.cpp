@@ -74,6 +74,7 @@ thread_local CSortableParticleQueue CParticleEmitter2::s_pq(s_pqParams);
 
 const CParticleEmitter2::Prebuilt* CParticleEmitter2::s_prebuilt;
 C44Matrix CParticleEmitter2::s_prebuiltView;
+uint8_t CParticleEmitter2::s_quads;
 
 // STATIC: 0x00DCE8C4
 void* ParticleSystemManager::sm_projectParam;
@@ -864,7 +865,17 @@ void __stdcall CParticleEmitter2::RenderParticleVertices(CGxBuf* buf, EGxVertexB
     batch.m_count = indexCount;
     batch.m_minIndex = 0;
     batch.m_maxIndex = vertexCount - 1;
+
+    // GPUPARTICLES: buf holds quad records; the Vulkan backend expands them for this draw
+    if (CParticleEmitter2::s_quads) {
+        GxVkParticleQuadsBind(buf, &s_particleNormal.x);
+    }
+
     g_theGxDevicePtr->Draw(&batch, 1);
+
+    if (CParticleEmitter2::s_quads) {
+        GxVkParticleQuadsBind(nullptr, nullptr);
+    }
 }
 
 // VERIFY: a9b4f93f manual
@@ -1749,6 +1760,243 @@ int32_t CParticleEmitter2::BuildVertex(const CParticle2& particle, ParticleVerte
     return 1;
 }
 
+// GPUPARTICLES: one quad record (corners as center + cx * axisX + cy * axisY, see GxParticleQuads.h)
+static inline void SetQuad(CAaBox& bounds, GxParticleQuad* quad, const C3Vector& center, const C3Vector& axisX, const C3Vector& axisY, uint32_t color, float u0, float v0, float u1, float v1) {
+    quad->center[0] = center.x;
+    quad->center[1] = center.y;
+    quad->center[2] = center.z;
+    quad->color = color;
+    quad->axisX[0] = axisX.x;
+    quad->axisX[1] = axisX.y;
+    quad->axisX[2] = axisX.z;
+    quad->u0 = u0;
+    quad->axisY[0] = axisY.x;
+    quad->axisY[1] = axisY.y;
+    quad->axisY[2] = axisY.z;
+    quad->v0 = v0;
+    quad->u1 = u1;
+    quad->v1 = v1;
+
+    // The corners' extent along each axis (to rounding): what AddVertex's min / max would find
+    float extent[3] = { fabsf(axisX.x) + fabsf(axisY.x), fabsf(axisX.y) + fabsf(axisY.y), fabsf(axisX.z) + fabsf(axisY.z) };
+    C3Vector lo(center.x - extent[0], center.y - extent[1], center.z - extent[2]);
+    C3Vector hi(center.x + extent[0], center.y + extent[1], center.z + extent[2]);
+
+    if (bounds.b.x > lo.x) bounds.b.x = lo.x;
+    if (bounds.b.y > lo.y) bounds.b.y = lo.y;
+    if (bounds.b.z > lo.z) bounds.b.z = lo.z;
+    if (bounds.t.x < hi.x) bounds.t.x = hi.x;
+    if (bounds.t.y < hi.y) bounds.t.y = hi.y;
+    if (bounds.t.z < hi.z) bounds.t.z = hi.z;
+}
+
+// GPUPARTICLES: BuildVertex as quad records instead of vertices: the same twinkle, tracks, spin, colour, scale,
+// texture cells and billboard modes, each quad as its center and the two axes the corner offsets scale (the
+// corners and texcoords are expanded on the GPU by the Vulkan backend). Returns the quads written (0 to 2). Keep in
+// step with BuildVertex.
+uint32_t CParticleEmitter2::BuildQuads(const CParticle2& particle, GxParticleQuad* quad) {
+    uint32_t twinkle = 0;
+
+    if (this->m_twinkleOnOff < 1.0f || 0.0f != this->m_twinkleScaleSpan) {
+        twinkle = (static_cast<uint8_t>(CMath::fint_(this->m_twinkleFPS * particle.m_age)) + (reinterpret_cast<uintptr_t>(&particle) >> 5)) & 0x7F;
+    }
+
+    if (this->m_twinkleOnOff < 1.0f && this->m_twinkleOnOff < CParticleEmitter2::s_rndTable[twinkle]) {
+        return 0;
+    }
+
+    CImVector color;
+    C2Vector scale;
+    int32_t headCell;
+    int32_t tailCell;
+
+    if (this->m_flags & 0x1000000) {
+        this->InterpolateAllTracksSimple(particle, &color, &scale, &headCell, &tailCell);
+    } else {
+        this->InterpolateAllTracks(particle, &color, &scale, &headCell, &tailCell);
+    }
+
+    float spin;
+    float spinRate;
+    this->RandomizeSpin(particle, &spin, &spinRate);
+
+    if (g_theGxDevicePtr->Caps().m_colorFormat == GxCF_rgba) {
+        uint8_t red = color.r;
+        color.r = color.b;
+        color.b = red;
+    }
+
+    uint32_t packed;
+    memcpy(&packed, &color, sizeof(packed));
+
+    float twinkleScale = CParticleEmitter2::s_rndTable[twinkle] * this->m_twinkleScaleSpan + this->m_twinkleScaleBase;
+    scale.x = scale.x * twinkleScale;
+    scale.y = twinkleScale * scale.y;
+
+    if (this->m_flags & 0x400) {
+        scale.x = scale.x * this->m_xformScale;
+        scale.y = this->m_xformScale * scale.y;
+    }
+
+    C3Vector center = particle.m_position * s_particleXform;
+    uint32_t flags = this->m_flags;
+    uint32_t written = 0;
+
+    // The texcoords as BuildVertex adds them: corner * cell + origin, the corner 0 or 1
+    const float cellWidth = this->m_textureCellWidth;
+    const float cellHeight = this->m_textureCellHeight;
+
+    if (flags & 0x4) {
+        uint32_t column = headCell & (this->m_textureCols - 1);
+        float u = column * cellWidth;
+        int32_t row = headCell >> this->m_textureCellShift;
+        float v = row * cellHeight;
+        float u0 = s_cornerTexCoords[0][0] * cellWidth + u;
+        float v0 = s_cornerTexCoords[0][1] * cellHeight + v;
+        float u1 = s_cornerTexCoords[3][0] * cellWidth + u;
+        float v1 = s_cornerTexCoords[3][1] * cellHeight + v;
+
+        if ((flags & 0x200000) && particle.m_velocity.z * particle.m_velocity.z + particle.m_velocity.y * particle.m_velocity.y + particle.m_velocity.x * particle.m_velocity.x > 0.00000023841858f) {
+            C3Vector reverse(-particle.m_velocity.x, -particle.m_velocity.y, -particle.m_velocity.z);
+            C3Vector direction = TransformDirection(reverse, s_particleXform);
+            C2Vector flat(direction);
+
+            float flatSq = flat.y * flat.y + flat.x * flat.x;
+            float directionSq = direction.y * direction.y + direction.z * direction.z + direction.x * direction.x;
+            float inv = 0.0f;
+
+            if (flatSq > 0.00000023841858f) {
+                inv = 1.0f / sqrt(flatSq);
+            }
+
+            float axisX = flat.x * inv;
+            float axisY = flat.y * inv;
+            C2Vector size = scale;
+
+            if (0.00000023841858f < inv) {
+                size.x = 1.0f / sqrt(directionSq) / inv * scale.x;
+            }
+
+            SetQuad(this->m_worldBounds, &quad[written++], center, C3Vector(size.x * axisX, size.x * axisY, 0.0f), C3Vector(size.y * -axisY, size.y * axisX, 0.0f), packed, u0, v0, u1, v1);
+        } else if (0.0f == this->m_params.m_spin && 0.0f == this->m_params.m_spinVariation) {
+            if (flags & 0x4000) {
+                SetQuad(this->m_worldBounds, &quad[written++], center, C3Vector(scale.x * s_billboardXform.a0, scale.x * s_billboardXform.a1, scale.x * s_billboardXform.a2), C3Vector(scale.y * s_billboardXform.b0, scale.y * s_billboardXform.b1, scale.y * s_billboardXform.b2), packed, u0, v0, u1, v1);
+            } else {
+                SetQuad(this->m_worldBounds, &quad[written++], center, C3Vector(scale.x, 0.0f, 0.0f), C3Vector(0.0f, scale.y, 0.0f), packed, u0, v0, u1, v1);
+            }
+        } else {
+            float angle = particle.m_age * spinRate + spin;
+
+            if ((flags & 0x10000) && (reinterpret_cast<uintptr_t>(&particle) & 0x20)) {
+                angle = -angle;
+            }
+
+            if (flags & 0x4000) {
+                C33Matrix rotation = C33Matrix::Rotation(angle, this->m_billboardAxis, true);
+                C3Vector axes[2];
+
+                for (uint32_t i = 0; i < 2; i++) {
+                    float size = i ? scale.y : scale.x;
+                    float billboardX = size * (i ? s_billboardXform.b0 : s_billboardXform.a0);
+                    float billboardY = size * (i ? s_billboardXform.b1 : s_billboardXform.a1);
+                    float billboardZ = size * (i ? s_billboardXform.b2 : s_billboardXform.a2);
+                    axes[i] = C3Vector(rotation.a2 * billboardZ + rotation.a1 * billboardY + billboardX * rotation.a0, rotation.b2 * billboardZ + rotation.b1 * billboardY + rotation.b0 * billboardX, billboardX * rotation.c0 + billboardY * rotation.c1 + billboardZ * rotation.c2);
+                }
+
+                SetQuad(this->m_worldBounds, &quad[written++], center, axes[0], axes[1], packed, u0, v0, u1, v1);
+            } else {
+                float sinAngle = sin(angle);
+                float cosAngle = cos(angle);
+                SetQuad(this->m_worldBounds, &quad[written++], center, C3Vector(cosAngle * scale.x, scale.x * sinAngle, 0.0f), C3Vector(-(scale.y * sinAngle), cosAngle * scale.y, 0.0f), packed, u, v, cellWidth + u, v + cellHeight);
+            }
+        }
+    }
+
+    if (!(this->m_flags & 0x8)) {
+        return written;
+    }
+
+    uint32_t column = tailCell & (this->m_textureCols - 1);
+    float u = column * cellWidth;
+    int32_t row = tailCell >> this->m_textureCellShift;
+    float v = row * cellHeight;
+    float u0 = cellWidth * s_cornerTexCoords[0][0] + u;
+    float v0 = cellHeight * s_cornerTexCoords[0][1] + v;
+    float u1 = cellWidth * s_cornerTexCoords[3][0] + u;
+    float v1 = cellHeight * s_cornerTexCoords[3][1] + v;
+
+    float tailLength = this->m_params.m_tailLength;
+
+    if ((this->m_flags & 0x20000) && tailLength > particle.m_age) {
+        tailLength = particle.m_age;
+    }
+
+    float reverseX = -particle.m_velocity.x;
+    float reverseY = -particle.m_velocity.y;
+    float reverseZ = -particle.m_velocity.z;
+
+    C3Vector tail;
+    tail.x = (reverseY * s_particleXform.b0 + reverseZ * s_particleXform.c0 + reverseX * s_particleXform.a0) * tailLength;
+    tail.y = (reverseY * s_particleXform.b1 + reverseZ * s_particleXform.c1 + reverseX * s_particleXform.a1) * tailLength;
+    tail.z = tailLength * (reverseY * s_particleXform.b2 + reverseZ * s_particleXform.c2 + reverseX * s_particleXform.a2);
+
+    C2Vector flat(tail);
+    float flatSq = flat.y * flat.y + flat.x * flat.x;
+
+    if (flatSq < 0.00077160494f) {
+        SetQuad(this->m_worldBounds, &quad[written++], center, C3Vector(scale.x, 0.0f, 0.0f), C3Vector(0.0f, scale.y, 0.0f), packed, u0, v0, u1, v1);
+        return written;
+    }
+
+    // From the head (cx -1) to the head + tail (cx 1), the width across (cy)
+    float inv = 1.0f / sqrt(flatSq);
+    float perpX = flat.x * (scale.x * inv);
+    float perpY = flat.y * (inv * scale.y);
+    C3Vector half(tail.x * 0.5f, tail.y * 0.5f, tail.z * 0.5f);
+    SetQuad(this->m_worldBounds, &quad[written++], C3Vector(center.x + half.x, center.y + half.y, center.z + half.z), half, C3Vector(-perpY, perpX, 0.0f), packed, u0, v0, u1, v1);
+
+    return written;
+}
+
+// GPUPARTICLES: BuildParticleVertices as quad records (BuildQuads); the same order, count, sort and bounds
+void CParticleEmitter2::BuildParticleQuads(GxParticleQuad* quads, uint32_t& quadCount, uint32_t count, const C44Matrix& transform) {
+    GxParticleQuad* quad = quads;
+    uint32_t i = 0;
+
+    if (this->m_flags & 0x20) {
+        for (; i < this->m_liveList.Count(); i++) {
+            uint32_t index = this->m_liveList[i];
+            CParticle2* particle = this->m_params.m_hasModel ? static_cast<CParticle2*>(&this->m_particleModels[index]) : &this->m_particles[index];
+            float depth = s_particleXform.c2 * particle->m_position.z + s_particleXform.b2 * particle->m_position.y + s_particleXform.a2 * particle->m_position.x + s_particleXform.d2;
+            CParticleEmitter2::s_pq.Push(depth, particle);
+        }
+
+        for (uint32_t j = count; j; j--) {
+            CSortableParticleRecord record = CParticleEmitter2::s_pq.Pop();
+            quad += this->BuildQuads(*record.m_particle, quad);
+        }
+    } else {
+        for (; i < count; i++) {
+            uint32_t index = this->m_liveList[i];
+            CParticle2* particle = this->m_params.m_hasModel ? static_cast<CParticle2*>(&this->m_particleModels[index]) : &this->m_particles[index];
+            quad += this->BuildQuads(*particle, quad);
+        }
+    }
+
+    if (count) {
+        this->m_worldBounds = CAaBox::Transform(this->m_worldBounds, transform);
+        this->m_worldBounds.b.x = this->m_worldBounds.b.x + this->m_viewPos.x;
+        this->m_worldBounds.b.y = this->m_worldBounds.b.y + this->m_viewPos.y;
+        this->m_worldBounds.b.z = this->m_viewPos.z + this->m_worldBounds.b.z;
+        this->m_worldBounds.t.x = this->m_worldBounds.t.x + this->m_viewPos.x;
+        this->m_worldBounds.t.y = this->m_worldBounds.t.y + this->m_viewPos.y;
+        this->m_worldBounds.t.z = this->m_viewPos.z + this->m_worldBounds.t.z;
+    }
+
+    quadCount = static_cast<uint32_t>(quad - quads);
+    this->m_renderedParticles = quadCount * 4 / this->m_vertsPerParticle;
+}
+
 // VERIFY: fe641edb manual
 // OFFSET: 0x0097D370
 void CParticleEmitter2::DetermineIfSimple() {
@@ -2367,8 +2615,13 @@ void CParticleEmitter2::RenderParticles(const C44Matrix* frameOfReference, void*
 
     EGxVertexBufferFormat format = (this->m_params.m_materialFlags & 0x1) ? GxVBF_PNCT : GxVBF_PCT;
 
+    // GPUPARTICLES: with s_quads the buffer gets one GxParticleQuad per quad (4 vertices' worth), not the vertices
+    const uint8_t quads = CParticleEmitter2::s_quads;
+    const uint32_t itemSize = quads ? sizeof(GxParticleQuad) : GxVertexSize(format);
+    const uint32_t verticesPerItem = quads ? 4 : 1;
+
     if (!buffer) {
-        buf = g_theGxDevicePtr->BufStream(GxPoolTarget_Vertex, GxVertexSize(format), count * this->m_vertsPerParticle);
+        buf = g_theGxDevicePtr->BufStream(GxPoolTarget_Vertex, itemSize, count * this->m_vertsPerParticle / verticesPerItem);
         buffer = g_theGxDevicePtr->BufLock(buf);
     }
 
@@ -2378,11 +2631,15 @@ void CParticleEmitter2::RenderParticles(const C44Matrix* frameOfReference, void*
     // Not stock: copy the vertices a Model2 worker built for this emitter with the same inputs
     const Prebuilt* prebuilt = s_prebuilt;
 
-    if (prebuilt && prebuilt->m_emitter == this && prebuilt->m_frameOfReference == frameOfReference && prebuilt->m_capacity == count * this->m_vertsPerParticle && !memcmp(&view, &s_prebuiltView, sizeof(view))) {
-        memcpy(buffer, prebuilt->m_data, prebuilt->m_vertexCount * GxVertexSize(format));
+    if (prebuilt && prebuilt->m_emitter == this && prebuilt->m_frameOfReference == frameOfReference && prebuilt->m_capacity == count * this->m_vertsPerParticle && prebuilt->m_quads == quads && !memcmp(&view, &s_prebuiltView, sizeof(view))) {
+        memcpy(buffer, prebuilt->m_data, prebuilt->m_vertexCount / verticesPerItem * itemSize);
         vertex.m_count = prebuilt->m_vertexCount;
         this->m_worldBounds = prebuilt->m_worldBounds;
         this->m_renderedParticles = vertex.m_count / this->m_vertsPerParticle;
+    } else if (quads) {
+        uint32_t quadCount;
+        this->BuildParticleQuads(static_cast<GxParticleQuad*>(buffer), quadCount, count, view.AffineInverse());
+        vertex.m_count = quadCount * 4;
     } else {
         this->FillOutParticleVertex(buffer, format, &vertex);
         this->BuildParticleVertices(vertex, count, view.AffineInverse());
@@ -2416,12 +2673,19 @@ void CParticleEmitter2::Prebuild(Prebuilt& prebuilt) {
 
     this->RenderParticlesPrep(prebuilt.m_frameOfReference, s_prebuiltView);
 
-    ParticleVertex vertex;
-    vertex.m_count = 0;
-    this->FillOutParticleVertex(prebuilt.m_data, (this->m_params.m_materialFlags & 0x1) ? GxVBF_PNCT : GxVBF_PCT, &vertex);
-    this->BuildParticleVertices(vertex, prebuilt.m_capacity / this->m_vertsPerParticle, s_prebuiltView.AffineInverse());
+    if (prebuilt.m_quads) {
+        // GPUPARTICLES: quad records
+        uint32_t quadCount;
+        this->BuildParticleQuads(reinterpret_cast<GxParticleQuad*>(prebuilt.m_data), quadCount, prebuilt.m_capacity / this->m_vertsPerParticle, s_prebuiltView.AffineInverse());
+        prebuilt.m_vertexCount = quadCount * 4;
+    } else {
+        ParticleVertex vertex;
+        vertex.m_count = 0;
+        this->FillOutParticleVertex(prebuilt.m_data, (this->m_params.m_materialFlags & 0x1) ? GxVBF_PNCT : GxVBF_PCT, &vertex);
+        this->BuildParticleVertices(vertex, prebuilt.m_capacity / this->m_vertsPerParticle, s_prebuiltView.AffineInverse());
+        prebuilt.m_vertexCount = vertex.m_count;
+    }
 
-    prebuilt.m_vertexCount = vertex.m_count;
     prebuilt.m_worldBounds = this->m_worldBounds;
 
     this->m_worldBounds = worldBounds;
