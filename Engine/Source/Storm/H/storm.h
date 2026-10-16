@@ -171,10 +171,10 @@ void SLogWrite(HSLOG log, const char* format, ...);
 void SDebugPrintf(const char* format, ...);
 
 struct MEMREPORTENTRY {
-    /* 0000 */ uint8_t unk_0000[16];
+    /* 0000 */ uint8_t unused_0000[16];
     /* 0010 */ uint32_t unk_0010;
     /* 0014 */ uint32_t unk_0014;
-    /* 0018 */ uint8_t unk_0018[8];
+    /* 0018 */ uint8_t unused_0018[8];
     /* 0020 */ uint32_t unk_0020;
     /* 0024 */ char unk_0024[1];
 };
@@ -277,9 +277,20 @@ void StormRtlDestroy();
 void StormRtlInitialize();
 int32_t STORMAPI StormSetOption(int32_t optname, void* optval, uint32_t optlen);
 
+#ifdef NDEBUG
+inline void DebugLog(const char* format, ...) {
+}
+
+inline void DebugLog(int32_t target, const char* format, ...) {
+}
+
+inline void DebugValidate(const char* expression) {
+}
+#else
 void DebugLog(const char* format, ...);
 void DebugLog(int32_t target, const char* format, ...);
 void DebugValidate(const char* expression);
+#endif
 
 // INLINED
 inline void* operator new(size_t bytes, const char* filename, int32_t linenumber) {

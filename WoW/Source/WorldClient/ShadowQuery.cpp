@@ -185,7 +185,7 @@ static bool SunShadowDir(C3Vector& out) {
 // OFFSET: 0x007BB570
 void CShadowQuery::Update() {
     C3Vector direction = CMap::s_mapLight->m_light.m_dir;
-    int32_t useCullFrustum = CWorldScene::frustumPortalView.m_maxViewDepth >= 0.0f || CWorldScene::s_unk_CD8778;
+    int32_t useCullFrustum = CWorldScene::frustumPortalView.m_maxViewDepth >= 0.0f || CWorldScene::s_hasPendingExteriorGroups;
 
     // gfxSunShadows: the true sun (or moon) direction instead of the world light steepened (z x5, clamped).
     if (!SunShadowDir(direction)) {
@@ -299,7 +299,7 @@ void CShadowQuery::FrustumCallback(CFrustum& frustum, C44Matrix& matrix, const C
     rect[2] = 1.0f;
     rect[3] = 1.0f;
 
-    CFrustum& cull = data.unk_0624[band];
+    CFrustum& cull = data.m_bandFrustums[band];
     cull = frustum;
 
     if (data.m_queryFlags[band] == 8 || !g_shadowCull->m_intValue) {
@@ -546,7 +546,7 @@ void CShadowQuery::GatherShadowCasters(CShadowCacheQueryData& data, int32_t firs
     minRadius[2] = 10.0f;
 
     for (CMapEntity* entity = CMap::entityList.Head(); entity; entity = CMap::entityList.Next(entity)) {
-        if (entity->unk_007C & 0x4) {
+        if (entity->m_staticFlags & 0x4) {
             continue;
         }
 
@@ -558,7 +558,7 @@ void CShadowQuery::GatherShadowCasters(CShadowCacheQueryData& data, int32_t firs
 
         int32_t isUnit = 1;
 
-        if (!(entity->m_type & 0x20) || (entity->unk_007C & 0x2000)) {
+        if (!(entity->m_type & 0x20) || (entity->m_staticFlags & 0x2000)) {
             isUnit = 0;
         }
 
@@ -586,7 +586,7 @@ void CShadowQuery::GatherShadowCasters(CShadowCacheQueryData& data, int32_t firs
                 flags = entity->m_flags;
 
                 if (flags & 0x2) {
-                    if (!(entity->unk_007C & 0x1000)) {
+                    if (!(entity->m_staticFlags & 0x1000)) {
                         continue;
                     }
 
@@ -614,7 +614,7 @@ void CShadowQuery::GatherShadowCasters(CShadowCacheQueryData& data, int32_t firs
             CAaBox& bbox = entity->m_bbox;
 
             if (extents.t.x >= bbox.b.x && extents.t.y >= bbox.b.y && extents.t.z >= bbox.b.z && extents.b.x <= bbox.t.x && extents.b.y <= bbox.t.y && extents.b.z <= bbox.t.z && minRadius[band] <= entity->m_sphere.r && ((flags & 0x20000) || maxRadius[band] >= entity->m_sphere.r)) {
-                if (data.unk_0624[band].Cull(bbox) && (!data.m_useCullFrustum[band] || data.m_cullFrustums[band].CullInv(bbox) != 3)) {
+                if (data.m_bandFrustums[band].Cull(bbox) && (!data.m_useCullFrustum[band] || data.m_cullFrustums[band].CullInv(bbox) != 3)) {
                     model->GatherModelBatchesShadowMap(CShadowQuery::s_bandBuffers[band].m_untextured, CShadowQuery::s_bandBuffers[band].m_textured);
                 }
             }
@@ -755,7 +755,7 @@ void CShadowQuery::QueryMapObjDefsBand(CShadowCacheQueryData& data, int32_t band
             continue;
         }
 
-        if (!data.unk_0624[band].Cull(def->m_bbox) || (data.m_useCullFrustum[band] && data.m_cullFrustums[band].CullInv(def->m_bbox) == 3)) {
+        if (!data.m_bandFrustums[band].Cull(def->m_bbox) || (data.m_useCullFrustum[band] && data.m_cullFrustums[band].CullInv(def->m_bbox) == 3)) {
             continue;
         }
 
@@ -769,7 +769,7 @@ void CShadowQuery::QueryMapObjDefsBand(CShadowCacheQueryData& data, int32_t band
                 continue;
             }
 
-            if (!extents.Intersects(defGroup->m_bbox) || !data.unk_0624[band].Cull(defGroup->m_bbox)) {
+            if (!extents.Intersects(defGroup->m_bbox) || !data.m_bandFrustums[band].Cull(defGroup->m_bbox)) {
                 continue;
             }
 
@@ -804,7 +804,7 @@ void CShadowQuery::QueryMapObjDefsBand(CShadowCacheQueryData& data, int32_t band
 
                 int32_t wanted = model->GetBillboardBoneCount() ? castDoodads : castOther;
 
-                if (wanted && extents.Intersects(doodad->m_bbox) && data.unk_0624[band].Cull(doodad->m_bbox) && (!data.m_useCullFrustum[band] || data.m_cullFrustums[band].CullInv(doodad->m_bbox) != 3)) {
+                if (wanted && extents.Intersects(doodad->m_bbox) && data.m_bandFrustums[band].Cull(doodad->m_bbox) && (!data.m_useCullFrustum[band] || data.m_cullFrustums[band].CullInv(doodad->m_bbox) != 3)) {
                     model->GatherModelBatchesShadowMap(CShadowQuery::s_bandBuffers[band].m_untextured, CShadowQuery::s_bandBuffers[band].m_textured);
                 }
             }
@@ -826,7 +826,7 @@ void CShadowQuery::QueryMapObjDefs(CShadowCacheQueryData& data, int32_t firstBan
             continue;
         }
 
-        CFrustum& lastFrustum = data.unk_0624[lastBand];
+        CFrustum& lastFrustum = data.m_bandFrustums[lastBand];
 
         if (!lastFrustum.Cull(def->m_bbox)) {
             continue;
@@ -847,7 +847,7 @@ void CShadowQuery::QueryMapObjDefs(CShadowCacheQueryData& data, int32_t firstBan
             }
 
             for (int32_t band = firstBand; band <= lastBand; band++) {
-                if (data.m_extents[band].Intersects(defGroup->m_bbox) && data.unk_0624[band].Cull(defGroup->m_bbox) && (!data.m_useCullFrustum[band] || data.m_cullFrustums[band].CullInv(defGroup->m_bbox) != 3)) {
+                if (data.m_extents[band].Intersects(defGroup->m_bbox) && data.m_bandFrustums[band].Cull(defGroup->m_bbox) && (!data.m_useCullFrustum[band] || data.m_cullFrustums[band].CullInv(defGroup->m_bbox) != 3)) {
                     ShadowQueryBuffers& buffers = CShadowQuery::s_bandBuffers[band];
 
                     if (buffers.m_groupCount >= 0x800) {
@@ -873,7 +873,7 @@ void CShadowQuery::QueryMapObjDefs(CShadowCacheQueryData& data, int32_t firstBan
 
                     doodad->m_shadowStamps[band] = CShadowQuery::s_stamp;
 
-                    if (!CWorldScene::IsBeyondFadeDistance(doodad->m_sphere.c, doodad->m_fadeLevel) && data.m_extents[band].Intersects(doodad->m_bbox) && data.unk_0624[band].Cull(doodad->m_bbox) && (!data.m_useCullFrustum[band] || data.m_cullFrustums[band].CullInv(doodad->m_bbox) != 3)) {
+                    if (!CWorldScene::IsBeyondFadeDistance(doodad->m_sphere.c, doodad->m_fadeLevel) && data.m_extents[band].Intersects(doodad->m_bbox) && data.m_bandFrustums[band].Cull(doodad->m_bbox) && (!data.m_useCullFrustum[band] || data.m_cullFrustums[band].CullInv(doodad->m_bbox) != 3)) {
                         doodad->m_model->GatherModelBatchesShadowMap(CShadowQuery::s_bandBuffers[band].m_untextured, CShadowQuery::s_bandBuffers[band].m_textured);
                     }
                 }
@@ -914,7 +914,7 @@ void CShadowQuery::QueryTerrainBand(CShadowCacheQueryData& data, int32_t band) {
                 continue;
             }
 
-            if (!data.unk_0624[band].Cull(chunk->m_bbox) || (data.m_useCullFrustum[band] && data.m_cullFrustums[band].CullInv(chunk->m_bbox) == 3)) {
+            if (!data.m_bandFrustums[band].Cull(chunk->m_bbox) || (data.m_useCullFrustum[band] && data.m_cullFrustums[band].CullInv(chunk->m_bbox) == 3)) {
                 continue;
             }
 
@@ -934,7 +934,7 @@ void CShadowQuery::QueryTerrainBand(CShadowCacheQueryData& data, int32_t band) {
 
                 int32_t wanted = model->GetBillboardBoneCount() ? (data.m_queryFlags[band] & 0x4) : (data.m_queryFlags[band] & 0x8);
 
-                if (wanted && extents.Intersects(doodad->m_bbox) && data.unk_0624[band].Cull(doodad->m_bbox) && (!data.m_useCullFrustum[band] || data.m_cullFrustums[band].CullInv(doodad->m_bbox) != 3)) {
+                if (wanted && extents.Intersects(doodad->m_bbox) && data.m_bandFrustums[band].Cull(doodad->m_bbox) && (!data.m_useCullFrustum[band] || data.m_cullFrustums[band].CullInv(doodad->m_bbox) != 3)) {
                     model->GatherModelBatchesShadowMap(CShadowQuery::s_bandBuffers[band].m_untextured, CShadowQuery::s_bandBuffers[band].m_textured);
                 }
             }
@@ -972,7 +972,7 @@ void CShadowQuery::QueryTerrain(CShadowCacheQueryData& data, int32_t firstBand, 
                 continue;
             }
 
-            if (!data.unk_0624[lastBand].Cull(chunk->m_bbox) || CWorldOcclusion::QueryVolumes(&chunk->m_sphere)) {
+            if (!data.m_bandFrustums[lastBand].Cull(chunk->m_bbox) || CWorldOcclusion::QueryVolumes(&chunk->m_sphere)) {
                 continue;
             }
 
@@ -1001,7 +1001,7 @@ void CShadowQuery::QueryTerrain(CShadowCacheQueryData& data, int32_t firstBand, 
                         continue;
                     }
 
-                    if (data.m_extents[band].Intersects(doodad->m_bbox) && data.unk_0624[band].Cull(doodad->m_bbox) && (!data.m_useCullFrustum[band] || data.m_cullFrustums[band].CullInv(doodad->m_bbox) != 3)) {
+                    if (data.m_extents[band].Intersects(doodad->m_bbox) && data.m_bandFrustums[band].Cull(doodad->m_bbox) && (!data.m_useCullFrustum[band] || data.m_cullFrustums[band].CullInv(doodad->m_bbox) != 3)) {
                         model->GatherModelBatchesShadowMap(CShadowQuery::s_bandBuffers[band].m_untextured, CShadowQuery::s_bandBuffers[band].m_textured);
                     }
                 }
