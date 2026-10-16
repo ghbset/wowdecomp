@@ -738,13 +738,10 @@ void CGxDeviceD3d11::DeviceDestroy() {
     D3d11Log("CGxDeviceD3d11::DeviceDestroy(): window gone");
     this->IDestroyD3d();
 
-    if (s_deviceLeaked) {
-        D3d11Log("CGxDeviceD3d11::DeviceDestroy(): device still referenced, d3d11/dxgi stay loaded");
-        SafeRelease(this->m_dxgiFactory);
-    } else {
-        D3d11Log("CGxDeviceD3d11::DeviceDestroy(): unload d3d11/dxgi");
-        CGxDeviceD3d11::IUnloadD3dLib(this->m_d3dLib, this->m_dxgiLib, this->m_dxgiFactory);
-    }
+    // d3d11/dxgi stay loaded, as in 4.3.4 (its DeviceDestroy never calls IUnloadD3dLib): the OS unloads them at
+    // exit, and FreeLibrary here could pull code out from under a hook (e.g. a plugin on Present) or a driver thread.
+    D3d11Log("CGxDeviceD3d11::DeviceDestroy(): release factory, d3d11/dxgi stay loaded%s", s_deviceLeaked ? " (device still referenced)" : "");
+    SafeRelease(this->m_dxgiFactory);
     D3d11Log("CGxDeviceD3d11::DeviceDestroy(): end");
 }
 

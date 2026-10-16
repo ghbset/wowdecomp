@@ -1629,24 +1629,41 @@ void ClientDestroyGame(int32_t charSelect, int32_t resumeGlue, int32_t worldLogi
 // VERIFY: e61971e0 auto
 // OFFSET: 0x004066D0
 int32_t DestroyEngineCallback(const void* data, void* param) {
+    GxTeardownLog("DestroyEngineCallback: RemoveConsoleDeviceDefaultCallback");
     RemoveConsoleDeviceDefaultCallback(SetDefaults);
+    GxTeardownLog("DestroyEngineCallback: ClientDestroyGame");
     ClientDestroyGame(0, 0, 0);
+    GxTeardownLog("DestroyEngineCallback: WowClientDestroy");
     WowClientDestroy();
+    GxTeardownLog("DestroyEngineCallback: ClientServices::ClearMessageHandler");
     ClientServices::ClearMessageHandler(SMSG_TUTORIAL_FLAGS);
+    GxTeardownLog("DestroyEngineCallback: ClientServices::Destroy");
     ClientServices::Destroy();
+    GxTeardownLog("DestroyEngineCallback: ShadowDestroy");
     ShadowDestroy();
+    GxTeardownLog("DestroyEngineCallback: CWorld::Destroy");
     CWorld::Destroy();
+    GxTeardownLog("DestroyEngineCallback: ConsoleScreenDestroy");
     ConsoleScreenDestroy();
+    GxTeardownLog("DestroyEngineCallback: ScrnDestroy");
     ScrnDestroy();
     M2Destroy();
+    GxTeardownLog("DestroyEngineCallback: ModelBlobDestroy");
     ModelBlobDestroy();
+    GxTeardownLog("DestroyEngineCallback: TextureDestroy");
     TextureDestroy();
+    GxTeardownLog("DestroyEngineCallback: AsyncFileReadDestroy");
     AsyncFileReadDestroy();
+    GxTeardownLog("DestroyEngineCallback: GxuLightShutdown");
     GxuLightShutdown();
+    GxTeardownLog("DestroyEngineCallback: HeapUsageDestroy");
     HeapUsageDestroy();
+    GxTeardownLog("DestroyEngineCallback: ObjectAllocDestroy");
     ObjectAllocDestroy();
+    GxTeardownLog("DestroyEngineCallback: BaseDestroyContext");
     BaseDestroyContext();
 
+    GxTeardownLog("DestroyEngineCallback: done");
     return 1;
 }
 
@@ -1770,44 +1787,47 @@ bool InitializeGlobal() {
     return true;
 }
 
-// Not stock: gx.log is flushed per line, so a hang on quit shows the last step reached.
-static void TeardownLog(const char* step) {
-    GxLog("teardown: %s", step);
-
-    if (CGxDevice::m_log) {
-        SLogFlush(CGxDevice::m_log);
-    }
-}
-
 // VERIFY: 87ba0ad5 manual
 // OFFSET: 0x00406B70
 void BeginCloseGame() {
-    TeardownLog("BeginCloseGame");
+    GxTeardownLog("BeginCloseGame");
     SMemSetDebugFlags(0, 8);
     OsIMEDestroy();
     OsTimeShutdown();
-    TeardownLog("EventDestroy");
+    GxTeardownLog("EventDestroy");
     EventDestroy();
-    TeardownLog("ConsoleDeviceDestroy");
+    GxTeardownLog("ConsoleDeviceDestroy");
     ConsoleDeviceDestroy();
+    GxTeardownLog("RunOnce CVar::Delete");
 
     {
         ForEveryRunOnceWTF runOnce;
         runOnce.Execute(CVar::Delete);
     }
 
+    GxTeardownLog("CVar::Destroy");
     CVar::Destroy();
+    GxTeardownLog("ConsoleCommandDestroy");
     ConsoleCommandDestroy();
+    GxTeardownLog("BaseDestroyGlobal");
     BaseDestroyGlobal();
+    GxTeardownLog("CloseAllArchives");
     CloseAllArchives();
+    GxTeardownLog("ShutdownStreamingIfTrial");
     ShutdownStreamingIfTrial();
+    GxTeardownLog("StopStreaming");
     StopStreaming();
+    GxTeardownLog("BeginCloseGame: done");
 
     if (s_closeErrorStringId) {
         Startup_StringsRec* title = g_startup_StringsDB.GetRecord(1);
         Startup_StringsRec* message = g_startup_StringsDB.GetRecord(s_closeErrorStringId);
         OsGuiMessageBox(nullptr, 0, message ? message->m_message : "Unknown Error", title ? title->m_message : "World of Warcraft");
     }
+}
+
+static void TeardownAtExit() {
+    GxTeardownLog("atexit: static destructors, then _exit (DLL detach)");
 }
 
 // VERIFY: cfa3efeb auto
@@ -1841,10 +1861,15 @@ int32_t CommonMain() {
 
     if (InitializeGlobal()) {
         EventDoMessageLoop();
+        GxTeardownLog("EventDoMessageLoop returned");
         BeginCloseGame();
     }
 
+    GxTeardownLog("StormDestroy");
     StormDestroy();
+    // Not stock: registered after StormDestroy's StormAtExit, so it runs first; StormAtExit's _cexit then runs the
+    // static destructors and its _exit the DLL_PROCESS_DETACHes. A log ending here means the hang is in one of those.
+    atexit(TeardownAtExit);
 
     if (SFile::IsTrial()) {
         ShutdownOggDecompression();
@@ -1856,6 +1881,7 @@ int32_t CommonMain() {
         StartupReportSendTelemetry(false, false);
     }
 
+    GxTeardownLog("CommonMain return");
     return 0;
 }
 

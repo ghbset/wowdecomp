@@ -102,6 +102,7 @@ void GxLog(const char* format, ...);
 void GxLogClose();
 void GxLogCrashInfo(char* buffer, uint32_t size);
 void GxLogOpen();
+void GxTeardownLog(const char* format, ...);
 int32_t GxIsWindowVisible();
 int32_t GxMasterEnable(EGxMasterEnables state);
 void GxMasterEnableSet(EGxMasterEnables state, int32_t enable);

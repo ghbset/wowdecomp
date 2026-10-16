@@ -1,6 +1,8 @@
 #include <cstdarg>
 #include <cstdint>
 #include <cstdlib>
+#include <cstdio>
+#include <windows.h>
 #include "Engine/Source/Gx/Buffer.h"
 #include "Engine/Source/Gx/CGxDevice/CGxDevice.h"
 #include "Engine/Source/Gx/CGxPool.h"
@@ -914,6 +916,40 @@ void GxLog(const char* format, ...) {
     va_start(args, format);
     CGxDevice::Log(format, args);
     va_end(args);
+}
+
+// Not stock: quit tracing, flushed per line so a hang on quit shows the last step reached. Once GxLogClose has run
+// (ConsoleDeviceDestroy) it appends straight to Logs\gx.log, so the rest of shutdown up to process exit is traced too.
+void GxTeardownLog(const char* format, ...) {
+    char buffer[512];
+    va_list args;
+    va_start(args, format);
+    _vsnprintf(buffer, sizeof(buffer) - 1, format, args);
+    va_end(args);
+    buffer[sizeof(buffer) - 1] = 0;
+
+    if (CGxDevice::m_log) {
+        CGxDevice::Log("teardown: %s", buffer);
+        SLogFlush(CGxDevice::m_log);
+        return;
+    }
+
+    SYSTEMTIME t;
+    GetLocalTime(&t);
+    char line[600];
+    int32_t length = _snprintf(line, sizeof(line) - 1, "%u/%u %02u:%02u:%02u.%03u  teardown: %s\r\n", t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond, t.wMilliseconds, buffer);
+
+    if (length < 0) {
+        length = static_cast<int32_t>(sizeof(line) - 1);
+    }
+
+    HANDLE file = CreateFileA("Logs\\gx.log", FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+
+    if (file != INVALID_HANDLE_VALUE) {
+        DWORD written;
+        WriteFile(file, line, static_cast<DWORD>(length), &written, nullptr);
+        CloseHandle(file);
+    }
 }
 
 // VERIFY: b49a76f0 manual

@@ -1,5 +1,6 @@
 #include <cstddef>
 #include <cstdint>
+#include "Engine/Source/Gx/Gx.h"
 #include "Engine/Source/Services/AsyncFile.h"
 #include "Engine/Source/Base/Prop.h"
 #include "Engine/Source/BlizzardCore/SFile2-Core.h"
@@ -413,6 +414,12 @@ uint32_t STORMAPI AsyncFileReadThread(void* param) {
         while (true) {
             g_queueLock.Enter();
 
+            // Not stock: stop draining the queue once shutdown is signalled, so the quit join is not held up by every
+            // queued read (the leftovers are dropped with the queues in AsyncFileReadDestroy).
+            if (!AsyncFileRead::s_shutdownEvent.Wait(0)) {
+                break;
+            }
+
             CAsyncObject* object = queue->m_readList.Head();
 
             if (object) {
@@ -580,8 +587,17 @@ void AsyncFileReadIncreasePriority(CAsyncObject* object) {
 void AsyncFileReadDestroy() {
     for (CAsyncThread* thread = s_asyncThreadList.Head(); !s_asyncThreadList.IsEnd(thread); thread = s_asyncThreadList.RawNext(thread)) {
         AsyncFileRead::s_shutdownEvent.Set();
-        thread->m_thread.Wait(0xFFFFFFFF);
+        GxTeardownLog("AsyncFileReadDestroy: join reader thread");
+
+        // Not stock (stock waits INFINITE): a reader stuck in a file read must not hang the quit. Its queues and
+        // objects are left alone (leaked) so it never touches freed memory; the process is exiting anyway.
+        if (thread->m_thread.Wait(2000)) {
+            GxTeardownLog("AsyncFileReadDestroy: reader thread did not exit in 2 s, skipping the rest");
+            return;
+        }
     }
+
+    GxTeardownLog("AsyncFileReadDestroy: readers joined");
 
     AsyncFileReadUnloadPostList();
     AsyncFileRead::s_asyncFileReadFreeList.Clear();

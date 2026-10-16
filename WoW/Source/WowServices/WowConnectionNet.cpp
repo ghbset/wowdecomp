@@ -1,6 +1,7 @@
 #include "WowConnectionNet.h"
 #include "Engine/Source/ConsoleBase/IConsole.h"
 #include "Engine/Source/Os/TimeManager.h"
+#include "Engine/Source/Gx/Gx.h"
 #include "Engine/Source/Storm/H/storm.h"
 
 // VERIFY: 1491f4aa auto
@@ -201,13 +202,19 @@ void WowConnectionNet::Stop() {
     this->PlatformStop();
     this->PlatformWorkerReady();
 
+    GxTeardownLog("WowConnectionNet::Stop: wait main network thread");
+
     if (this->m_stopEvent.Wait(10000)) {
         ConsolePrintf("Main network thread did not send stop event normally");
+        GxTeardownLog("WowConnectionNet::Stop: no stop event after 10 s");
     }
 
     if (this->m_thread.Wait(5000)) {
         ConsolePrintf("Main network thread did not exit normally");
+        GxTeardownLog("WowConnectionNet::Stop: main network thread did not exit in 5 s");
     }
+
+    GxTeardownLog("WowConnectionNet::Stop: join %d workers", this->m_numWorkers);
 
     for (int32_t i = 0; i < this->m_numWorkers; i++) {
         WowConnectionNet::WORKER& worker = this->m_workers[i];
@@ -217,12 +224,15 @@ void WowConnectionNet::Stop() {
 
         if (worker.m_thread.Wait(10000)) {
             ConsolePrintf("Network thread %d did not exit normally", i);
+            GxTeardownLog("WowConnectionNet::Stop: network thread %d did not exit in 10 s", i);
         } else if (worker.m_connection) {
             InterlockedExchangeAdd(reinterpret_cast<volatile LONG*>(&worker.m_connection->m_serviceCount), -1);
             worker.m_connection->Release();
             worker.m_connection = nullptr;
         }
     }
+
+    GxTeardownLog("WowConnectionNet::Stop: done");
 }
 
 // VERIFY: 91633125 manual

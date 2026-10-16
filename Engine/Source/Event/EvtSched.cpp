@@ -8,6 +8,7 @@
 #include "Engine/Source/Event/EvtSched.h"
 #include "Engine/Source/Event/EvtThread.h"
 #include "Engine/Source/Event/EvtTimer.h"
+#include "Engine/Source/Gx/Gx.h"
 #include "Engine/Source/Os/OsCall.h"
 #include "Engine/Source/Os/OsTcp.h"
 #include "Engine/Source/Os/System.h"
@@ -246,7 +247,16 @@ void IEvtSchedulerDestroy() {
         }
     }
 
-    SSyncObject::WaitMultiplePtr(Event::s_schedulerThreads.Count(), reinterpret_cast<SSyncObject**>(Event::s_schedulerThreads.Ptr()), 1, 0xFFFFFFFF);
+    GxTeardownLog("IEvtSchedulerDestroy: join scheduler threads");
+
+    // Not stock (stock waits INFINITE): bounded so a stuck scheduler thread cannot hang the quit. On timeout the
+    // thread tables are leaked, not freed, as the stuck thread may still use them.
+    if (SSyncObject::WaitMultiplePtr(Event::s_schedulerThreads.Count(), reinterpret_cast<SSyncObject**>(Event::s_schedulerThreads.Ptr()), 1, 2000) == 0x102 /* WAIT_TIMEOUT */) {
+        GxTeardownLog("IEvtSchedulerDestroy: scheduler threads did not exit in 2 s, skipping the rest");
+        return;
+    }
+
+    GxTeardownLog("IEvtSchedulerDestroy: scheduler threads joined");
 
     if (shutdownThreads.Count()) {
         shutdownEvent.Set();

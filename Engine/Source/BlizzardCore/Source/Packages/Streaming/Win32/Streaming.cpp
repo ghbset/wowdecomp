@@ -9,6 +9,7 @@
 #include <vector>
 #include <windows.h>
 #include "Engine/Source/BlizzardCore/Include/Blizzard/Util/MD5.h"
+#include "Engine/Source/Gx/Gx.h"
 #include "Engine/Source/BlizzardCore/Source/Packages/Streaming/Manifests.h"
 #include "Engine/Source/BlizzardCore/Source/Packages/Streaming/Storage.h"
 #include "Engine/Source/BlizzardCore/Source/Packages/Streaming/Streaming.h"
@@ -1275,7 +1276,14 @@ void StopStreaming() {
         s_paused = false;
         SetEvent(s_pauseEvent);
 
-        while (s_threadMask > 0) {
+        // Not stock (stock spins until every thread is gone): bounded so a stuck streaming thread cannot hang the
+        // quit. On timeout nothing is freed, as the thread may still use it; the process is exiting anyway.
+        for (uint32_t waited = 0; s_threadMask > 0; waited += 10) {
+            if (waited >= 2000) {
+                GxTeardownLog("StopStreaming: streaming threads did not exit in 2 s, skipping the rest");
+                return;
+            }
+
             Sleep(10);
         }
 

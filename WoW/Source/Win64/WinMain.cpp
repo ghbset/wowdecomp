@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <float.h>
 #include "Engine/Source/Storm/H/storm.h"
+#include "Engine/Source/Gx/Gx.h"
 #include "WoW/Source/Client.h"
 
 // STATIC: 0x00B311E8
@@ -57,6 +58,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     SwitchToFiber(fiber);
     DeleteFiber(fiber);
+    GxTeardownLog("WinMain return");
 
     return result;
 }
