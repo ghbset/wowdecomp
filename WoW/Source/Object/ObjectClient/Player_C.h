@@ -42,12 +42,14 @@ struct InspectData {
 class ItemSetRec;
 
 struct ITEMSWAP {
-    /* 0000 */ WOWGUID m_srcContainer;
-    /* 0008 */ WOWGUID m_dstContainer;
-    /* 0010 */ uint32_t m_srcSlot;
-    /* 0014 */ uint32_t m_dstSlot;
-    /* 0018 */ int32_t m_itemId;
-    /* 001C */ CGItem_C* m_item;
+    /* 0000 */ WOWGUID m_srcContainer = {};
+    /* 0008 */ WOWGUID m_dstContainer = {};
+    // Stock's ITEMSWAP ctor (run by SetCount at 0x006DED17) sets these; without it a freshly grown entry kept
+    // heap garbage in m_item and ClearPendingEquip equipped it (Wow64 crash on a bind-on-equip confirm, 2026-10-17).
+    /* 0010 */ uint32_t m_srcSlot = 0xFFFFFFFF;
+    /* 0014 */ uint32_t m_dstSlot = 0xFFFFFFFF;
+    /* 0018 */ int32_t m_itemId = 0;
+    /* 001C */ CGItem_C* m_item = nullptr;
 };
 
 struct TRADESKILLLINE : public TSHashObject<TRADESKILLLINE, HASHKEY_NONE> {
