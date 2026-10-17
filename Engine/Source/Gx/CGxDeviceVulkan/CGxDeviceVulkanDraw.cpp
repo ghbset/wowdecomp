@@ -280,6 +280,54 @@ void CGxDeviceVulkan::Draw(CGxBatch* batch, int32_t count) {
         pixelRows[14 * 4 + 0] = -1.0f / range;
         pixelRows[14 * 4 + 1] = end / range;
     }
+
+    // Camera-space-position texgen for the fixed-function vertex program (Shaders/Ff.vert), as
+    // CGxDeviceD3d11::IStateSyncFixedFunction models D3D9's: texcoord = (pos * WorldView) * T, with
+    // T the texgen matrix (inv(view) for EyeLinear, also inv(world) for ObjectLinear) times the
+    // stage's Tex matrix under GxRs_TextureShader 1/2 (2 = projected). Folded into one matrix here,
+    // its u, v, q columns in pixel rows 8..10 (stage 0) / 11..13 (stage 1), the modes in row 7. Ff.frag
+    // reads rows 14/15 only; Ui/Desaturate read none. Without it every projected texture (selection circles, blob shadows,
+    // spell target rings) sampled texel (0, 0) and drew nothing on Vulkan.
+    // ponytail: reflection/normal/sphere-map texgen still unsupported (Ff.vert has no normal input).
+    if (d.vertex == pipelines::VertexProgram::FixedFunction) {
+        pixelRows[7 * 4 + 0] = 0.0f;
+        pixelRows[7 * 4 + 1] = 0.0f;
+
+        for (uint32_t stage = 0; stage < 2; stage++) {
+            const int32_t gen = this->m_appRenderStates[GxRs_TexGen0 + stage].m_value.m_data.i[0];
+            const int32_t shader = this->m_appRenderStates[GxRs_TextureShader0 + stage].m_value.m_data.i[0];
+
+            if (gen != GxTexGen_ObjectLinear && gen != GxTexGen_EyeLinear && gen != GxTexGen_Unk3) {
+                continue;
+            }
+
+            const CGxMatrixStack& world = this->m_xforms[GxXform_World];
+            const CGxMatrixStack& view = this->m_xforms[GxXform_View];
+            const C44Matrix& worldMtx = world.m_mtx[world.m_level];
+            const C44Matrix& viewMtx = view.m_mtx[view.m_level];
+            C44Matrix t;
+
+            if (gen != GxTexGen_Unk3) {
+                t = viewMtx.AffineInverse();
+
+                if (gen == GxTexGen_ObjectLinear) {
+                    t = t * worldMtx.Inverse();
+                }
+            }
+
+            if (shader == 1 || shader == 2) {
+                const CGxMatrixStack& xform = this->m_xforms[GxXform_Tex0 + stage];
+                t = t * xform.m_mtx[xform.m_level];
+            }
+
+            const C44Matrix m = worldMtx * viewMtx * t;
+            float* r = &pixelRows[(8 + stage * 3) * 4];
+            r[0] = m.a0; r[1] = m.b0; r[2] = m.c0; r[3] = m.d0;
+            r[4] = m.a1; r[5] = m.b1; r[6] = m.c1; r[7] = m.d1;
+            r[8] = m.a2; r[9] = m.b2; r[10] = m.c2; r[11] = m.d2;
+            pixelRows[7 * 4 + stage] = shader == 2 ? 2.0f : 1.0f;
+        }
+    }
     d.pixelRegs = pixelRows;
     d.vertexRegs = this->m_vertexRegs;
 

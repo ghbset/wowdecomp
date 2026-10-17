@@ -12,6 +12,8 @@ Contents:
                           to take another folder, e.g. Tools/VulkanShaders/translated).
   Shaders\\*\\?s_4_0\\...   the D3D11 backend's SM4 pack, copied out of <client>/Data/patch-R.MPQ
                           (--d3d11-mpq to take another archive).
+  Textures\\...           every file in Tools/CustomMpq/Textures beside this script (the
+                          selection-circle styles from wxl-aoeindicators, selectionCircleStyle).
 Cache/vkpipelines.bin is a runtime cache and stays loose.
 
 Needs StormLib (libstorm.so, Debian package libstorm9). Python 3.8+, standard library only.
@@ -145,14 +147,16 @@ def main(argv):
     if not sm4:
         sys.exit('no Shaders\\*\\vs_4_0 / ps_4_0 files in %s' % d3d11)
     files.update(sm4)
+    textures = folder_files('Textures', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Textures'))
+    files.update(textures)
 
     write_mpq(lib, a.out, files)
     back = mpq_files(lib, a.out)
     bad = [n for n in files if back.get(n) != files[n]]
     if bad:
         sys.exit('verify failed for %d file(s), first %s' % (len(bad), bad[0]))
-    print('%s: %d file(s) (%d Vulkan, %d D3D11), %d bytes, verified' %
-          (a.out, len(back), len(files) - len(sm4), len(sm4), os.path.getsize(a.out)))
+    print('%s: %d file(s) (%d Vulkan, %d D3D11, %d textures), %d bytes, verified' %
+          (a.out, len(back), len(files) - len(sm4) - len(textures), len(sm4), len(textures), os.path.getsize(a.out)))
     return 0
 
 

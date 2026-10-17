@@ -201,8 +201,9 @@ namespace gxvk::vk::pipelines
         // The sampler-slot set: the pixel record's for a translated module, slots 0 and 1 for the
         // fixed-function stages, slot 0 alone otherwise.
         const bool translated = TranslatedFamily(draw.vertex) || TranslatedFamily(draw.fragment);
-        // The fixed-function pixel program reads its fog from the slice too.
-        const bool needsRegs = translated || draw.fragment == FragmentProgram::FixedFunction;
+        // The fixed-function pixel program reads its fog from the slice too, the fixed-function
+        // vertex program its texgen matrices.
+        const bool needsRegs = translated || draw.fragment == FragmentProgram::FixedFunction || draw.vertex == VertexProgram::FixedFunction;
         uint32_t samplerMask = 1u;
         uint32_t cubeMask    = 0;
         if (draw.fragment == FragmentProgram::Translated && draw.fragmentRecord)

@@ -4,6 +4,7 @@
 #include "WoW/Source/Game/GameClient/ProjectTex.h"
 #include "Engine/Source/Base/Handle.h"
 #include "Engine/Source/ConsoleBase/ConsoleVar.h"
+#include "Engine/Source/ConsoleBase/Types.h"
 #include "Engine/Source/Model2/M2Model.h"
 #include "Engine/Source/Model2/M2Scene.h"
 #include "Engine/Source/Services/Texture.h"
@@ -70,6 +71,16 @@ const uint32_t CGObject_C::s_questStatusIcons[11] = { 0, 6, 1, 2, 3, 5, 10, 11, 
 
 // STATIC: 0x00CA12C4
 CTexture* CGObject_C::s_selectionTexture;
+CTexture* CGObject_C::s_selectionStyleTextures[5];
+
+// SELCIRCLE: selectionCircleStyle 1..4 (slot 0 unused: stock UnitSelectTexture). Shipped in Data\custom.MPQ.
+static const char* const s_selectionStyleFiles[5] = {
+    nullptr,
+    "Textures\\UnitSelectTextureArrow.blp",
+    "Textures\\UnitSelectTextureArrowNoFill.blp",
+    "Textures\\UnitSelectTextureRing.blp",
+    "Textures\\UnitSelectTextureNoFill.blp",
+};
 
 // VERIFY: fe38de3f manual
 // OFFSET: 0x007435E0
@@ -1323,6 +1334,15 @@ void CGObject_C::Shutdown() {
     }
 
     CGObject_C::s_selectionTexture = nullptr;
+
+    for (CTexture*& texture : CGObject_C::s_selectionStyleTextures) {
+        if (texture) {
+            HandleClose(reinterpret_cast<HOBJECT>(texture));
+        }
+
+        texture = nullptr;
+    }
+
     LoadInteractIcons(0);
     ClntObjMgrUnsetTypeMirrorHandler(ID_OBJECT, OBJECT_FIELD_SCALE_X * sizeof(uint32_t), &ScaleUpdateHandler, nullptr);
 }
@@ -1366,6 +1386,19 @@ void CGObject_C::Initialize() {
 
     CStatus status;
     CGObject_C::s_selectionTexture = TextureCreate("Textures\\UnitSelectTexture.blp", CGxTexFlags(), &status, 1);
+
+    // SELCIRCLE
+    CGObject_C::s_cvSelectionCircleStyle = CVar::Register("selectionCircleStyle", "Target circle: 0 stock, 1 arrow, 2 arrow without fill, 3 ring, 4 ring without fill", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    CGObject_C::s_cvSelectionCircleReach = CVar::Register("selectionCircleReach", "Target circle size: 0 model size, 1 melee reach", 1, "0", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+
+    for (uint32_t i = 1; i < 5; i++) {
+        if (CGObject_C::s_selectionStyleTextures[i]) {
+            HandleClose(reinterpret_cast<HOBJECT>(CGObject_C::s_selectionStyleTextures[i]));
+        }
+
+        CStatus styleStatus;
+        CGObject_C::s_selectionStyleTextures[i] = TextureCreate(s_selectionStyleFiles[i], CGxTexFlags(), &styleStatus, 1);
+    }
     LoadInteractIcons(1);
     ClntObjMgrSetTypeMirrorHandler(ID_OBJECT, OBJECT_FIELD_SCALE_X * sizeof(uint32_t), sizeof(float), &ScaleUpdateHandler, nullptr, static_cast<HANDLER_PRIORITY>(0), 0);
 }
@@ -1969,10 +2002,35 @@ void __stdcall CGObject_C::BuildSelectionRotMatrix(C44Matrix* matrix, const C3Ve
     matrix->RotateAroundZ(-CalculateFacingTo(&camera, position));
 }
 
+// SELCIRCLE: the arrow styles point where the owner faces (wxl-aoeindicators / Ascension: rotate by
+// pi - render facing) instead of stock's turn toward the camera.
+void CGObject_C::FaceSelectionRotMatrix(C44Matrix* matrix, const CGObject_C* owner) {
+    const int32_t style = CGObject_C::s_cvSelectionCircleStyle ? CGObject_C::s_cvSelectionCircleStyle->m_intValue : 0;
+
+    if ((style != 1 && style != 2) || !owner) {
+        return;
+    }
+
+    const float a = 3.14159265f - owner->GetRenderFacing();
+    const float c = cosf(a);
+    const float s = sinf(a);
+    *matrix = C44Matrix(c, s, 0.0f, 0.0f, -s, c, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f);
+}
+
 // VERIFY: ab1865e5 manual
 // OFFSET: 0x00744EB0
 int32_t CGObject_C::SetCircleRenderStates() {
-    CGxTex* texture = TextureGetGxTex(CGObject_C::s_selectionTexture, 0, nullptr);
+    CGxTex* texture = nullptr;
+    const int32_t style = CGObject_C::s_cvSelectionCircleStyle ? CGObject_C::s_cvSelectionCircleStyle->m_intValue : 0;
+
+    // SELCIRCLE: the chosen style's texture; stock while it is missing or still loading.
+    if (style > 0 && style < 5 && CGObject_C::s_selectionStyleTextures[style]) {
+        texture = TextureGetGxTex(CGObject_C::s_selectionStyleTextures[style], 0, nullptr);
+    }
+
+    if (!texture) {
+        texture = TextureGetGxTex(CGObject_C::s_selectionTexture, 0, nullptr);
+    }
 
     if (!texture) {
         return 0;

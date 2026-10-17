@@ -71,6 +71,11 @@ class CGObject_C : public CGObject, public TSHashObject<CGObject_C, CHashKeyGUID
     static const uint32_t s_questStatusIcons[11];
     static CTexture* s_selectionTexture;
     static CVar* s_cvObjectSelectionCircle;
+    // SELCIRCLE: wxl-aoeindicators' selection circle (Ascension's ring/arrow textures, arrow turned to
+    // the unit's facing, optional melee-reach size), native. selectionCircleStyle 0 = stock.
+    static CVar* s_cvSelectionCircleStyle;
+    static CVar* s_cvSelectionCircleReach;
+    static CTexture* s_selectionStyleTextures[5];
 
     static void Initialize();
     static void ModelLoadedCallback(CM2Model* model, void* arg);
@@ -210,6 +215,7 @@ class CGObject_C : public CGObject, public TSHashObject<CGObject_C, CHashKeyGUID
     void Fadeout();
     static void __stdcall BuildSelectionRotMatrix(C44Matrix* matrix, const C3Vector* position);
     static int32_t SetCircleRenderStates();
+    static void FaceSelectionRotMatrix(C44Matrix* matrix, const CGObject_C* owner);
     void SetModelFinish(CM2Model* model);
     void SetModel(CM2Model* model);
     void PlaySpellVisualKit(const PlaySpellVisuaKitData& data);

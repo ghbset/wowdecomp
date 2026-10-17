@@ -23147,6 +23147,19 @@ void CGUnit_C::HandleTracking(float drunkness, float turnOffset) {
 }
 
 // VERIFY: d76f111e manual
+// SELCIRCLE: selectionCircleReach 1 sizes the circle by melee reach, max(5, yours + its + 4/3)
+// (wxl-aoeindicators / Ascension), else the model-size radius.
+static float SelectionCircleRadius(const CGUnit_C* unit) {
+    CGPlayer_C* player = CGObject_C::s_cvSelectionCircleReach && CGObject_C::s_cvSelectionCircleReach->m_intValue ? ClntObjMgrGetActivePlayerObj() : nullptr;
+
+    if (!player || !player->m_unit || !unit->m_unit) {
+        return unit->m_selectionRadius;
+    }
+
+    const float reach = player->m_unit->m_unitFieldCombatreach + unit->m_unit->m_unitFieldCombatreach + 4.0f / 3.0f;
+    return reach > 5.0f ? reach : 5.0f;
+}
+
 // OFFSET: 0x00725980
 void CGUnit_C::RenderTargetSelection() const {
     if (!CGGameUI::m_visible) {
@@ -23154,7 +23167,7 @@ void CGUnit_C::RenderTargetSelection() const {
     }
 
     C3Vector position = const_cast<CGUnit_C*>(this)->GetModelPosition();
-    float radius = this->m_selectionRadius;
+    float radius = SelectionCircleRadius(this);
     CAaBox box;
     box.b.x = position.x - radius;
     box.b.y = position.y - radius;
@@ -23169,6 +23182,7 @@ void CGUnit_C::RenderTargetSelection() const {
 
     C44Matrix matrix;
     CGObject_C::BuildSelectionRotMatrix(&matrix, &position);
+    CGObject_C::FaceSelectionRotMatrix(&matrix, this);
     g_theGxDevicePtr->RsPush();
     int32_t states = CGObject_C::SetCircleRenderStates();
 
@@ -23224,7 +23238,7 @@ void CGUnit_C::RenderPetTargetSelection() const {
     }
 
     C3Vector position = const_cast<CGUnit_C*>(this)->GetModelPosition();
-    float radius = this->m_selectionRadius;
+    float radius = SelectionCircleRadius(this);
     float t = elapsed * 0.001f;
     CImVector color;
     *reinterpret_cast<uint32_t*>(&color) = 0xFF605FFF;
@@ -23246,6 +23260,7 @@ void CGUnit_C::RenderPetTargetSelection() const {
 
     C44Matrix matrix;
     CGObject_C::BuildSelectionRotMatrix(&matrix, &position);
+    CGObject_C::FaceSelectionRotMatrix(&matrix, this);
     g_theGxDevicePtr->RsPush();
 
     if (CGObject_C::SetCircleRenderStates()) {
