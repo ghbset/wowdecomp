@@ -1558,12 +1558,6 @@ void CWorld::Update(C3Vector* camPos, C3Vector* camTarget, C3Vector* position) {
     DayNight::Update(CWorld::status.m_chunksChanged | CWorld::status.m_prepareAll, camPos);
     CWorld::farFog = DayNight::GetInfo()->m_fog.m_end;
 
-    // Not stock (horizonFog): the fog end may now reach past farclip; nothing past it is drawn
-    // anyway, so the fog culls keep 12340's bound (its fog end never exceeds farclip).
-    if (CWorld::farFog > World::s_farClip) {
-        CWorld::farFog = World::s_farClip;
-    }
-
     if (!g_theGxDevicePtr->MasterEnable(GxMasterEnable_Fog)) {
         CWorld::farFog = 100000.0f;
     }
@@ -2642,8 +2636,6 @@ void CWorldScene::RenderChunksSolid() {
             }
         }
 
-        FarField::NoteChunk(renderChunk);  // not in 12340: the far blend band (RenderBlend)
-
         renderChunk->m_renderChunkLink.Unlink();
         CMap::s_mapRenderChunkUpdateList.LinkToTail(renderChunk);
         renderChunk = next;
@@ -3685,8 +3677,6 @@ void CWorldScene::RenderChunksSinglePass() {
                     }
                 }
 
-                FarField::NoteChunk(renderChunk);  // not in 12340: the far blend band (RenderBlend)
-
                 renderChunk->m_renderChunkLink.Unlink();
 
                 if (CWorld::enables & 0x40000000) {
@@ -3778,7 +3768,6 @@ void CWorldScene::RenderChunks() {
     CWorldScene::RenderChunksSinglePass();
     CWorldScene::RenderChunksSolid();
     CWorldScene::RenderChunksZoneDebug();
-    FarField::RenderBlend();  // not in 12340: the far blend band (farTexBand)
 
     for (int32_t i = 0; i < 5; i++) {
         g_theGxDevicePtr->m_xforms[i].Identity();
@@ -4949,20 +4938,13 @@ void CWorldScene::RenderHorizon() {
     world.Translate(C3Vector(-CWorldScene::s_activeWorldView.x, -CWorldScene::s_activeWorldView.y, -CWorldScene::s_activeWorldView.z));
     g_theGxDevicePtr->XformPushAndSet(GxXform_World, world);
 
-    // Not in 12340: the WDL tiles batched from static buffers (FarField::RenderTerrain); 12340's one
-    // draw per tile when that path does not apply.
-    if (!FarField::RenderTerrain()) {
-        CMapAreaLow* nextArea;
+    CMapAreaLow* nextArea;
 
-        for (CMapAreaLow* area = CWorldScene::sortTable.m_horizonChunkList.Head(); area; area = nextArea) {
-            nextArea = CWorldScene::sortTable.m_horizonChunkList.Next(area);
-            CMap::RenderLowDetail(area);
-            area->m_horizonLink.Unlink();
-        }
+    for (CMapAreaLow* area = CWorldScene::sortTable.m_horizonChunkList.Head(); area; area = nextArea) {
+        nextArea = CWorldScene::sortTable.m_horizonChunkList.Next(area);
+        CMap::RenderLowDetail(area);
+        area->m_horizonLink.Unlink();
     }
-
-    // Not in 12340 (farTrees): tree and bush cards past farZ - 50, after the WDL and before the sky.
-    FarField::RenderFoliage(true);
 
     uint32_t count = 0;
     CMapObjGroup** groups = static_cast<CMapObjGroup**>(alloca(256 * sizeof(CMapObjGroup*)));

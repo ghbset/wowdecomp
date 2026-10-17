@@ -29,7 +29,6 @@
 #include "WoW/Source/Game/GameTime.h"
 #include "WoW/Source/WorldClient/CPortalView.h"
 #include "WoW/Source/WorldClient/World.h"
-#include "WoW/Source/WorldClient/MapLowDetail.h"
 #include "WoW/Source/WorldClient/WorldParam.h"
 #include "Engine/Source/Gxu/Gxu.h"
 #include "WoW/Source/Ui/WorldFrame.h"
@@ -2120,14 +2119,12 @@ void DayNight::DoAreaLights(CurrentLight* light, int32_t underwater) {
 void DayNight::UpdateFog() {
     DNInfo& info = DayNight::g_dnInfo;
     float end = info.m_farClip;
-    const float stretch = FarField::FogStretch();
 
     if (s_fogOverride) {
         if (s_overrideFogEnd < end) {
             end = s_overrideFogEnd;
         }
 
-        end *= stretch; // Not stock (horizonFog): 1 in 12340
         info.m_fog.m_end = end;
         info.m_fog.m_color = s_overrideFogColor;
         info.m_fog.m_start = end * s_overrideFogStart;
@@ -2137,7 +2134,6 @@ void DayNight::UpdateFog() {
             end = info.m_bands.m_fogEnd;
         }
 
-        end *= stretch; // Not stock (horizonFog): 1 in 12340
         info.m_fog.m_end = end;
         info.m_fog.m_color = info.m_bands.m_skyColors[5];
         info.m_fog.m_start = end * info.m_bands.m_fogStartMul;
