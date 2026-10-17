@@ -11,7 +11,11 @@ The interface contract every module shares (the device's pipelines are built aga
   Constants       one std140 block, set 1 binding 0: { vec4 p[16]; vec4 misc; vec4 v[VCONST]; }.
                   p[] and misc come first so a pixel module, which never reads v[], can declare v[64]
                   whatever class the paired vertex module is. VCONST is 64 or 256 per the vertex
-                  record's highest constant (manifest `vconst=`). misc.x is the alpha test reference
+                  record's highest constant (manifest `vconst=`). A pixel record reading c16 or above
+                  (only our own custom.MPQ shaders do) has PCONST rows (manifest `pconst=`, a multiple
+                  of 4, at most 256) and declares { p[16]; misc; v[256]; px[PCONST - 16] }: c16.. go
+                  AFTER the whole 256-row vertex window, so the vertex module's v[] offsets never move
+                  and any vertex module still pairs with it. misc.x is the alpha test reference
                   (alphaRef / 255, 0 = off), misc.z / misc.w the stage-0 colour / alpha op (read by
                   the generated companion stages only).
   Samplers        a combined image sampler per D3D sampler slot, set 0 binding <slot>.
@@ -37,7 +41,8 @@ VARYING_LOCATION = {'color0': 0, 'color1': 1, 'fog0': 10}
 for _i in range(8):
     VARYING_LOCATION['texcoord%d' % _i] = 2 + _i
 VARYING_TYPE = {'fog0': 'float'}
-PCONST = 16
+PCONST = 16              # pixel rows every stock record has; also the p[] array size
+PCONST_MAX = 256         # rows a pixel record may have (16 in p[], the rest in px[])
 VCONST_SMALL, VCONST_LARGE = 64, 256
 
 # vs_2_0 fixed-function output registers -> semantic
@@ -135,8 +140,10 @@ class Emitter(object):
             if o.index >= VCONST_LARGE:
                 raise Refused('vertex constant c%d beyond the 256-row window' % o.index)
             return 'regs.v[%d]' % o.index
+        if o.index >= PCONST_MAX:
+            raise Refused('pixel constant c%d beyond the %d-row window' % (o.index, PCONST_MAX))
         if o.index >= PCONST:
-            raise Refused('pixel constant c%d beyond the 16-row window' % o.index)
+            return 'regs.px[%d]' % (o.index - PCONST)
         return 'regs.p[%d]' % o.index
 
     def base_expr(self, o):
@@ -532,6 +539,25 @@ class Emitter(object):
         self.depth -= 1
         self.line('}')
 
+    def r_rep(self, i):
+        # rep i#: i#.x iterations, no aL
+        if len(i.srcs) != 1 or i.srcs[0].rtype != ir.RT_CONSTINT:
+            raise Refused('rep operand')
+        iv = self.base_expr(i.srcs[0])
+        self.loopn += 1
+        n = 'n%d' % self.loopn
+        self.line('for (int %s = 0; %s < %s.x; ++%s) {' % (n, n, iv, n))
+        self.depth += 1
+
+    def r_break(self, i):
+        self.line('break;')
+
+    def r_breakc(self, i):
+        cmpop = {1: '>', 2: '==', 3: '>=', 4: '<', 5: '!=', 6: '<='}.get(i.ctrl & 7)
+        if cmpop is None:
+            raise Refused('breakc with comparison %d' % (i.ctrl & 7))
+        self.line('if (%s %s %s) break;' % (self.comp(i.srcs[0], 0), cmpop, self.comp(i.srcs[1], 0)))
+
     def r_nop(self, i):
         pass
 
@@ -577,6 +603,9 @@ class Emitter(object):
                 if s not in self.reads:
                     self.reads.append(s)
             self.vconst = VCONST_SMALL
+        self.pconst = PCONST
+        if not self.vs and self.cmax >= PCONST:
+            self.pconst = (self.cmax + 1 + 3) // 4 * 4
         return self.text()
 
     def text(self):
@@ -623,7 +652,13 @@ class Emitter(object):
         P('layout(std140, set = 1, binding = 0) uniform Regs {')
         P('    vec4 p[%d];     // pixel c0..c%d' % (PCONST, PCONST - 1))
         P('    vec4 misc;       // misc.x = alphaRef / 255 (fixed-function alpha test, 0 = off)')
-        P('    vec4 v[%d];     // vertex c0..c%d' % (self.vconst, self.vconst - 1))
+        if self.pconst > PCONST:
+            P('    vec4 v[%d];     // vertex c0..c%d (not read here; always 256 rows before px[])'
+              % (VCONST_LARGE, VCONST_LARGE - 1))
+            P('    vec4 px[%d];    // pixel c%d..c%d (manifest pconst=%d), at byte %d'
+              % (self.pconst - PCONST, PCONST, self.pconst - 1, self.pconst, 272 + 16 * VCONST_LARGE))
+        else:
+            P('    vec4 v[%d];     // vertex c0..c%d' % (self.vconst, self.vconst - 1))
         P('} regs;')
         if self.defs or self.defi:
             P('')
@@ -692,7 +727,9 @@ RULES = {
     10: Emitter.r_min, 11: Emitter.r_max, 12: Emitter.r_slt, 13: Emitter.r_sge, 14: Emitter.r_exp,
     15: Emitter.r_log, 18: Emitter.r_lrp, 19: Emitter.r_frc, 27: Emitter.r_loop, 29: Emitter.r_endloop,
     32: Emitter.r_pow, 35: Emitter.r_abs, 36: Emitter.r_nrm, 37: Emitter.r_sincos,
+    38: Emitter.r_rep, 39: Emitter.r_endloop,
     40: Emitter.r_if_bool, 41: Emitter.r_ifc, 42: Emitter.r_else, 43: Emitter.r_endif,
+    44: Emitter.r_break, 45: Emitter.r_breakc,
     46: Emitter.r_mova, 65: Emitter.r_texkill, 66: Emitter.r_texld, 88: Emitter.r_cmp,
     90: Emitter.r_dp2add, 95: Emitter.r_texldl,
 }
@@ -835,7 +872,7 @@ def companion_block(md5, meta, names, spv_rel):
 
 def manifest_block(em, rec, spv_rel, companion=None):
     L = ['record %s %s %s %s vconst=%d pconst=%d'
-         % (rec.md5, rec.kind, em.sh.profile, spv_rel, em.vconst, PCONST)]
+         % (rec.md5, rec.kind, em.sh.profile, spv_rel, em.vconst, em.pconst)]
     for n in rec.names:
         L.append('name %s' % n)
     if rec.kind == 'pixel':

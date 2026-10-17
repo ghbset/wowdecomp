@@ -47,6 +47,7 @@ namespace gxvk::vk::pipelines::detail
     using gxvk::vk::pipelines::kAttribCount;
     using gxvk::vk::pipelines::kTextureStages;
     using gxvk::vk::pipelines::kPixelRows;
+    using gxvk::vk::pipelines::kPixelRowsMax;
     using gxvk::vk::pipelines::kVertexRowsSmall;
     using gxvk::vk::pipelines::kVertexRowsLarge;
     using gxvk::vk::pipelines::Attribute;
@@ -87,11 +88,13 @@ namespace gxvk::vk::pipelines::detail
     constexpr uint32_t     kMaxRegsChunks  = 16;
 
     /// One uniform slice of the translated interface: p[16], misc, v[rows] (Shaders: the Regs
-    /// block). The set-1 descriptor's range is the larger class; a 64-row module reads the first
-    /// kSliceBytesSmall bytes of it.
+    /// block); for a pixel record with pconst > 16, v[256] then px[pconst - 16] at
+    /// kSliceBytesLarge. The set-1 descriptor's range is kSliceBytesMax; a module reads the first
+    /// bytes of it that its block declares.
     constexpr uint32_t kSliceHeadBytes  = (kPixelRows + 1) * 16;
     constexpr uint32_t kSliceBytesSmall = kSliceHeadBytes + kVertexRowsSmall * 16;
     constexpr uint32_t kSliceBytesLarge = kSliceHeadBytes + kVertexRowsLarge * 16;
+    constexpr uint32_t kSliceBytesMax   = kSliceBytesLarge + (kPixelRowsMax - kPixelRows) * 16;
 
     /// The constant stream a vertex without a colour or a texcoord reads at stride 0: 16 bytes of
     /// D3DCOLOR white at 0 (opaque white), 16 zero bytes at 16 (a zero texcoord).
@@ -209,7 +212,7 @@ namespace gxvk::vk::pipelines::detail
         uint32_t        regsCursor = 0;        ///< next free byte of the current chunk
         uint64_t        regsSerial = 0;        ///< the frame the ring was last reset for
         /// The last slice written this frame, to bind again rather than write twice.
-        uint8_t         lastSlice[kSliceBytesLarge] = {};
+        uint8_t         lastSlice[kSliceBytesMax] = {};
         uint32_t        lastSliceBytes  = 0;
         VkDescriptorSet lastSliceSet    = VK_NULL_HANDLE;
         uint32_t        lastSliceOffset = 0;

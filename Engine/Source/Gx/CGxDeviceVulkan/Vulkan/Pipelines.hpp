@@ -46,8 +46,10 @@ namespace gxvk::vk::pipelines
     constexpr uint32_t kTextureStages = 16;
 
     /// The constant register files of the translated interface: pixel c0..c15, vertex c0..c63 or
-    /// c0..c255 by the vertex record's `vconst`.
+    /// c0..c255 by the vertex record's `vconst`. A pixel record with `pconst` above 16 (our own
+    /// custom.MPQ shaders) also reads c16..c(pconst-1), placed after a full 256-row vertex window.
     constexpr uint32_t kPixelRows       = 16;
+    constexpr uint32_t kPixelRowsMax    = 256;
     constexpr uint32_t kVertexRowsSmall = 64;
     constexpr uint32_t kVertexRowsLarge = 256;
 
@@ -150,6 +152,11 @@ namespace gxvk::vk::pipelines
         uint32_t     vertexRows = kVertexRowsSmall;
         const float* pixelRegs  = nullptr;
         float        misc[4]    = {};
+
+        /// The whole pixel register file (kPixelRowsMax rows) and the rows the pixel record reads
+        /// (its `pconst`): rows kPixelRows.. come from here when pixelRows > kPixelRows.
+        const float* pixelRegsFull = nullptr;
+        uint32_t     pixelRows     = kPixelRows;
 
         VkViewport viewport = {};
         VkRect2D   scissor  = {};

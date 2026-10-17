@@ -48,7 +48,7 @@ namespace
         VkDescriptorBufferInfo info = {};
         info.buffer = b.handle;
         info.offset = 0;
-        info.range  = kSliceBytesLarge;
+        info.range  = kSliceBytesMax;
         VkWriteDescriptorSet write = {};
         write.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         write.dstSet          = set;
@@ -69,7 +69,8 @@ namespace gxvk::vk::pipelines::detail
 {
     /**
      * One uniform slice for a draw of the translated family: p[16] from the pixel register file,
-     * misc, then v[rows] from the vertex register file, written at the next aligned offset of the
+     * misc, then v[rows] from the vertex register file (all 256 rows, then pixel rows 16..pconst-1,
+     * when the pixel record has pconst > 16), written at the next aligned offset of the
      * slot's ring (the ring is rewound when a new frame opens on the slot: its last frame has
      * completed). A slice identical to the one written just before is bound again rather than
      * written.
@@ -82,8 +83,10 @@ namespace gxvk::vk::pipelines::detail
     {
         if (slot >= frame::kFramesInFlight || !draw.vertexRegs || !draw.pixelRegs) return false;
         SlotSets& ss = s.slots[slot];
-        const uint32_t rows  = draw.vertexRows == kVertexRowsLarge ? kVertexRowsLarge : kVertexRowsSmall;
-        const uint32_t bytes = kSliceHeadBytes + rows * 16;
+        const uint32_t extRows = draw.pixelRegsFull && draw.pixelRows > kPixelRows
+            ? (draw.pixelRows < kPixelRowsMax ? draw.pixelRows : kPixelRowsMax) - kPixelRows : 0;
+        const uint32_t rows  = (extRows || draw.vertexRows == kVertexRowsLarge) ? kVertexRowsLarge : kVertexRowsSmall;
+        const uint32_t bytes = kSliceHeadBytes + rows * 16 + extRows * 16;
 
         if (ss.regsSerial != serial)
         {
@@ -94,10 +97,11 @@ namespace gxvk::vk::pipelines::detail
             ss.lastSliceSet   = VK_NULL_HANDLE;
         }
 
-        uint8_t slice[kSliceBytesLarge];
+        uint8_t slice[kSliceBytesMax];
         std::memcpy(slice, draw.pixelRegs, kPixelRows * 16);
         std::memcpy(slice + kPixelRows * 16, draw.misc, 16);
         std::memcpy(slice + kSliceHeadBytes, draw.vertexRegs, rows * 16);
+        if (extRows) std::memcpy(slice + kSliceBytesLarge, draw.pixelRegsFull + kPixelRows * 4, extRows * 16);
 
         if (ss.lastSliceSet != VK_NULL_HANDLE && ss.lastSliceBytes == bytes && std::memcmp(ss.lastSlice, slice, bytes) == 0)
         {
@@ -108,14 +112,14 @@ namespace gxvk::vk::pipelines::detail
         }
 
         // The slice at the next aligned offset of the current chunk; the next chunk when it does
-        // not fit (the descriptor's range must stay inside the buffer, so the larger class bounds
+        // not fit (the descriptor's range must stay inside the buffer, so kSliceBytesMax bounds
         // the fit whatever the slice's own size).
         while (true)
         {
             if (ss.regsUsed > 0)
             {
                 const uint32_t at = (ss.regsCursor + s.regsAlign - 1) / s.regsAlign * s.regsAlign;
-                if (at + kSliceBytesLarge <= kRegsChunkBytes)
+                if (at + kSliceBytesMax <= kRegsChunkBytes)
                 {
                     memory::Buffer& b = ss.regs[ss.regsUsed - 1];
                     std::memcpy(static_cast<uint8_t*>(b.block.mapped) + at, slice, bytes);

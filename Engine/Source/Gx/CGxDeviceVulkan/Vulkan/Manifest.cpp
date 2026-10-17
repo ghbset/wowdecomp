@@ -163,7 +163,7 @@ namespace
             else if (std::strncmp(t[i], "pconst=", 7) == 0)
             {
                 const long p = std::strtol(t[i] + 7, nullptr, 10);
-                if (p <= 0 || p > 16) return false;
+                if (p < 16 || p > 256) return false;
                 out.pconst = static_cast<uint16_t>(p);
                 haveP      = true;
             }
