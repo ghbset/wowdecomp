@@ -317,10 +317,13 @@ out   = lerp(fogColour, c, fog)        fog = min(pow(max(viewZ * c12.x + c12.y, 
 and on the dissolve: a hash of a 16 x 16 cell grid in the card's own uv (plus a per-placement seed) against
 `saturate(viewZ * c9.x + c9.y)`. The pattern is fixed to the card, never to the screen or a mip, so it does not
 crawl while moving. The card is whole where its model starts to fade (`s_fadeDistMin[c]` - 24 yd, or farZ - 35,
-times the cosine of the half horizontal FOV), coming in over max(20 yd, 10%) before that. Until the model is surely
-gone (fade end + 47 yd, `c9.z`) the card stands **behind** its tree: pushed back half its side along the view ray
-and scaled about the camera (same pixels), eased out over 20 yd, so the tree hides it and it fills the tree's holes
-as the tree fades; no depth fight with the model.
+times the cosine of the half horizontal FOV), coming in over max(20 yd, 10%) before that, under the still-opaque
+tree. It stands exactly where its tree stands (origin, turn, scale, bottom). As the stock alpha fade then takes the
+tree from 1 to 0 the tree blends over its own opaque picture: tree x a + card x (1 - a), an exact crossfade where
+the card covers, with no gap, no double darkening and no blended pass to order against the sky. The ground tint and
+baked shadow ramp in over 300 yd past the tree's fade end (`c9.z`/`c9.w`), so there is no colour jump at the swap.
+(foliage2 pushed the card half its side back behind its tree; terrain beyond the tree then hid the card's lower
+half: the "half trees" of 2026.10.17-foliage2.)
 
 **The flicker (2026.10.17-fartex).** Two causes. (1) Cards: each block's quads were rebuilt facing the camera
 whenever it moved a quarter of the block's distance (37 yd near the camera), snapping every card's turn and its
@@ -329,7 +332,8 @@ the dissolve pattern changed as the mip did. (2) Real WMOs and doodads (not crea
 `OcclusionCull` (d2605ac) hid objects on 1-3 frame old query answers measured from a different camera position; a
 near occluder's edge sweeps far objects by far more than any box padding, so objects at every silhouette blinked
 out while moving. An "occluded" answer now holds only while the camera stays within 0.05 yd of where its query was
-drawn (`kAnswerMoveSq`), so culling works when standing still and is stock while moving.
+drawn (`kAnswerMoveSq`). That did not cure it (foliage2), so `occlusionCulling` now defaults to 0 (foliage3);
+the real cause is still open (suspects: the Vulkan query begin/reset path, `Queries.cpp`).
 
 **Draws and cost.** One draw per visible block, chunk and class present, per pass: typically 5-25 a frame, plus
 one 5-register constant upload a block; no buffer writes except a rebuild. Memory: atlases 33.6 MB as a CPU copy

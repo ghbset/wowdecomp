@@ -1691,7 +1691,8 @@ void FarField::RenderFoliage(bool horizon) {
     // Where each size class's model starts to fade (or farclip, past which no doodad is drawn), less the chunk
     // slack (the stock cull goes by the chunk's distance) and measured as view depth at the screen's edge (the
     // shader fades by view depth, the game by distance): the card is whole there, and comes in over one band.
-    // Until the model is surely gone (its fade's end plus a chunk's diagonal) the card stands behind it.
+    // The card is whole before its tree starts the stock alpha fade, and opaque, so the fading tree blends over its
+    // own picture: tree x a + card x (1 - a), an exact crossfade where the card covers, with no gap or darkening.
     const C44Matrix& proj = g_theGxDevicePtr->m_projNative;
     const float tanX = proj.a0 != 0.0f ? 1.0f / fabsf(proj.a0) : 1.0f;
     const float cosEdge = 1.0f / sqrtf(1.0f + tanX * tanX);
@@ -1705,13 +1706,13 @@ void FarField::RenderFoliage(bool horizon) {
         fadeFrom[c] = whole - band;
         fade[c].x = 1.0f / band;
         fade[c].y = -fadeFrom[c] / band;
-        fade[c].z = std::min(CWorldScene::s_fadeDistMin[c] + CWorldScene::s_fadeRangeDefault[c], farZ) + 47.0f;
-        fade[c].w = 1.0f / 20.0f;
+        fade[c].z = 1.0f / 300.0f;   // tint ramp
+        fade[c].w = std::min(CWorldScene::s_fadeDistMin[c] + CWorldScene::s_fadeRangeDefault[c], farZ);
     }
 
     g_theGxDevicePtr->RsPush();
     GxRsSet(GxRs_Culling, 0);
-    GxRsSet(GxRs_BlendingMode, GxBlend_Opaque);  // cut out in the shader (clip), on every backend alike
+    GxRsSet(GxRs_BlendingMode, GxBlend_Alpha);   // crossfade opacity with near trees
     GxRsSet(GxRs_DepthWrite, 1);
     GxRsSet(GxRs_DepthTest, 3);
     GxRsSet(GxRs_Lighting, 0);

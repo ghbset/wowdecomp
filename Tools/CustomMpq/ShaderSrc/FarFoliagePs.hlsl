@@ -14,15 +14,15 @@ float4 main(float4 tint : COLOR0, float4 sun : COLOR1, float4 uv : TEXCOORD0, fl
     float4 alb = lerp(tex2D(sAlb, uv.xy), tex2D(sAlb, uv.zw), aux.z);
     float3 n   = lerp(tex2D(sNrm, uv.xy).rgb, tex2D(sNrm, uv.zw).rgb, aux.z) * 2.0 - 1.0;
 
-    float2 cell = floor(aux.xy);
-    float3 h3 = frac(float3(cell.x, cell.y, cell.x) * 0.1031);
-    h3 += dot(h3, h3.yzx + 33.33);
-    float h = frac((h3.x + h3.y) * h3.z);
-    clip(min(alb.a - 0.5, aux.w - h));
+    // Coverage cutout only; fade crossfade handled via opacity blending
+    clip(alb.a - 0.5);
 
     float ndl = saturate(dot(normalize(n), sun.xyz * 2.0 - 1.0));
     float3 light = min(cAmb.rgb + cDif.rgb * ndl, 1.0);
-    float3 ground = lerp(float3(1.0, 1.0, 1.0), tint.rgb * 2.0, cLook.x) * lerp(cLook.y, 1.0, tint.a);
+    // Ground tint and baked shadow ramp in past the hand-over (sun.w), so the swap from the real tree has no jump.
+    float3 ground = lerp(float3(1.0, 1.0, 1.0), lerp(float3(1.0, 1.0, 1.0), tint.rgb * 2.0, cLook.x) * lerp(cLook.y, 1.0, tint.a), sun.w);
     float3 c = alb.rgb * ground * light;
-    return float4(lerp(cFogCol.rgb, c, fog), 1.0);
+    // ponytail: crossfade opacity with near tree by fade factor (1 = far opaque, 0 = near transparent)
+    float outAlpha = (1.0 - aux.w);
+    return float4(lerp(cFogCol.rgb, c, fog), outAlpha);
 }

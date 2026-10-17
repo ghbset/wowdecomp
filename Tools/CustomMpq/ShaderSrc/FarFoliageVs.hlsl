@@ -10,8 +10,8 @@
 row_major float4x4 cWorldView : register(c0);
 row_major float4x4 cProj      : register(c4);
 float4 cCam   : register(c8);   // xyz: the camera in block coords
-float4 cFade  : register(c9);   // x, y: fade = saturate(viewZ * x + y); z: view depth out to which the model
-                                // may still be drawn (the card stands behind it until there); w: 1 / ease band
+float4 cFade  : register(c9);   // x, y: fade = saturate(viewZ * x + y); z: 1 / ground-tint ramp, w: view depth
+                                // where the tint ramp starts (the hand-over: no tint jump against the real tree)
 float4 cCard  : register(c10);  // x, y: a view's width in uv (64 px, 128 px pictures)
 float4 cFog   : register(c12);
 float4 cSun   : register(c24);  // view space, toward the sun
@@ -63,12 +63,9 @@ VsOut main(float3 base : POSITION, float3 n : NORMAL, float4 col : COLOR0, float
     float v   = slot.y + (1.0 - sy) * vw;
     o.uv = float4(slot.x + k0 * vw + u, v, slot.x + k1 * vw + u, v);
 
-    // While the model may still be drawn the card stands behind it along the view ray, scaled about the camera
-    // so it covers the same pixels: the tree hides it, it fills the tree's holes as the tree fades.
+    // The card stands exactly where its tree stands (origin, turn, scale, bottom): whole before the tree starts
+    // its alpha fade, so the fading tree blends over its own picture (tree x a + card x (1 - a)).
     float zBase = mul(float4(base, 1.0), cWorldView).z;
-    float dist  = length(toCam);
-    float back  = 0.5 * side * saturate((cFade.z - zBase) * cFade.w);
-    p = cCam.xyz + (p - cCam.xyz) * (1.0 + back / max(dist, 1.0));
 
     float4 view = mul(float4(p, 1.0), cWorldView);
     o.pos = mul(view, cProj);
@@ -77,7 +74,7 @@ VsOut main(float3 base : POSITION, float3 n : NORMAL, float4 col : COLOR0, float
     // Sun into the card's frame: world = rows of the view rotation dotted with the view-space vector.
     float3 sunW = mul((float3x3)cWorldView, cSun.xyz);
     float3 sunC = float3(dot(sunW, right), sunW.z, dot(sunW.xy, flat));
-    o.sun  = float4(sunC * 0.5 + 0.5, 1.0);
+    o.sun  = float4(sunC * 0.5 + 0.5, saturate((zBase - cFade.w) * cFade.z));
     o.tint = col;
     float seed = floor(frac(dot(base.xy, float2(0.1373, 0.2719))) * 97.0);
     o.aux = float4((sx + 0.5) * 16.0 + seed * 16.0, (1.0 - sy) * 16.0, f, saturate(zBase * cFade.x + cFade.y));
