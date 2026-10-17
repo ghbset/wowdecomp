@@ -39,6 +39,9 @@ const DXGI_FORMAT CGxDeviceD3d11::s_GxFormatToDxgiColor[CGxFormat::Formats_Last]
     DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM
 };
 
+// DECOMP: OMSetDepthStencilState's stencil ref. Not a member: wxl reads fixed offsets of the device (x86 +0x397C).
+static UINT s_stencilRef = 0;
+
 // Depth formats as { texture (typeless), DSV, SRV }. Index = CGxFormat::Format (D16, D24X8, D24S8, D32 at 4..7).
 const DXGI_FORMAT CGxDeviceD3d11::s_GxFormatToDxgiDepth[CGxFormat::Formats_Last][3] = {
     { DXGI_FORMAT_R24G8_TYPELESS, DXGI_FORMAT_D24_UNORM_S8_UINT, DXGI_FORMAT_R24_UNORM_X8_TYPELESS },
@@ -2969,7 +2972,7 @@ void CGxDeviceD3d11::IRsSendToHw(EGxRenderState which) {
             this->m_dsDesc.StencilWriteMask = on ? static_cast<UINT8>(rs[GxRs_StencilWriteMask].m_value.m_data.u[0]) : 0xFF;
             this->m_dsDesc.FrontFace = face;
             this->m_dsDesc.BackFace = face;
-            this->m_stencilRef = on ? (rs[GxRs_StencilRef].m_value.m_data.u[0] & 0xFF) : 0;
+            s_stencilRef = on ? (rs[GxRs_StencilRef].m_value.m_data.u[0] & 0xFF) : 0;
             this->m_stateDirty |= Dirty_Depth;
             break;
         }
@@ -3001,7 +3004,7 @@ void CGxDeviceD3d11::IStateSync() {
     }
 
     if (this->m_stateDirty & Dirty_Depth) {
-        this->m_d3dContext->OMSetDepthStencilState(static_cast<ID3D11DepthStencilState*>(this->IStateGet(State_Depth, &this->m_dsDesc, sizeof(this->m_dsDesc))), this->m_stencilRef);
+        this->m_d3dContext->OMSetDepthStencilState(static_cast<ID3D11DepthStencilState*>(this->IStateGet(State_Depth, &this->m_dsDesc, sizeof(this->m_dsDesc))), s_stencilRef);
     }
 
     this->m_stateDirty = 0;
