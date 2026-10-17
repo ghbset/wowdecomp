@@ -1,26 +1,14 @@
 // Not in 12340 (farTrees, farGrass): far trees and bushes as cards of their own models, and the ground-effect
 // grass culled by its size on screen. docs/FARFIELD_FOG.md "Far foliage".
 //
-// A port of wxl-farfield's far foliage (/root/wxl-farbush-wt/wxl-farfield/src/FarFoliage.cpp) and of the half
-// of it wxl-wraithhost bakes (wraithhost-lite/src/host/terrain/FarLod.cpp: which placements are trees and
-// bushes; Impostor.cpp: the pictures). wraithhost does not load in Wow32/Wow64, so both bakes run here:
-//
-// - Placements: every ADT the far-ground bake reads (MapLowDetail.cpp PumpBake) is handed to ScanTile, which
-//   takes its MDDF placements whose model is a tree or a bush by wraithhost's name rules and size limits.
-// - Pictures: each such model's skin-00 mesh and textures rasterised in software, orthographic, from 4 sides
-//   (every 90 deg about +z), bottom-aligned in a square of side max(height, 2 x reach), as wraithhost does it;
-//   one model a frame, into one 4096 x 2048 DXT5 atlas (64 px a view, 5 levels a view, 512 models).
-// - Cards: per 8 x 8-tile block, one camera-facing quad per placement showing the view nearest the camera,
-//   sized by the picture's frame x the placement's scale, in a vertex buffer rebuilt only when the camera has
-//   moved far enough for the facing to be off by more than ~15 deg (far blocks almost never).
-// - Drawing: the stock DetailDoodad shaders (the ground-effect grass's), which take world-space PNCT, light
-//   by the sun, fog with the same formula and the same DNInfo fog as the terrain (vertex c8 here, c12 there)
-//   and multiply the texture's alpha by a linear distance fade (vertex c9). Nothing new in custom.MPQ, and
-//   alpha test (GxRs_AlphaRef) works on all three backends because the grass already relies on it.
-// - Hand-over (feedback_sky_before_blended_far_passes): a card is drawn alpha-tested with depth write (a
-//   screen door, never blended), and is whole one band BEFORE the place its model starts to fade: per stock
-//   size class (CWorldView::s_fadeSize) where CWorldScene::s_fadeDistMin says, or farclip if nearer. The
-//   picture's alpha holds a per-texel noise above the key, so the distance fade dissolves the card.
+// Placements: each ADT the far-ground bake reads (MDDF, wraithhost's tree / bush name rules), with the ground's
+// MCCV tint and MCSH shadow under each. Pictures: the model's skin-00 mesh rasterised on the CPU from 8 sides
+// (45 deg apart), 4 x 4 supersampled, into two 4096 atlases (albedo + coverage DXT5, normals DXT1), 64 px a view
+// (128 for models 40 yd+ as placed), coverage-preserving mips; baked a view at a time under 3 ms a frame.
+// Cards: one static quad a placement per block; the FarFoliage vertex shader turns it to the camera and mixes
+// the two nearest views per pixel, so nothing is rebuilt as the camera moves (the old per-rebuild snap of
+// every card's view and turn was the "flicker when moving"). Lit from the baked normals with the terrain's
+// sun, ambient and fog (FarField::TerrainConstants), dissolved by a card-anchored hash at the hand-over.
 #include "MapLowDetail.h"
 #include <algorithm>
 #include <cmath>
@@ -33,6 +21,10 @@
 #include "Engine/Source/Storm/H/storm.h"
 #include "Engine/Source/Base/Handle.h"
 #include "Engine/Source/ConsoleBase/ConsoleVar.h"
+#include "Engine/Source/ConsoleBase/IConsole.h"
+#include "Engine/Source/Os/TimeManager.h"
+#include "WoW/Source/WorldClient/DayNight__DNInfo.h"
+#include "WoW/Source/WorldClient/MapRenderChunk.h"
 #include "Engine/Source/ConsoleBase/Types.h"
 #include "Engine/Source/Gx/CGxBuf.h"
 #include "Engine/Source/Gx/CGxMatrixStack.h"
@@ -57,20 +49,23 @@ namespace {
 
 constexpr float kOrigin = 17066.666f;
 constexpr float kTileYd = 533.33331f;
-constexpr uint32_t kViewPx = 64;      // wraithhost impostor::kPx
-constexpr uint32_t kViewLevels = 5;   // 64 .. 4 px
-constexpr uint32_t kViews = 4;        // every 90 deg
-constexpr uint32_t kRaster = kViewPx * 2;
-constexpr uint32_t kAtlasW = 4096;
-constexpr uint32_t kAtlasH = 2048;
-constexpr uint32_t kCols = kAtlasW / (kViewPx * kViews);   // 16 models a row
-constexpr uint32_t kMaxModels = kCols * (kAtlasH / kViewPx);  // 512 (wraithhost kImpMax)
-constexpr uint32_t kAtlasLevels = 10;  // 4096 x 2048 .. 8 x 4: the DXT chain ITexWHDStartEnd asks for
+constexpr uint32_t kViews = 8;           // every 45 deg; the two nearest are mixed per pixel (wxl-farfield)
+constexpr uint32_t kCellPx = 64;         // a view of a small model's picture; a big model's is 128 (2 x 2 cells)
+constexpr uint32_t kSuper = 4;           // raster samples a picture pixel, each way (antialiased edges, filtered texels)
+constexpr uint32_t kViewLevels = 5;      // per view: 64..4 / 128..8 px; the atlas levels past that from kSmallFrom
+constexpr uint32_t kAtlasPx = 4096;      // two square atlases: albedo + coverage (DXT5), normals (DXT1)
+constexpr uint32_t kCols = kAtlasPx / (kCellPx * kViews);  // 8 cells a row (a cell = one small model's 8 views)
+constexpr uint32_t kRows = kAtlasPx / kCellPx;             // 64 rows: 512 small models, or 128 big ones
+constexpr uint32_t kAtlasLevels = 11;    // 4096 .. 4: the DXT chain ITexWHDStartEnd asks for
+constexpr uint32_t kSmallFrom = 4;       // the atlas level kept as floats; levels 5..10 are box-filtered from it
+constexpr float kBigYards = 40.0f;       // header-box frame x the largest placed scale: 128 px views from here
+constexpr uint32_t kBakeMs = 3;          // picture bake budget a frame (main thread, a view at a time)
 constexpr uint32_t kChunkCards = 16384;  // 65536 vertices: 16-bit indices
 constexpr float kTreeMinHeight = 6.0f;   // wraithhost FarLod.hpp: yards, as placed
 constexpr float kBushMinHeight = 1.5f;
 constexpr float kBushCover = 0.95f;      // a bush needs a texture cut out somewhere (leaves), not a solid prop
-constexpr uint8_t kAlphaKey = 128;       // GxRs_AlphaRef; opaque texels hold 136..255 (noise), the rest 0
+constexpr float kTintStrength = 0.5f;    // how much of the ground's vertex colour (MCCV) a card takes
+constexpr float kShadowLevel = 0.7f;     // brightness in the ground's baked shadow (the terrain's 0.7 + 0.3 x lit)
 
 uint32_t Rd32(const uint8_t* p) {
     uint32_t v;
@@ -119,6 +114,11 @@ CVar* FarGrassMinPixelsCVar() {
     return s_cvar;
 }
 
+CVar* FarFoliageStatsCVar() {
+    static CVar* s_cvar = CVar::Register("farTreesStats", "Engine option: print the far tree cards' counts, draws, atlas use, memory and bake time to the console every 2 seconds", 0x1, "0", nullptr, CATEGORY_DEBUG, false, nullptr, false);
+    return s_cvar;
+}
+
 // --- Which placements (wraithhost FarLod.cpp Builder::IsBushName / ModelInfo) ---
 
 bool Has(const std::string& key, const char* w) {
@@ -159,10 +159,13 @@ struct Model {
     std::string file;   // .m2
     bool tree = false;
     bool bush = false;
+    bool big = false;   // 128 px views (2 x 2 cells)
     float lo[3] = {};   // header box (model units)
     float hi[3] = {};
+    float maxScale = 0.0f;  // the largest placed scale seen
     uint8_t pic = Pic_None;
-    uint16_t slot = 0;
+    uint16_t cellCol = 0;
+    uint16_t cellRow = 0;
     float frame = 0.0f;   // the picture's side (model units)
     float bottom = 0.0f;  // model z at its bottom edge
 };
@@ -173,6 +176,7 @@ struct Placed {
     float scale;
     uint32_t model;
     uint8_t cls;   // stock size class (MapDoodadDef.cpp: largest side of the world box against s_fadeSize)
+    uint8_t tint[4] = { 127, 127, 127, 255 };  // the ground under it: MCCV b, g, r (127 = none), a = 255 lit / 0 in MCSH shadow
 };
 
 struct Chunk {
@@ -187,12 +191,40 @@ struct Chunk {
 struct Block {
     std::vector<Placed> placed;
     std::vector<Chunk> chunks;
-    float lo[2] = { 1e30f, 1e30f };
-    float hi[2] = { -1e30f, -1e30f };
-    C3Vector builtAt;
+    float lo[3] = { 1e30f, 1e30f, 1e30f };    // placements' box, card tops included (frustum test)
+    float hi[3] = { -1e30f, -1e30f, -1e30f };
     uint32_t builtGen = 0;   // s_fol.bakeGen at the build
     bool built = false;
     bool missing = false;    // some placement's picture was not baked yet at the build
+};
+
+struct Texture {
+    std::vector<uint8_t> rgba;
+    uint32_t w = 0;
+    uint32_t h = 0;
+};
+
+struct Layer {
+    uint32_t start, count, blend;
+    const Texture* tex;
+    float colour[4];
+};
+
+// One model's picture in progress, a view a step (PumpPictures).
+struct BakeJob {
+    uint32_t model = ~0u;
+    uint32_t view = 0;
+    std::vector<uint8_t> m;
+    std::vector<uint8_t> skin;
+    std::unordered_map<uint32_t, Texture> textures;
+    std::vector<Layer> layers;
+    const uint8_t* verts = nullptr;
+    const uint8_t* skinVerts = nullptr;
+    const uint8_t* indices = nullptr;
+    uint32_t nVert = 0, nSkinVert = 0, nIdx = 0;
+    float zLo = 0.0f, zHi = 0.0f, frame = 0.0f;
+    bool anyDrawn = false;
+    uint32_t ms = 0;
 };
 
 struct FolState {
@@ -201,25 +233,26 @@ struct FolState {
     std::vector<uint32_t> queue;   // models waiting for their picture, nearest tile's first
     std::unordered_set<uint32_t> uids;
     Block blocks[64];
-    uint32_t slots = 0;
+    bool cells[kCols * kRows] = {};
     uint32_t bakeGen = 1;
-    uint8_t* chain = nullptr;
-    uint32_t levelOffset[kAtlasLevels] = {};
-    std::vector<float> level4;     // the atlas at level 4 (256 x 128) as rgba, for levels 5..9
-    CTexture* atlas = nullptr;
+    uint8_t* chain[2] = {};        // 0: albedo + coverage DXT5, 1: normals DXT1, every level
+    uint32_t levelOffset[2][kAtlasLevels] = {};
+    std::vector<float> small[2];   // the atlases at level kSmallFrom (256 x 256) as rgba floats, for levels 5..10
+    CTexture* atlas[2] = {};
     CGxPool* indexPool = nullptr;
     CGxBuf* indexBuf = nullptr;
+    CGxShader* vs = nullptr;
+    CGxShader* ps = nullptr;
+    bool shadersTried = false;
+    BakeJob job;
+    uint32_t baked = 0;            // stats: pictures done, ms spent on them, draws last frame
+    uint32_t bakeMs = 0;
+    uint32_t draws = 0;
 };
 
 FolState s_fol;
 
-// --- Pictures (wraithhost Impostor.cpp) ---
-
-struct Texture {
-    std::vector<uint8_t> rgba;
-    uint32_t w = 0;
-    uint32_t h = 0;
-};
+// --- Pictures (wraithhost Impostor.cpp, at wxl-farfield's quality: 8 views, supersampled, normals) ---
 
 void From565(uint16_t v, int* c) {
     c[0] = (v >> 11) * 255 / 31;
@@ -448,16 +481,6 @@ void RasterTriangle(const float* sx, const float* sy, int w, int h, Fn&& fn) {
     }
 }
 
-// A texel's dissolve noise: opaque texels sit at 136..255, so the distance fade (alpha x fade against the key
-// 128) takes them away a few at a time instead of all at once.
-uint8_t NoiseAlpha(uint32_t x, uint32_t y, uint32_t level) {
-    uint32_t h = x * 73856093u ^ y * 19349663u ^ level * 83492791u;
-    h ^= h >> 13;
-    h *= 0x5bd1e995u;
-    h ^= h >> 15;
-    return static_cast<uint8_t>(136 + (h & 0xFFFF) * 119 / 0xFFFF);
-}
-
 void EncodeDxt5Alpha(const uint8_t* a, uint8_t* out) {
     uint8_t lo = 255, hi = 0;
 
@@ -512,8 +535,14 @@ void EncodeDxt5Alpha(const uint8_t* a, uint8_t* out) {
     }
 }
 
-// One DXT5 block of rgb + coverage (4 floats a pixel, 0..1) at (bx, by) of level l, alpha keyed with noise.
-void EncodeBlock(const float* px, uint32_t stride, uint32_t l, uint32_t x0, uint32_t y0) {
+uint8_t* BlockAt(uint32_t kind, uint32_t l, uint32_t x0, uint32_t y0) {
+    const uint32_t bytes = kind ? 8 : 16;
+    return s_fol.chain[kind] + s_fol.levelOffset[kind][l] + (size_t(y0 / 4) * ((kAtlasPx >> l) / 4) + x0 / 4) * bytes;
+}
+
+// One 4 x 4 block (4 floats a pixel) at (x0, y0) of level l: kind 0 rgb + coverage as DXT5, kind 1 a normal
+// (-1..1) as DXT1.
+void EncodeBlock(uint32_t kind, const float* px, uint32_t stride, uint32_t l, uint32_t x0, uint32_t y0) {
     float col[16][3];
     uint8_t a[16];
 
@@ -521,102 +550,119 @@ void EncodeBlock(const float* px, uint32_t stride, uint32_t l, uint32_t x0, uint
         const float* q = px + (size_t(k / 4) * stride + k % 4) * 4;
 
         for (int j = 0; j < 3; j++) {
-            col[k][j] = std::clamp(q[j], 0.0f, 1.0f) * 255.0f;
+            col[k][j] = std::clamp(kind ? q[j] * 0.5f + 0.5f : q[j], 0.0f, 1.0f) * 255.0f;
         }
 
-        a[k] = q[3] >= 0.5f ? NoiseAlpha(x0 + k % 4, y0 + k / 4, l) : 0;
+        a[k] = static_cast<uint8_t>(std::clamp(q[3], 0.0f, 1.0f) * 255.0f + 0.5f);
     }
 
-    uint8_t* out = s_fol.chain + s_fol.levelOffset[l] + (size_t(y0 / 4) * ((kAtlasW >> l) / 4) + x0 / 4) * 16;
-    EncodeDxt5Alpha(a, out);
-    FarField::EncodeDxt1Block(col, out + 8);
+    uint8_t* out = BlockAt(kind, l, x0, y0);
+
+    if (kind) {
+        FarField::EncodeDxt1Block(col, out);
+    } else {
+        EncodeDxt5Alpha(a, out);
+        FarField::EncodeDxt1Block(col, out + 8);
+    }
 }
 
 void AtlasUserFunc(EGxTexCommand command, uint32_t width, uint32_t height, uint32_t depth, uint32_t mipLevel, void* userArg, uint32_t& texelStrideInBytes, const void*& texels) {
-    if (command == GxTex_Latch && s_fol.chain && mipLevel < kAtlasLevels) {
-        texelStrideInBytes = (kAtlasW >> mipLevel) / 4 * 16;
-        texels = s_fol.chain + s_fol.levelOffset[mipLevel];
+    const uint32_t kind = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(userArg));
+
+    if (command == GxTex_Latch && kind < 2 && s_fol.chain[kind] && mipLevel < kAtlasLevels) {
+        texelStrideInBytes = (kAtlasPx >> mipLevel) / 4 * (kind ? 8 : 16);
+        texels = s_fol.chain[kind] + s_fol.levelOffset[kind][mipLevel];
     }
 }
 
-// Model m's 4 views into its atlas slot (Impostor.cpp Render, without the glow picture, the second texture of
-// two-texture batches and the normal map: the stock shader lights a card per vertex). False when nothing drew
-// or, for a bush, when no texture is cut out (a solid prop).
-bool RenderPicture(Model& model) {
-    std::vector<uint8_t> m;
+// Bilinear, wrapped (the M2's own sampling, near enough).
+void Sample(const Texture& t, float u, float v, float out[4]) {
+    u = u * t.w - 0.5f;
+    v = v * t.h - 0.5f;
+    const float fu = floorf(u), fv = floorf(v);
+    const float au = u - fu, av = v - fv;
+    const int32_t w = static_cast<int32_t>(t.w), h = static_cast<int32_t>(t.h);
+    const int32_t x0 = ((static_cast<int32_t>(fu) % w) + w) % w, y0 = ((static_cast<int32_t>(fv) % h) + h) % h;
+    const int32_t x1 = (x0 + 1) % w, y1 = (y0 + 1) % h;
+    const uint8_t* p00 = &t.rgba[(size_t(y0) * w + x0) * 4];
+    const uint8_t* p10 = &t.rgba[(size_t(y0) * w + x1) * 4];
+    const uint8_t* p01 = &t.rgba[(size_t(y1) * w + x0) * 4];
+    const uint8_t* p11 = &t.rgba[(size_t(y1) * w + x1) * 4];
+
+    for (int j = 0; j < 4; j++) {
+        const float top = p00[j] + (p10[j] - p00[j]) * au;
+        const float bot = p01[j] + (p11[j] - p01[j]) * au;
+        out[j] = (top + (bot - top) * av) / 255.0f;
+    }
+}
+
+// Model's M2, skin 00, textures and batches into job; false when it cannot be drawn or, for a bush, when no
+// texture is cut out (a solid prop).
+bool PrepareJob(const Model& model, BakeJob& job) {
+    std::vector<uint8_t>& m = job.m;
 
     if (!ReadAll(model.file.c_str(), m) || m.size() < 0xBC || memcmp(m.data(), "MD20", 4)) {
         return false;
     }
 
-    auto arr = [&](uint32_t at, uint32_t stride, uint32_t& n) -> const uint8_t* {
-        n = Rd32(&m[at]);
-        const uint32_t ofs = Rd32(&m[at + 4]);
+    auto arr = [&](const std::vector<uint8_t>& f, uint32_t at, uint32_t stride, uint32_t& n) -> const uint8_t* {
+        n = Rd32(&f[at]);
+        const uint32_t ofs = Rd32(&f[at + 4]);
 
-        if (!n || uint64_t(ofs) + uint64_t(n) * stride > m.size()) {
+        if (!n || uint64_t(ofs) + uint64_t(n) * stride > f.size()) {
             n = 0;
             return nullptr;
         }
 
-        return &m[ofs];
+        return &f[ofs];
     };
-    uint32_t nVert = 0, nTex = 0, nMat = 0, nLookup = 0;
-    const uint8_t* verts = arr(0x3C, 48, nVert);
-    const uint8_t* texs = arr(0x50, 16, nTex);
-    const uint8_t* mats = arr(0x70, 4, nMat);
-    const uint8_t* lookup = arr(0x80, 2, nLookup);
+    uint32_t nTex = 0, nMat = 0, nLookup = 0;
+    job.verts = arr(m, 0x3C, 48, job.nVert);
+    const uint8_t* texs = arr(m, 0x50, 16, nTex);
+    const uint8_t* mats = arr(m, 0x70, 4, nMat);
+    const uint8_t* lookup = arr(m, 0x80, 2, nLookup);
 
-    if (!verts) {
+    if (!job.verts) {
         return false;
     }
 
-    std::string skinName = model.file.substr(0, model.file.size() - 3) + "00.skin";
-    std::vector<uint8_t> skin;
+    const std::string skinName = model.file.substr(0, model.file.size() - 3) + "00.skin";
 
-    if (!ReadAll(skinName.c_str(), skin) || skin.size() < 0x30 || memcmp(skin.data(), "SKIN", 4)) {
+    if (!ReadAll(skinName.c_str(), job.skin) || job.skin.size() < 0x30 || memcmp(job.skin.data(), "SKIN", 4)) {
         return false;
     }
 
-    auto sarr = [&](uint32_t at, uint32_t stride, uint32_t& n) -> const uint8_t* {
-        n = Rd32(&skin[at]);
-        const uint32_t ofs = Rd32(&skin[at + 4]);
+    uint32_t nSub = 0, nBatch = 0;
+    job.skinVerts = arr(job.skin, 0x04, 2, job.nSkinVert);
+    job.indices = arr(job.skin, 0x0C, 2, job.nIdx);
+    const uint8_t* subs = arr(job.skin, 0x1C, 48, nSub);
+    const uint8_t* batches = arr(job.skin, 0x24, 24, nBatch);
 
-        if (!n || uint64_t(ofs) + uint64_t(n) * stride > skin.size()) {
-            n = 0;
-            return nullptr;
-        }
-
-        return &skin[ofs];
-    };
-    uint32_t nSkinVert = 0, nIdx = 0, nSub = 0, nBatch = 0;
-    const uint8_t* skinVerts = sarr(0x04, 2, nSkinVert);
-    const uint8_t* indices = sarr(0x0C, 2, nIdx);
-    const uint8_t* subs = sarr(0x1C, 48, nSub);
-    const uint8_t* batches = sarr(0x24, 24, nBatch);
-
-    if (!skinVerts || !indices || !subs || !batches) {
+    if (!job.skinVerts || !job.indices || !subs || !batches) {
         return false;
     }
 
     // The frame: tall enough for the model, wide enough for it turned any way about its axis.
     float zLo = 1e30f, zHi = -1e30f, reach = 0.0f;
 
-    for (uint32_t v = 0; v < nVert; v++) {
-        const uint8_t* p = verts + v * 48;
+    for (uint32_t v = 0; v < job.nVert; v++) {
+        const uint8_t* p = job.verts + v * 48;
         const float x = RdF(p), y = RdF(p + 4), z = RdF(p + 8);
         zLo = std::min(zLo, z);
         zHi = std::max(zHi, z);
         reach = std::max(reach, sqrtf(x * x + y * y));
     }
 
-    const float frame = std::max(zHi - zLo, 2.0f * reach);
+    job.zLo = zLo;
+    job.zHi = zHi;
+    job.frame = std::max(zHi - zLo, 2.0f * reach);
 
-    if (!(frame > 0.1f)) {
+    if (!(job.frame > 0.1f)) {
         return false;
     }
 
-    // Textures by lookup slot, decoded once, at most 256 px across; the least alpha coverage seen (bushes).
-    std::unordered_map<uint32_t, Texture> textures;
+    // Textures by lookup slot, decoded once at about the raster's density; the least alpha coverage seen (bushes).
+    const uint32_t maxTex = model.big ? 512 : 256;
     float leastCover = 1.0f;
     auto texture = [&](uint32_t combo) -> const Texture* {
         if (!lookup || combo >= nLookup) {
@@ -624,13 +670,13 @@ bool RenderPicture(Model& model) {
         }
 
         const uint32_t t = Rd16(lookup + combo * 2);
-        auto it = textures.find(t);
+        auto it = job.textures.find(t);
 
-        if (it != textures.end()) {
+        if (it != job.textures.end()) {
             return it->second.rgba.empty() ? nullptr : &it->second;
         }
 
-        Texture& tex = textures[t];
+        Texture& tex = job.textures[t];
 
         if (!texs || t >= nTex) {
             return nullptr;
@@ -653,11 +699,11 @@ bool RenderPicture(Model& model) {
         const uint32_t w0 = Rd32(&blp[12]);
         uint32_t level = 0;
 
-        while ((w0 >> level) > 256) {
+        while ((w0 >> level) > maxTex) {
             level++;
         }
 
-        if (!DecodeBlp(blp, tex, level)) {
+        if (!DecodeBlp(blp, tex, level) || !tex.w || !tex.h) {
             tex.rgba.clear();
             return nullptr;
         }
@@ -671,13 +717,6 @@ bool RenderPicture(Model& model) {
         leastCover = std::min(leastCover, float(covered) / float(tex.w * tex.h));
         return &tex;
     };
-
-    struct Layer {
-        uint32_t start, count, blend;
-        const Texture* tex;
-        float colour[4];
-    };
-    std::vector<Layer> layers;
 
     // Blend 0-2 into the picture; 3, 4 (additive glow) and 5, 6 (modulated shimmer) left out.
     for (uint32_t bi = 0; bi < nBatch; bi++) {
@@ -701,198 +740,229 @@ bool RenderPicture(Model& model) {
         l.blend = blend;
         l.tex = texture(combo);
         BatchColour(m, b, l.colour);
-        layers.push_back(l);
+        job.layers.push_back(l);
     }
 
-    if (model.bush && !model.tree && leastCover >= kBushCover) {
-        return false;
-    }
+    return !(model.bush && !model.tree && leastCover >= kBushCover);
+}
 
+// View `view` of job's model into its atlas cells: the M2 rasterised orthographically from the model's +x
+// turned view x 45 deg, kSuper x kSuper samples a pixel (textures bilinear, keyed at the game's own 224/255 for
+// blend 1, half for blend 2), normals in the view's frame (right, up, toward the camera) half the mesh's and
+// half a canopy dome's; then levels 0..4 with coverage-preserving alpha (each keeps level 0's cover at the 0.5
+// test), empty pixels filled from drawn neighbours so filtering never pulls in a dark rim.
+void BakeView(BakeJob& job, const Model& model, uint32_t view) {
     struct Pixel {
         float depth;
         float rgb[3];
-        bool set;
+        float n[3];
     };
-    std::vector<Pixel> px(size_t(kRaster) * kRaster);
-    bool anyDrawn = false;
-    const uint32_t slotX = (model.slot % kCols) * kViews * kViewPx;
-    const uint32_t slotY = (model.slot / kCols) * kViewPx;
+    const uint32_t px = model.big ? kCellPx * 2 : kCellPx;
+    const uint32_t raster = px * kSuper;
+    static std::vector<Pixel> ras;
+    ras.assign(size_t(raster) * raster, Pixel { -1e30f, { 0, 0, 0 }, { 0, 0, 0 } });
+    const float frame = job.frame, zLo = job.zLo, zHi = job.zHi;
+    const float ang = float(view) * (6.2831853f / kViews);
+    const float cx = cosf(ang), cy = sinf(ang);
 
-    for (uint32_t view = 0; view < kViews; view++) {
-        // Looking from direction c toward the model's axis; right = (-c.y, c.x), up = +z.
-        const float ang = float(view) * 1.5707963f;
-        const float cx = cosf(ang), cy = sinf(ang);
+    for (const Layer& L : job.layers) {
+        for (uint32_t i = 0; i + 2 < L.count && L.start + i + 2 < job.nIdx; i += 3) {
+            float sx[3], sy[3], sd[3], uv[3][2], nv[3][3];
+            bool ok = true;
 
-        for (Pixel& p : px) {
-            p = Pixel { -1e30f, { 0, 0, 0 }, false };
-        }
+            for (int k = 0; k < 3 && ok; k++) {
+                const uint32_t si = Rd16(job.indices + (L.start + i + k) * 2);
+                const uint32_t vi = si < job.nSkinVert ? Rd16(job.skinVerts + si * 2) : job.nVert;
 
-        for (const Layer& L : layers) {
-            for (uint32_t i = 0; i + 2 < L.count && L.start + i + 2 < nIdx; i += 3) {
-                float sx[3], sy[3], sd[3], uv[3][2];
-                bool ok = true;
-
-                for (int k = 0; k < 3 && ok; k++) {
-                    const uint32_t si = Rd16(indices + (L.start + i + k) * 2);
-                    const uint32_t vi = si < nSkinVert ? Rd16(skinVerts + si * 2) : nVert;
-
-                    if (vi >= nVert) {
-                        ok = false;
-                        break;
-                    }
-
-                    const uint8_t* v = verts + vi * 48;
-                    const float x = RdF(v), y = RdF(v + 4), z = RdF(v + 8);
-                    sx[k] = ((-cy * x + cx * y) / frame + 0.5f) * kRaster;
-                    sy[k] = (zHi - z) / frame * kRaster + (frame - (zHi - zLo)) / frame * kRaster;  // bottom-aligned
-                    sd[k] = cx * x + cy * y;
-                    uv[k][0] = RdF(v + 32);
-                    uv[k][1] = RdF(v + 36);
+                if (vi >= job.nVert) {
+                    ok = false;
+                    break;
                 }
 
-                if (!ok) {
+                const uint8_t* v = job.verts + vi * 48;
+                const float x = RdF(v), y = RdF(v + 4), z = RdF(v + 8);
+                const float nx = RdF(v + 20), ny = RdF(v + 24), nz = RdF(v + 28);
+                sx[k] = ((-cy * x + cx * y) / frame + 0.5f) * raster;
+                sy[k] = (zHi - z) / frame * raster + (frame - (zHi - zLo)) / frame * raster;  // bottom-aligned
+                sd[k] = cx * x + cy * y;
+                uv[k][0] = RdF(v + 32);
+                uv[k][1] = RdF(v + 36);
+                nv[k][0] = -cy * nx + cx * ny;
+                nv[k][1] = nz;
+                nv[k][2] = cx * nx + cy * ny;
+            }
+
+            if (!ok) {
+                continue;
+            }
+
+            RasterTriangle(sx, sy, int(raster), int(raster), [&](int x, int y, float w0, float w1, float w2) {
+                const float depth = w0 * sd[0] + w1 * sd[1] + w2 * sd[2];
+                Pixel& p = ras[size_t(y) * raster + x];
+
+                if (depth <= p.depth) {
+                    return;
+                }
+
+                float c[4] = { 0.35f, 0.3f, 0.2f, 1.0f };
+
+                if (L.tex) {
+                    Sample(*L.tex, w0 * uv[0][0] + w1 * uv[1][0] + w2 * uv[2][0], w0 * uv[0][1] + w1 * uv[1][1] + w2 * uv[2][1], c);
+
+                    if (L.blend == 0) {
+                        c[3] = 1.0f;
+                    }
+                }
+
+                // The game's own key: 224/255 for blend 1 (alpha-ref table 0x00AD8B7C), half for blend 2.
+                if (c[3] < (L.blend == 1 ? 224.0f / 255.0f : 0.5f)) {
+                    return;
+                }
+
+                float n[3];
+
+                for (int j = 0; j < 3; j++) {
+                    p.rgb[j] = c[j] * L.colour[j];
+                    n[j] = w0 * nv[0][j] + w1 * nv[1][j] + w2 * nv[2][j];
+                }
+
+                // Two-sided: a leaf seen from behind is lit from its side facing the camera.
+                const float s = n[2] < 0.0f ? -1.0f : 1.0f;
+
+                for (int j = 0; j < 3; j++) {
+                    p.n[j] = n[j] * s;
+                }
+
+                p.depth = depth;
+                job.anyDrawn = true;
+            });
+        }
+    }
+
+    // Down to px: coverage in alpha, colour and normal averaged over what drew.
+    const float domeY = 1.0f - 0.5f * (zHi - zLo) / frame;  // picture y (0 top) of the model's middle
+    const float domeR = std::max(0.5f * (zHi - zLo) / frame, 0.05f);
+    std::vector<float> lv(size_t(px) * px * 4, 0.0f), ln(size_t(px) * px * 4, 0.0f);
+
+    for (uint32_t y = 0; y < px; y++) {
+        for (uint32_t x = 0; x < px; x++) {
+            float acc[3] = {}, nacc[3] = {};
+            uint32_t n = 0;
+
+            for (uint32_t k = 0; k < kSuper * kSuper; k++) {
+                const Pixel& p = ras[size_t(y * kSuper + k / kSuper) * raster + x * kSuper + k % kSuper];
+
+                if (p.depth > -1e29f) {
+                    for (int j = 0; j < 3; j++) {
+                        acc[j] += p.rgb[j];
+                        nacc[j] += p.n[j];
+                    }
+
+                    n++;
+                }
+            }
+
+            float* o = &lv[(size_t(y) * px + x) * 4];
+            float* on = &ln[(size_t(y) * px + x) * 4];
+            o[3] = float(n) / float(kSuper * kSuper);
+
+            if (n) {
+                // Half the mesh's normal, half a dome over the model (a canopy reads round, not as flat leaves).
+                const float dx = ((x + 0.5f) / px - 0.5f) / domeR, dy = (domeY - (y + 0.5f) / px) / domeR;
+                const float dl = sqrtf(dx * dx + dy * dy + 0.36f);
+                const float ml = sqrtf(nacc[0] * nacc[0] + nacc[1] * nacc[1] + nacc[2] * nacc[2]);
+                const float mesh[3] = { ml > 0 ? nacc[0] / ml : 0.0f, ml > 0 ? nacc[1] / ml : 0.0f, ml > 0 ? nacc[2] / ml : 1.0f };
+                const float dome[3] = { dx / dl, dy / dl, 0.6f / dl };
+                float nn[3], len = 0.0f;
+
+                for (int j = 0; j < 3; j++) {
+                    o[j] = acc[j] / n;
+                    nn[j] = 0.5f * mesh[j] + 0.5f * dome[j];
+                    len += nn[j] * nn[j];
+                }
+
+                len = len > 0 ? 1.0f / sqrtf(len) : 0.0f;
+
+                for (int j = 0; j < 3; j++) {
+                    on[j] = nn[j] * len;
+                }
+            }
+        }
+    }
+
+    std::vector<uint8_t> has(size_t(px) * px);
+
+    for (size_t k = 0; k < has.size(); k++) {
+        has[k] = lv[k * 4 + 3] > 0.0f;
+    }
+
+    for (int pass = 0; pass < 8; pass++) {
+        std::vector<float> next = lv, nextN = ln;
+        std::vector<uint8_t> nextHas = has;
+
+        for (uint32_t y = 0; y < px; y++) {
+            for (uint32_t x = 0; x < px; x++) {
+                if (has[y * px + x]) {
                     continue;
                 }
 
-                RasterTriangle(sx, sy, int(kRaster), int(kRaster), [&](int x, int y, float w0, float w1, float w2) {
-                    const float depth = w0 * sd[0] + w1 * sd[1] + w2 * sd[2];
-                    Pixel& p = px[size_t(y) * kRaster + x];
-
-                    if (depth <= p.depth) {
-                        return;
-                    }
-
-                    float rgb[3] = { 0.35f, 0.3f, 0.2f }, a = 1.0f;
-
-                    if (L.tex) {
-                        float u = w0 * uv[0][0] + w1 * uv[1][0] + w2 * uv[2][0];
-                        float vv = w0 * uv[0][1] + w1 * uv[1][1] + w2 * uv[2][1];
-                        u -= floorf(u);
-                        vv -= floorf(vv);
-                        const Texture* t = L.tex;
-                        const uint8_t* q = &t->rgba[(size_t(std::min(uint32_t(vv * t->h), t->h - 1)) * t->w + std::min(uint32_t(u * t->w), t->w - 1)) * 4];
-
-                        for (int j = 0; j < 3; j++) {
-                            rgb[j] = q[j] / 255.0f;
-                        }
-
-                        a = L.blend == 0 ? 1.0f : q[3] / 255.0f;
-                    }
-
-                    // The game's own key: 224/255 for blend 1 (alpha-ref table 0x00AD8B7C), half for blend 2.
-                    if (a < (L.blend == 1 ? 224.0f / 255.0f : 0.5f)) {
-                        return;
-                    }
-
-                    for (int j = 0; j < 3; j++) {
-                        p.rgb[j] = rgb[j] * L.colour[j];
-                    }
-
-                    p.depth = depth;
-                    p.set = true;
-                    anyDrawn = true;
-                });
-            }
-        }
-
-        // Down to 64 px: coverage in alpha, colour averaged over what drew; then the empty pixels take their
-        // drawn neighbours' colour, so filtering never pulls a dark rim into the edge.
-        std::vector<float> lv(size_t(kViewPx) * kViewPx * 4, 0.0f);
-
-        for (uint32_t y = 0; y < kViewPx; y++) {
-            for (uint32_t x = 0; x < kViewPx; x++) {
-                float acc[3] = {};
+                float acc[3] = {}, nacc[3] = {};
                 int n = 0;
 
-                for (int k = 0; k < 4; k++) {
-                    const Pixel& p = px[size_t(y * 2 + k / 2) * kRaster + x * 2 + k % 2];
+                for (int dy = -1; dy <= 1; dy++) {
+                    for (int dx = -1; dx <= 1; dx++) {
+                        const int xx = int(x) + dx, yy = int(y) + dy;
 
-                    if (p.set) {
+                        if (xx < 0 || yy < 0 || xx >= int(px) || yy >= int(px) || !has[yy * px + xx]) {
+                            continue;
+                        }
+
                         for (int j = 0; j < 3; j++) {
-                            acc[j] += p.rgb[j];
+                            acc[j] += lv[(size_t(yy) * px + xx) * 4 + j];
+                            nacc[j] += ln[(size_t(yy) * px + xx) * 4 + j];
                         }
 
                         n++;
                     }
                 }
 
-                float* o = &lv[(size_t(y) * kViewPx + x) * 4];
-                o[3] = n / 4.0f;
+                if (n) {
+                    for (int j = 0; j < 3; j++) {
+                        next[(size_t(y) * px + x) * 4 + j] = acc[j] / n;
+                        nextN[(size_t(y) * px + x) * 4 + j] = nacc[j] / n;
+                    }
 
-                for (int j = 0; n && j < 3; j++) {
-                    o[j] = acc[j] / n;
+                    nextHas[y * px + x] = 1;
                 }
             }
         }
 
-        std::vector<bool> has(size_t(kViewPx) * kViewPx);
+        lv.swap(next);
+        ln.swap(nextN);
+        has.swap(nextHas);
+    }
 
-        for (size_t k = 0; k < has.size(); k++) {
-            has[k] = lv[k * 4 + 3] > 0.0f;
-        }
+    float coverage0 = 0.0f;
 
-        for (int pass = 0; pass < 8; pass++) {
-            std::vector<float> next = lv;
-            std::vector<bool> nextHas = has;
+    for (size_t k = 0; k < size_t(px) * px; k++) {
+        coverage0 += lv[k * 4 + 3] >= 0.5f;
+    }
 
-            for (uint32_t y = 0; y < kViewPx; y++) {
-                for (uint32_t x = 0; x < kViewPx; x++) {
-                    if (has[y * kViewPx + x]) {
-                        continue;
-                    }
+    coverage0 /= float(px * px);
+    const uint32_t slotX = model.cellCol * kCellPx * kViews, slotY = model.cellRow * kCellPx;
+    uint32_t size = px;
 
-                    float acc[3] = {};
-                    int n = 0;
+    for (uint32_t l = 0; l < kViewLevels; l++) {
+        if (l) {
+            const uint32_t half = size / 2;
 
-                    for (int dy = -1; dy <= 1; dy++) {
-                        for (int dx = -1; dx <= 1; dx++) {
-                            const int xx = int(x) + dx, yy = int(y) + dy;
-
-                            if (xx < 0 || yy < 0 || xx >= int(kViewPx) || yy >= int(kViewPx) || !has[yy * kViewPx + xx]) {
-                                continue;
-                            }
-
-                            for (int j = 0; j < 3; j++) {
-                                acc[j] += lv[(size_t(yy) * kViewPx + xx) * 4 + j];
-                            }
-
-                            n++;
-                        }
-                    }
-
-                    if (n) {
-                        for (int j = 0; j < 3; j++) {
-                            next[(size_t(y) * kViewPx + x) * 4 + j] = acc[j] / n;
-                        }
-
-                        nextHas[y * kViewPx + x] = true;
-                    }
-                }
-            }
-
-            lv.swap(next);
-            has.swap(nextHas);
-        }
-
-        // Levels: box-filtered, alpha scaled so each keeps level 0's coverage (a far tree does not thin out).
-        float coverage0 = 0.0f;
-
-        for (size_t k = 0; k < size_t(kViewPx) * kViewPx; k++) {
-            coverage0 += lv[k * 4 + 3] >= 0.5f;
-        }
-
-        coverage0 /= float(kViewPx * kViewPx);
-        uint32_t size = kViewPx;
-
-        for (uint32_t l = 0; l < kViewLevels; l++) {
-            if (l) {
-                const uint32_t half = size / 2;
+            for (std::vector<float>* img : { &lv, &ln }) {
                 std::vector<float> down(size_t(half) * half * 4, 0.0f);
 
                 for (uint32_t y = 0; y < half; y++) {
                     for (uint32_t x = 0; x < half; x++) {
                         for (int k = 0; k < 4; k++) {
-                            const float* q = &lv[(size_t(y * 2 + k / 2) * size + x * 2 + k % 2) * 4];
+                            const float* q = &(*img)[(size_t(y * 2 + k / 2) * size + x * 2 + k % 2) * 4];
                             float* o = &down[(size_t(y) * half + x) * 4];
 
                             for (int j = 0; j < 4; j++) {
@@ -902,136 +972,233 @@ bool RenderPicture(Model& model) {
                     }
                 }
 
-                size = half;
-                lv.swap(down);
-                float lo = 0.5f, hi = 4.0f;
+                img->swap(down);
+            }
 
-                for (int it = 0; it < 12; it++) {
-                    const float s = 0.5f * (lo + hi);
-                    float c = 0.0f;
+            size = half;
+            // Alpha scaled so the level keeps level 0's coverage at the 0.5 test (a far tree does not thin out).
+            float lo = 0.5f, hi = 4.0f;
 
-                    for (size_t k = 0; k < size_t(size) * size; k++) {
-                        c += lv[k * 4 + 3] * s >= 0.5f;
-                    }
-
-                    if (c / float(size * size) < coverage0) {
-                        lo = s;
-                    } else {
-                        hi = s;
-                    }
-                }
+            for (int it = 0; it < 12; it++) {
+                const float s = 0.5f * (lo + hi);
+                float c = 0.0f;
 
                 for (size_t k = 0; k < size_t(size) * size; k++) {
-                    lv[k * 4 + 3] = std::min(1.0f, lv[k * 4 + 3] * hi);
+                    c += lv[k * 4 + 3] * s >= 0.5f;
+                }
+
+                if (c / float(size * size) < coverage0) {
+                    lo = s;
+                } else {
+                    hi = s;
                 }
             }
 
-            const uint32_t ox = (slotX + view * kViewPx) >> l;
-            const uint32_t oy = slotY >> l;
-
-            for (uint32_t by = 0; by < size / 4; by++) {
-                for (uint32_t bx = 0; bx < size / 4; bx++) {
-                    EncodeBlock(&lv[(size_t(by * 4) * size + bx * 4) * 4], size, l, ox + bx * 4, oy + by * 4);
-                }
+            for (size_t k = 0; k < size_t(size) * size; k++) {
+                lv[k * 4 + 3] = std::min(1.0f, lv[k * 4 + 3] * hi);
             }
+        }
 
-            if (l == kViewLevels - 1) {
-                for (uint32_t y = 0; y < size; y++) {
-                    memcpy(&s_fol.level4[(size_t(oy + y) * (kAtlasW >> 4) + ox) * 4], &lv[size_t(y) * size * 4], size * 4 * sizeof(float));
-                }
+        const uint32_t ox = (slotX + view * px) >> l;
+        const uint32_t oy = slotY >> l;
+
+        for (uint32_t by = 0; by < size / 4; by++) {
+            for (uint32_t bx = 0; bx < size / 4; bx++) {
+                EncodeBlock(0, &lv[(size_t(by * 4) * size + bx * 4) * 4], size, l, ox + bx * 4, oy + by * 4);
+                EncodeBlock(1, &ln[(size_t(by * 4) * size + bx * 4) * 4], size, l, ox + bx * 4, oy + by * 4);
+            }
+        }
+
+        if (l == kSmallFrom) {
+            for (uint32_t y = 0; y < size; y++) {
+                memcpy(&s_fol.small[0][(size_t(oy + y) * (kAtlasPx >> kSmallFrom) + ox) * 4], &lv[size_t(y) * size * 4], size * 4 * sizeof(float));
+                memcpy(&s_fol.small[1][(size_t(oy + y) * (kAtlasPx >> kSmallFrom) + ox) * 4], &ln[size_t(y) * size * 4], size * 4 * sizeof(float));
             }
         }
     }
-
-    model.frame = frame;
-    model.bottom = zLo;
-    return anyDrawn;
 }
 
-// Levels 5..9, where a texel spans views or models: box-filtered from level 4.
-void StoreSmallLevels() {
-    std::vector<float> cur = s_fol.level4;
-    uint32_t w = kAtlasW >> 4, h = kAtlasH >> 4;
+// Levels 5..10, where a texel spans views or models: box-filtered from level kSmallFrom, over the rows a model
+// at cell row `row` (`rows` tall) reaches.
+void StoreSmallLevels(uint32_t row, uint32_t rows) {
+    for (uint32_t kind = 0; kind < 2; kind++) {
+        std::vector<float> cur = s_fol.small[kind];
+        uint32_t w = kAtlasPx >> kSmallFrom;
 
-    for (uint32_t l = 5; l < kAtlasLevels; l++) {
-        std::vector<float> down(size_t(w / 2) * (h / 2) * 4, 0.0f);
+        for (uint32_t l = kSmallFrom + 1; l < kAtlasLevels; l++) {
+            const uint32_t half = w / 2;
+            std::vector<float> down(size_t(half) * half * 4, 0.0f);
 
-        for (uint32_t y = 0; y < h / 2; y++) {
-            for (uint32_t x = 0; x < w / 2; x++) {
-                for (int k = 0; k < 4; k++) {
-                    const float* q = &cur[(size_t(y * 2 + k / 2) * w + x * 2 + k % 2) * 4];
+            for (uint32_t y = 0; y < half; y++) {
+                for (uint32_t x = 0; x < half; x++) {
+                    for (int k = 0; k < 4; k++) {
+                        const float* q = &cur[(size_t(y * 2 + k / 2) * w + x * 2 + k % 2) * 4];
 
-                    for (int j = 0; j < 4; j++) {
-                        down[(size_t(y) * (w / 2) + x) * 4 + j] += q[j] * 0.25f;
+                        for (int j = 0; j < 4; j++) {
+                            down[(size_t(y) * half + x) * 4 + j] += q[j] * 0.25f;
+                        }
                     }
                 }
             }
-        }
 
-        w /= 2;
-        h /= 2;
-        cur.swap(down);
+            w = half;
+            cur.swap(down);
+            // The rows of 4 x 4 blocks this model's cells touch at this level.
+            const uint32_t y0 = ((row * kCellPx) >> l) & ~3u, y1 = std::min(w, ((((row + rows) * kCellPx) >> l) + 3) & ~3u);
+            std::vector<float> enc = cur;
 
-        for (uint32_t by = 0; by < h / 4; by++) {
-            for (uint32_t bx = 0; bx < w / 4; bx++) {
-                EncodeBlock(&cur[(size_t(by * 4) * w + bx * 4) * 4], w, l, bx * 4, by * 4);
+            if (!kind) {
+                // ponytail: a box-filtered alpha thins a far tree out; doubled here instead of a per-level cover fit
+                // (a model is a pixel or two at these levels).
+                for (size_t k = 3; k < enc.size(); k += 4) {
+                    enc[k] = std::min(1.0f, enc[k] * 2.0f);
+                }
+            }
+
+            for (uint32_t by = y0; by < std::max(y1, y0 + 4) && by < w; by += 4) {
+                for (uint32_t bx = 0; bx < w; bx += 4) {
+                    EncodeBlock(kind, &enc[(size_t(by) * w + bx) * 4], w, l, bx, by);
+                }
             }
         }
     }
 }
 
-// The next queued model's picture (one a frame: a few ms for a big tree).
+bool AllocCells(Model& model) {
+    const uint32_t n = model.big ? 2 : 1;
+
+    // Big models from the bottom up, small ones from the top down, so neither breaks the other's runs.
+    for (uint32_t i = 0; i + n <= kRows; i += n) {
+        const uint32_t r = model.big ? kRows - n - i : i;
+
+        for (uint32_t c = 0; c + n <= kCols; c += n) {
+            bool free = true;
+
+            for (uint32_t k = 0; k < n * n && free; k++) {
+                free = !s_fol.cells[(r + k / n) * kCols + c + k % n];
+            }
+
+            if (free) {
+                for (uint32_t k = 0; k < n * n; k++) {
+                    s_fol.cells[(r + k / n) * kCols + c + k % n] = true;
+                }
+
+                model.cellCol = static_cast<uint16_t>(c);
+                model.cellRow = static_cast<uint16_t>(r);
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+void FreeCells(const Model& model) {
+    const uint32_t n = model.big ? 2 : 1;
+
+    for (uint32_t k = 0; k < n * n; k++) {
+        s_fol.cells[(model.cellRow + k / n) * kCols + model.cellCol + k % n] = false;
+    }
+}
+
+void EnsureAtlases() {
+    if (s_fol.chain[0]) {
+        return;
+    }
+
+    for (uint32_t kind = 0; kind < 2; kind++) {
+        uint32_t size = 0;
+
+        for (uint32_t l = 0; l < kAtlasLevels; l++) {
+            s_fol.levelOffset[kind][l] = size;
+            size += (kAtlasPx >> l) * (kAtlasPx >> l) / (kind ? 2 : 1);  // DXT5 a byte a pixel, DXT1 half
+        }
+
+        s_fol.chain[kind] = new uint8_t[size]();
+        s_fol.small[kind].assign(size_t(kAtlasPx >> kSmallFrom) * (kAtlasPx >> kSmallFrom) * 4, 0.0f);
+        const EGxTexFormat format = kind ? GxTex_Dxt1 : GxTex_Dxt5;
+        s_fol.atlas[kind] = TextureCreate(kAtlasPx, kAtlasPx, format, format, CGxTexFlags(GxTex_LinearMipLinear, 0, 0, 0, 0, 0, 1), reinterpret_cast<void*>(uintptr_t(kind)), AtlasUserFunc, kind ? "FarFoliageNormals" : "FarFoliageAtlas", 0);
+    }
+}
+
+// Queued pictures, a view at a time, under kBakeMs a frame (a big tree's view at 512 px raster is a few ms).
 void PumpPictures() {
-    while (!s_fol.queue.empty()) {
-        const uint32_t id = s_fol.queue.front();
-        s_fol.queue.erase(s_fol.queue.begin());
-        Model& model = s_fol.models[id];
+    const uint32_t start = OsGetAsyncTimeMs();
 
-        if (s_fol.slots >= kMaxModels) {
-            model.pic = Pic_Failed;  // ponytail: the atlas is full and the model goes without, as wraithhost's kImpMax
-            continue;
-        }
+    while (OsGetAsyncTimeMs() - start < kBakeMs) {
+        BakeJob& job = s_fol.job;
 
-        const bool fresh = !s_fol.chain;
-
-        if (fresh) {
-            uint32_t size = 0;
-
-            for (uint32_t l = 0; l < kAtlasLevels; l++) {
-                s_fol.levelOffset[l] = size;
-                size += (kAtlasW >> l) * (kAtlasH >> l);  // DXT5: a byte a pixel
+        if (job.model == ~0u) {
+            if (s_fol.queue.empty()) {
+                return;
             }
 
-            s_fol.chain = new uint8_t[size]();
-            s_fol.level4.assign(size_t(kAtlasW >> 4) * (kAtlasH >> 4) * 4, 0.0f);
-            s_fol.atlas = TextureCreate(kAtlasW, kAtlasH, GxTex_Dxt5, GxTex_Dxt5, CGxTexFlags(GxTex_LinearMipLinear, 0, 0, 0, 0, 0, 1), nullptr, AtlasUserFunc, "FarFoliageAtlas", 0);
-        }
+            const uint32_t id = s_fol.queue.front();
+            s_fol.queue.erase(s_fol.queue.begin());
+            Model& model = s_fol.models[id];
+            const float frameEst = std::max(model.hi[2] - model.lo[2], 2.0f * std::max({ fabsf(model.lo[0]), fabsf(model.hi[0]), fabsf(model.lo[1]), fabsf(model.hi[1]) }));
+            model.big = frameEst * model.maxScale >= kBigYards;
 
-        model.slot = static_cast<uint16_t>(s_fol.slots);
+            // ponytail: the atlas full, the model goes without, as wraithhost's kImpMax (512 small / 128 big).
+            if (!AllocCells(model)) {
+                model.pic = Pic_Failed;
+                continue;
+            }
 
-        if (!RenderPicture(model)) {
-            model.pic = Pic_Failed;
+            EnsureAtlases();
+            const uint32_t t0 = OsGetAsyncTimeMs();
+
+            if (!PrepareJob(model, job)) {
+                FreeCells(model);
+                model.pic = Pic_Failed;
+                job = BakeJob {};
+                continue;
+            }
+
+            job.model = id;
+            job.ms = OsGetAsyncTimeMs() - t0;
             continue;
         }
 
-        s_fol.slots++;
-        model.pic = Pic_Baked;
-        s_fol.bakeGen++;
-        StoreSmallLevels();
+        Model& model = s_fol.models[job.model];
+        const uint32_t t0 = OsGetAsyncTimeMs();
+        BakeView(job, model, job.view++);
+        job.ms += OsGetAsyncTimeMs() - t0;
 
-        if (CGxTex* gxTex = TextureGetGxTex(s_fol.atlas, 0, nullptr)) {
-            const uint32_t x = (model.slot % kCols) * kViews * kViewPx;
-            const uint32_t y = (model.slot / kCols) * kViewPx;
-            // ponytail: levels 5..9 change across the whole atlas width only where this slot's row is; the rect
-            // update reaches them through the slot's own rectangle.
-            GxTexUpdate(gxTex, fresh ? 0 : x, fresh ? 0 : y, fresh ? kAtlasW : x + kViews * kViewPx, fresh ? kAtlasH : y + kViewPx, 1);
+        if (job.view < kViews) {
+            continue;
         }
 
-        break;
+        if (!job.anyDrawn) {
+            FreeCells(model);
+            model.pic = Pic_Failed;
+        } else {
+            const uint32_t n = model.big ? 2 : 1;
+            const uint32_t t1 = OsGetAsyncTimeMs();
+            StoreSmallLevels(model.cellRow, n);
+            model.frame = job.frame;
+            model.bottom = job.zLo;
+            model.pic = Pic_Baked;
+            s_fol.bakeGen++;
+            const uint32_t x = model.cellCol * kCellPx * kViews, y = model.cellRow * kCellPx;
+            const bool fresh = s_fol.baked == 0;
+
+            for (uint32_t kind = 0; kind < 2; kind++) {
+                if (CGxTex* gxTex = TextureGetGxTex(s_fol.atlas[kind], 0, nullptr)) {
+                    // ponytail: levels 5..10 change across the atlas width on this model's rows only; the rect
+                    // update reaches them through the model's own rectangle.
+                    GxTexUpdate(gxTex, fresh ? 0 : x, fresh ? 0 : y, fresh ? kAtlasPx : x + n * kCellPx * kViews, fresh ? kAtlasPx : y + n * kCellPx, 1);
+                }
+            }
+
+            job.ms += OsGetAsyncTimeMs() - t1;
+            s_fol.baked++;
+            s_fol.bakeMs += job.ms;
+        }
+
+        job = BakeJob {};
     }
 }
-
-// --- Cards ---
 
 bool EnsureIndices() {
     if (!s_fol.indexBuf) {
@@ -1076,8 +1243,10 @@ void FreeChunk(Chunk& c) {
     c = Chunk {};
 }
 
-// Block b's cards, facing the camera where it is now, sorted by size class (one draw per class and chunk).
-void BuildBlock(uint32_t b, const C3Vector& cam) {
+// Block b's cards, sorted by size class (one draw per class and chunk). The buffer holds where each card stands
+// and which pictures it has; the shader turns it to the camera and picks the views, so it is built once (and
+// again only when a missing picture is baked or the device drops it), never because the camera moved.
+void BuildBlock(uint32_t b) {
     Block& block = s_fol.blocks[b];
     std::vector<const Placed*> cards;
     cards.reserve(block.placed.size());
@@ -1107,15 +1276,17 @@ void BuildBlock(uint32_t b, const C3Vector& cam) {
     for (uint32_t ci = 0; ci < chunks; ci++) {
         Chunk& c = block.chunks[ci];
         const uint32_t first = ci * kChunkCards;
-        c.cards = std::min(kChunkCards, static_cast<uint32_t>(cards.size()) - first);
+        const uint32_t need = std::min(kChunkCards, static_cast<uint32_t>(cards.size()) - first);
 
-        if (c.capacity < c.cards) {
+        // A fresh static buffer each build (rare: a picture baked), never a relock of one the GPU may be reading.
+        {
             FreeChunk(c);
-            c.cards = std::min(kChunkCards, static_cast<uint32_t>(cards.size()) - first);
-            c.capacity = std::min(kChunkCards, (c.cards + 1023) & ~1023u);
-            c.pool = g_theGxDevicePtr->PoolCreate(GxPoolTarget_Vertex, GxPoolUsage_Dynamic, c.capacity * 4 * sizeof(CGxVertexPNCT), GxPoolHintBit_Unk0, "FarFoliageVB");
+            c.capacity = std::min(kChunkCards, (need + 1023) & ~1023u);
+            c.pool = g_theGxDevicePtr->PoolCreate(GxPoolTarget_Vertex, GxPoolUsage_Static, c.capacity * 4 * sizeof(CGxVertexPNCT), GxPoolHintBit_Unk0, "FarFoliageVB");
             c.buf = g_theGxDevicePtr->BufCreate(c.pool, sizeof(CGxVertexPNCT), c.capacity * 4, 0);
         }
+
+        c.cards = need;
 
         if (!c.buf) {
             c.cards = 0;
@@ -1135,29 +1306,21 @@ void BuildBlock(uint32_t b, const C3Vector& cam) {
             }
 
             c.count[p.cls]++;
-
-            // The view nearest the camera: view k was drawn from the model's +x turned k x 90 deg.
-            const float phi = atan2f(cam.y - p.y, cam.x - p.x);
-            float rel = (phi - p.yaw) / 1.5707963f;
-            const uint32_t view = static_cast<uint32_t>(static_cast<int32_t>(floorf(rel + 0.5f)) & 3);
+            // FarFoliageVs.hlsl's layout: normal x = corner side x (1 + turn), y = corner height + 2 (big), z = side.
+            float turn = p.yaw / 6.2831853f;
+            turn -= floorf(turn);
             const float side = model.frame * p.scale;
-            const float rx = -sinf(phi) * side * 0.5f, ry = cosf(phi) * side * 0.5f;
-            const float x = p.x - origin.x, y = p.y - origin.y;
-            const float z0 = p.z + model.bottom * p.scale;
-            const float u0 = float((model.slot % kCols) * kViews * kViewPx + view * kViewPx) / kAtlasW;
-            const float u1 = u0 + float(kViewPx) / kAtlasW;
-            const float v0 = float((model.slot / kCols) * kViewPx) / kAtlasH;
-            const float v1 = v0 + float(kViewPx) / kAtlasH;
-            // Lit as a canopy: up, leaning toward the camera.
-            C3Vector n(cosf(phi) * 0.45f, sinf(phi) * 0.45f, 0.9f);
-            const C3Vector corner[4] = { C3Vector(x - rx, y - ry, z0), C3Vector(x + rx, y + ry, z0), C3Vector(x + rx, y + ry, z0 + side), C3Vector(x - rx, y - ry, z0 + side) };
-            const C2Vector uv[4] = { C2Vector(u0, v1), C2Vector(u1, v1), C2Vector(u1, v0), C2Vector(u0, v0) };
+            const C3Vector base(p.x - origin.x, p.y - origin.y, p.z + model.bottom * p.scale);
+            const C2Vector uv(float(model.cellCol * kCellPx * kViews) / kAtlasPx, float(model.cellRow * kCellPx) / kAtlasPx);
+            const float big = model.big ? 2.0f : 0.0f;
+            const float sx[4] = { -1.0f, 1.0f, 1.0f, -1.0f };
+            const float sy[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
 
             for (uint32_t i = 0; i < 4; i++) {
-                v[k * 4 + i].m_position = corner[i];
-                v[k * 4 + i].m_normal = n;
-                v[k * 4 + i].m_color = CImVector(255, 255, 255, 255);
-                v[k * 4 + i].m_texture = uv[i];
+                v[k * 4 + i].m_position = base;
+                v[k * 4 + i].m_normal = C3Vector(sx[i] * (1.0f + turn), sy[i] + big, side);
+                v[k * 4 + i].m_color = CImVector(p.tint[0], p.tint[1], p.tint[2], p.tint[3]);
+                v[k * 4 + i].m_texture = uv;
             }
         }
 
@@ -1165,9 +1328,47 @@ void BuildBlock(uint32_t b, const C3Vector& cam) {
         c.buf->m_hasData = 1;
     }
 
-    block.builtAt = cam;
     block.builtGen = s_fol.bakeGen;
     block.built = true;
+}
+
+// Whether the box (camera-relative) can be on screen under viewProj: not wholly past one side plane, or behind.
+bool BoxOnScreen(const C44Matrix& m, const C3Vector& lo, const C3Vector& hi) {
+    uint32_t all = 0x1F;
+
+    for (uint32_t i = 0; i < 8; i++) {
+        const float x = i & 1 ? hi.x : lo.x, y = i & 2 ? hi.y : lo.y, z = i & 4 ? hi.z : lo.z;
+        const float cx = x * m.a0 + y * m.b0 + z * m.c0 + m.d0;
+        const float cy = x * m.a1 + y * m.b1 + z * m.c1 + m.d1;
+        const float cw = x * m.a3 + y * m.b3 + z * m.c3 + m.d3;
+        const uint32_t out = (cx < -cw ? 1u : 0u) | (cx > cw ? 2u : 0u) | (cy < -cw ? 4u : 0u) | (cy > cw ? 8u : 0u) | (cw <= 0.0f ? 16u : 0u);
+        all &= out;
+    }
+
+    return all == 0;
+}
+
+std::string FarFoliageStatsLine(size_t cards, uint32_t cellsUsed) {
+    size_t bufs = 0;
+
+    for (const Block& block : s_fol.blocks) {
+        for (const Chunk& c : block.chunks) {
+            bufs += size_t(c.capacity) * 4 * sizeof(CGxVertexPNCT);
+        }
+    }
+
+    size_t chain = 0;
+
+    for (uint32_t l = 0; l < kAtlasLevels; l++) {
+        chain += size_t(kAtlasPx >> l) * (kAtlasPx >> l) * 3 / 2;  // DXT5 + DXT1
+    }
+
+    char line[320];
+    SStrPrintf(line, sizeof(line), "farTrees: %u models, %u pictures baked (%u ms, %.1f ms each), %u queued; %u of %u atlas cells; %u cards; %u draws; atlases %.1f MB (x2: CPU copy + GPU), cards %.1f MB",
+        static_cast<uint32_t>(s_fol.models.size()), s_fol.baked, s_fol.bakeMs, s_fol.baked ? float(s_fol.bakeMs) / s_fol.baked : 0.0f,
+        static_cast<uint32_t>(s_fol.queue.size()), cellsUsed, kCols * kRows, static_cast<uint32_t>(cards), s_fol.draws,
+        (s_fol.chain[0] ? chain : 0) / 1048576.0f, bufs / 1048576.0f);
+    return line;
 }
 
 }  // namespace
@@ -1176,8 +1377,11 @@ void FarField::FoliageScanTile(uint32_t tile, const uint8_t* b, uint32_t n) {
     const uint32_t kMMDX = 0x4D4D4458;
     const uint32_t kMMID = 0x4D4D4944;
     const uint32_t kMDDF = 0x4D444446;
+    const uint32_t kMCNK = 0x4D434E4B;
     const uint8_t *mmdx = nullptr, *mmid = nullptr, *mddf = nullptr;
     uint32_t mmdxLen = 0, mmidLen = 0, mddfLen = 0;
+    const uint8_t* mcnk[256] = {};
+    uint32_t mcnkLen[256] = {};
 
     for (uint32_t o = 0; o + 8 <= n;) {
         const uint32_t magic = Rd32(b + o);
@@ -1196,6 +1400,13 @@ void FarField::FoliageScanTile(uint32_t tile, const uint8_t* b, uint32_t n) {
         } else if (magic == kMDDF) {
             mddf = b + o + 8;
             mddfLen = size;
+        } else if (magic == kMCNK && size >= 0x80) {
+            const uint32_t ix = Rd32(b + o + 8 + 4), iy = Rd32(b + o + 8 + 8);
+
+            if (ix < 16 && iy < 16) {
+                mcnk[iy * 16 + ix] = b + o;
+                mcnkLen[iy * 16 + ix] = size + 8;
+            }
         }
 
         o += 8 + size;
@@ -1270,6 +1481,8 @@ void FarField::FoliageScanTile(uint32_t tile, const uint8_t* b, uint32_t n) {
             continue;
         }
 
+        model.maxScale = std::max(model.maxScale, float(Rd16(e + 32)) / 1024.0f);
+
         const float scale = float(Rd16(e + 32)) / 1024.0f;
         const float placedH = (model.hi[2] - model.lo[2]) * scale;
         const bool asTree = model.tree && placedH >= kTreeMinHeight;
@@ -1300,12 +1513,44 @@ void FarField::FoliageScanTile(uint32_t tile, const uint8_t* b, uint32_t n) {
 
         const int32_t row = std::clamp(static_cast<int32_t>((kOrigin - p.x) / kTileYd), 0, 63);
         const int32_t col = std::clamp(static_cast<int32_t>((kOrigin - p.y) / kTileYd), 0, 63);
+        // The ground under it, from this ADT's chunk (a placement first listed by a neighbour keeps no tint):
+        // MCCV's nearest outer vertex, and MCSH's bit.
+        if (static_cast<uint32_t>(row * 64 + col) == tile) {
+            const float kChunkYd = kTileYd / 16.0f;
+            const float lx = ((kOrigin - p.y) - col * kTileYd) / kChunkYd, ly = ((kOrigin - p.x) - row * kTileYd) / kChunkYd;
+            const int32_t ix = std::clamp(static_cast<int32_t>(lx), 0, 15), iy = std::clamp(static_cast<int32_t>(ly), 0, 15);
+            const float fx = std::clamp(lx - ix, 0.0f, 1.0f), fy = std::clamp(ly - iy, 0.0f, 1.0f);
+
+            if (const uint8_t* c = mcnk[iy * 16 + ix]) {
+                const uint32_t len = mcnkLen[iy * 16 + ix];
+                const uint32_t flags = Rd32(c + 8), ofsCv = Rd32(c + 8 + 0x74), ofsSh = Rd32(c + 8 + 0x2C);
+
+                if (ofsCv && uint64_t(ofsCv) + 8 + 145 * 4 <= len && Rd32(c + ofsCv) == 0x4D434356) {
+                    const uint8_t* cv = c + ofsCv + 8 + (lroundf(fy * 8.0f) * 17 + lroundf(fx * 8.0f)) * 4;
+                    p.tint[0] = cv[0];
+                    p.tint[1] = cv[1];
+                    p.tint[2] = cv[2];
+                }
+
+                if ((flags & 1) && ofsSh && uint64_t(ofsSh) + 8 + 512 <= len && Rd32(c + ofsSh) == 0x4D435348) {
+                    const uint32_t sx = std::min(63u, static_cast<uint32_t>(fx * 64.0f)), sy = std::min(63u, static_cast<uint32_t>(fy * 64.0f));
+
+                    if ((c[ofsSh + 8 + sy * 8 + sx / 8] >> (sx % 8)) & 1) {
+                        p.tint[3] = 0;
+                    }
+                }
+            }
+        }
+
         Block& block = s_fol.blocks[(row / 8) * 8 + col / 8];
         block.placed.push_back(p);
-        block.lo[0] = std::min(block.lo[0], p.x);
-        block.lo[1] = std::min(block.lo[1], p.y);
-        block.hi[0] = std::max(block.hi[0], p.x);
-        block.hi[1] = std::max(block.hi[1], p.y);
+        const float reachEst = std::max({ fabsf(model.lo[0]), fabsf(model.hi[0]), fabsf(model.lo[1]), fabsf(model.hi[1]), 0.5f * (model.hi[2] - model.lo[2]) }) * scale;
+        block.lo[0] = std::min(block.lo[0], p.x - reachEst);
+        block.lo[1] = std::min(block.lo[1], p.y - reachEst);
+        block.lo[2] = std::min(block.lo[2], p.z + model.lo[2] * scale);
+        block.hi[0] = std::max(block.hi[0], p.x + reachEst);
+        block.hi[1] = std::max(block.hi[1], p.y + reachEst);
+        block.hi[2] = std::max(block.hi[2], p.z + std::max(model.hi[2] * scale, 2.0f * reachEst));
 
         if (model.pic == Pic_None) {
             model.pic = Pic_Queued;
@@ -1313,7 +1558,6 @@ void FarField::FoliageScanTile(uint32_t tile, const uint8_t* b, uint32_t n) {
         }
     }
 
-    (void)tile;
 }
 
 void FarField::FoliageReset() {
@@ -1329,51 +1573,67 @@ void FarField::FoliageReset() {
         block = Block {};
     }
 
-    if (s_fol.atlas) {
-        HandleClose(reinterpret_cast<HOBJECT>(s_fol.atlas));
+    for (uint32_t kind = 0; kind < 2; kind++) {
+        if (s_fol.atlas[kind]) {
+            HandleClose(reinterpret_cast<HOBJECT>(s_fol.atlas[kind]));
+        }
+
+        delete[] s_fol.chain[kind];
+        s_fol.chain[kind] = nullptr;
+        s_fol.atlas[kind] = nullptr;
+        s_fol.small[kind].clear();
     }
 
-    delete[] s_fol.chain;
-    s_fol.chain = nullptr;
-    s_fol.atlas = nullptr;
-    s_fol.level4.clear();
+    memset(s_fol.cells, 0, sizeof(s_fol.cells));
+    s_fol.job = BakeJob {};
     s_fol.byName.clear();
     s_fol.models.clear();
     s_fol.queue.clear();
     s_fol.uids.clear();
-    s_fol.slots = 0;
+    s_fol.baked = 0;
+    s_fol.bakeMs = 0;
     s_fol.bakeGen++;
 }
 
 void FarField::RenderFoliage(bool horizon) {
-    if (!FarTreesCVar()->m_intValue || FarField::FogStretch() == 1.0f || !CDetailDoodad::s_bUseShaders) {
+    if (!FarTreesCVar()->m_intValue || FarField::FogStretch() == 1.0f) {
         return;
     }
 
-    CGxShader* vertexShader = CDetailDoodad::s_vertexShader[0];
-    CGxShader* pixelShader = CDetailDoodad::s_pixelShader[0];
+    if (!s_fol.shadersTried) {
+        s_fol.shadersTried = true;
+        g_theGxDevicePtr->ShaderCreate(&s_fol.vs, GxSh_Vertex, "Shaders\\Vertex", "FarFoliage", 1);
+        g_theGxDevicePtr->ShaderCreate(&s_fol.ps, GxSh_Pixel, "Shaders\\Pixel", "FarFoliagePs", 1);
+    }
 
-    if (!vertexShader || !vertexShader->Valid() || !pixelShader || !pixelShader->Valid()) {
+    if (!s_fol.vs || !s_fol.vs->Valid() || !s_fol.ps || !s_fol.ps->Valid()) {
         return;
     }
 
     const C3Vector& cam = CWorldScene::s_activeWorldView;
     const float farZ = CGWorldFrame::GetActiveCamera()->m_farZ;
-    uint32_t rebuilds = 0;
 
     if (!horizon) {
         PumpPictures();
+        s_fol.draws = 0;
     }
 
-    if (!s_fol.atlas || !EnsureIndices()) {
+    if (!s_fol.atlas[0] || !s_fol.atlas[1] || !EnsureIndices()) {
         return;
     }
 
-    // Blocks in this pass's depth range, front to back; at most two rebuilt a frame (main pass), nearest first.
+    CGxMatrixStack& stack = g_theGxDevicePtr->m_xforms[GxXform_View];
+    const C44Matrix view = stack.m_mtx[stack.m_level];
+    const C44Matrix viewProj = view * g_theGxDevicePtr->m_projNative;
+
+    // Blocks in this pass's depth range and on screen, front to back. Each block is drawn in exactly the pass
+    // its distance range calls for; a block straddling farZ is drawn in both, the main pass's copy winning the
+    // depth test where they overlap (the same card at the same place, never a fight).
     uint32_t order[64];
     float nearD[64];
     float farD[64];
     uint32_t count = 0;
+    uint32_t rebuilds = 0;
 
     for (uint32_t b = 0; b < 64; b++) {
         Block& block = s_fol.blocks[b];
@@ -1387,9 +1647,13 @@ void FarField::RenderFoliage(bool horizon) {
         const float nd = sqrtf(dx * dx + dy * dy);
         const float fx = std::max(fabsf(cam.x - block.lo[0]), fabsf(cam.x - block.hi[0]));
         const float fy = std::max(fabsf(cam.y - block.lo[1]), fabsf(cam.y - block.hi[1]));
-        const float fd = sqrtf(fx * fx + fy * fy) + 150.0f;  // the tallest card's top
+        const float fd = sqrtf(fx * fx + fy * fy);
 
         if (horizon ? fd < farZ - 50.0f : nd > farZ) {
+            continue;
+        }
+
+        if (!BoxOnScreen(viewProj, C3Vector(block.lo[0], block.lo[1], block.lo[2]) - cam, C3Vector(block.hi[0], block.hi[1], block.hi[2]) - cam)) {
             continue;
         }
 
@@ -1414,11 +1678,12 @@ void FarField::RenderFoliage(bool horizon) {
             lost = lost || !c.buf || !c.buf->m_hasData || !c.buf->m_valid;
         }
 
-        const float moved = sqrtf((cam.x - block.builtAt.x) * (cam.x - block.builtAt.x) + (cam.y - block.builtAt.y) * (cam.y - block.builtAt.y));
-        const bool stale = moved > 0.25f * std::max(nearD[i], 150.0f) || (block.missing && block.builtGen != s_fol.bakeGen);
+        // A picture baked since the build: at most two such rebuilds a frame, nearest first (main pass only, so
+        // a block never changes between the two passes of one frame).
+        const bool stale = block.missing && block.builtGen != s_fol.bakeGen;
 
-        if (!block.built || lost || (stale && rebuilds < 2)) {
-            BuildBlock(order[i], cam);
+        if (!block.built || lost || (stale && !horizon && rebuilds < 2)) {
+            BuildBlock(order[i]);
             rebuilds++;
         }
     }
@@ -1426,10 +1691,11 @@ void FarField::RenderFoliage(bool horizon) {
     // Where each size class's model starts to fade (or farclip, past which no doodad is drawn), less the chunk
     // slack (the stock cull goes by the chunk's distance) and measured as view depth at the screen's edge (the
     // shader fades by view depth, the game by distance): the card is whole there, and comes in over one band.
+    // Until the model is surely gone (its fade's end plus a chunk's diagonal) the card stands behind it.
     const C44Matrix& proj = g_theGxDevicePtr->m_projNative;
     const float tanX = proj.a0 != 0.0f ? 1.0f / fabsf(proj.a0) : 1.0f;
     const float cosEdge = 1.0f / sqrtf(1.0f + tanX * tanX);
-    C4Vector fade[5];
+    struct { float x, y, z, w; } fade[5];
     float fadeFrom[5];
 
     for (uint32_t c = 0; c < 5; c++) {
@@ -1439,49 +1705,59 @@ void FarField::RenderFoliage(bool horizon) {
         fadeFrom[c] = whole - band;
         fade[c].x = 1.0f / band;
         fade[c].y = -fadeFrom[c] / band;
-        fade[c].z = 0.0f;
-        fade[c].w = 0.0f;
+        fade[c].z = std::min(CWorldScene::s_fadeDistMin[c] + CWorldScene::s_fadeRangeDefault[c], farZ) + 47.0f;
+        fade[c].w = 1.0f / 20.0f;
     }
 
     g_theGxDevicePtr->RsPush();
     GxRsSet(GxRs_Culling, 0);
-    GxRsSet(GxRs_BlendingMode, GxBlend_AlphaKey);
-    GxRsSet(GxRs_AlphaRef, kAlphaKey);
+    GxRsSet(GxRs_BlendingMode, GxBlend_Opaque);  // cut out in the shader (clip), on every backend alike
     GxRsSet(GxRs_DepthWrite, 1);
     GxRsSet(GxRs_DepthTest, 3);
     GxRsSet(GxRs_Lighting, 0);
-    GxRsSet(GxRs_VertexShader, vertexShader);
-    GxRsSet(GxRs_PixelShader, pixelShader);
-    GxRsSet(GxRs_Texture0, static_cast<void*>(TextureGetGxTex(s_fol.atlas, 0, nullptr)));
-    GxRsSet(GxRs_ColorOp0, 0);
-    GxRsSet(GxRs_AlphaOp0, 0);
+    GxRsSet(GxRs_Fog, 0);                         // fogged in the shader, the terrain's formula
+    GxRsSet(GxRs_VertexShader, s_fol.vs);
+    GxRsSet(GxRs_PixelShader, s_fol.ps);
+    GxRsSet(GxRs_Texture0, static_cast<void*>(TextureGetGxTex(s_fol.atlas[0], 0, nullptr)));
+    GxRsSet(GxRs_Texture1, static_cast<void*>(TextureGetGxTex(s_fol.atlas[1], 0, nullptr)));
 
-    // The grass's own constants for this frame (projection bound now, DNInfo fog, sun; fog colour bound), so
-    // the cards fog and light like the grass and the terrain. Restored after: the grass builds them again.
-    const CDetailDoodad::SShaderConstants saved = CDetailDoodad::s_shaderConstants;
-    CDetailDoodad::InitializeShaderConstants();
-    CDetailDoodad::SShaderConstants consts = CDetailDoodad::s_shaderConstants;
-    CDetailDoodad::s_shaderConstants = saved;
-
-    CGxMatrixStack& stack = g_theGxDevicePtr->m_xforms[GxXform_View];
-    const C44Matrix view = stack.m_mtx[stack.m_level];
+    // The terrain's own constants for this frame (projection bound now, DNInfo fog in c12, sun c24-c26): the
+    // cards fog and light exactly as the far ground does.
+    CMapRenderChunk::SVertexShaderConstants consts;
+    FarField::TerrainConstants(consts);
+    const DayNight::DNInfo* info = DayNight::GetInfo();
+    const C4Vector fogColour(info->m_fog.m_color);
+    const float pixel[16] = {
+        consts.m_sunAmbient.x, consts.m_sunAmbient.y, consts.m_sunAmbient.z, 1.0f,
+        consts.m_sunDiffuse.x, consts.m_sunDiffuse.y, consts.m_sunDiffuse.z, 1.0f,
+        fogColour.x, fogColour.y, fogColour.z, 1.0f,
+        kTintStrength, kShadowLevel, 0.0f, 0.0f,
+    };
+    g_theGxDevicePtr->ShaderConstantsSet(GxSh_Pixel, 3, pixel, 4);
+    const float card[4] = { float(kCellPx) / kAtlasPx, float(kCellPx * 2) / kAtlasPx, 0.0f, 0.0f };
     bool uploaded = false;
     int32_t boundFade = -1;
 
     for (uint32_t i = 0; i < count; i++) {
         const uint32_t b = order[i];
         Block& block = s_fol.blocks[b];
+        const C3Vector origin = BlockOrigin(b);
 
         C44Matrix world;
-        world.Translate(BlockOrigin(b) - cam);
+        world.Translate(origin - cam);
         consts.m_worldView = world * view;
+        const float camLocal[4] = { cam.x - origin.x, cam.y - origin.y, cam.z - origin.z, 0.0f };
 
         if (!uploaded) {
-            g_theGxDevicePtr->ShaderConstantsSet(GxSh_Vertex, 0, reinterpret_cast<const float*>(&consts), sizeof(consts) / sizeof(C4Vector));
+            // c0..c26 (to m_sunDiffuse), then ours over c8..c10.
+            g_theGxDevicePtr->ShaderConstantsSet(GxSh_Vertex, 0, reinterpret_cast<const float*>(&consts), offsetof(CMapRenderChunk::SVertexShaderConstants, m_sunSpecular) / sizeof(C4Vector));
+            g_theGxDevicePtr->ShaderConstantsSet(GxSh_Vertex, 10, card, 1);
             uploaded = true;
         } else {
             g_theGxDevicePtr->ShaderConstantsSet(GxSh_Vertex, 0, reinterpret_cast<const float*>(&consts.m_worldView), 4);
         }
+
+        g_theGxDevicePtr->ShaderConstantsSet(GxSh_Vertex, 8, camLocal, 1);
 
         for (Chunk& c : block.chunks) {
             if (!c.cards || !c.buf) {
@@ -1503,7 +1779,7 @@ void FarField::RenderFoliage(bool horizon) {
                 }
 
                 if (boundFade != static_cast<int32_t>(cls)) {
-                    g_theGxDevicePtr->ShaderConstantsSet(GxSh_Vertex, offsetof(CDetailDoodad::SShaderConstants, m_fade) / sizeof(C4Vector), &fade[cls].x, 1);
+                    g_theGxDevicePtr->ShaderConstantsSet(GxSh_Vertex, 9, &fade[cls].x, 1);
                     boundFade = static_cast<int32_t>(cls);
                 }
 
@@ -1514,11 +1790,34 @@ void FarField::RenderFoliage(bool horizon) {
                 batch.m_minIndex = c.start[cls] * 4;
                 batch.m_maxIndex = (c.start[cls] + c.count[cls]) * 4 - 1;
                 g_theGxDevicePtr->Draw(&batch, 1);
+                s_fol.draws++;
             }
         }
     }
 
     g_theGxDevicePtr->RsPop();
+
+    if (horizon && FarFoliageStatsCVar()->m_intValue) {
+        static uint32_t s_last;
+        const uint32_t now = OsGetAsyncTimeMs();
+
+        if (now - s_last > 2000) {
+            s_last = now;
+            size_t cards = 0;
+
+            for (const Block& block : s_fol.blocks) {
+                cards += block.placed.size();
+            }
+
+            uint32_t used = 0;
+
+            for (bool cell : s_fol.cells) {
+                used += cell;
+            }
+
+            ConsoleWrite(FarFoliageStatsLine(cards, used).c_str(), DEFAULT_COLOR);
+        }
+    }
 }
 
 bool FarField::GrassSizeCull() {

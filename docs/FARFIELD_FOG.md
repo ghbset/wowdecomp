@@ -277,51 +277,64 @@ horizon depth band as far geometry.
 
 ## Far foliage (farTrees, farGrass)
 
-Not stock. CVars: `farTrees` (1), `farGrass` (1), `farGrassMinPixels` (4). `farTrees 0` draws nothing
-and bakes no pictures (placements are still collected, memory only); `farGrass 0` gives back 12340's grass
-exactly. The cards also need the far fog (`wdlTextured 1`, `horizonFog 1`), like every far pass.
-Line numbers are for the commit that adds the foliage (2026.10.17-farfoliage).
+Not stock. CVars: `farTrees` (1), `farGrass` (1), `farGrassMinPixels` (4), `farTreesStats` (0: 1 prints models,
+pictures, bake ms, atlas cells, cards, draws and memory every 2 s). `farTrees 0` draws nothing and bakes no pictures;
+`farGrass 0` gives back 12340's grass exactly. The cards need the far fog (`wdlTextured 1`, `horizonFog 1`) and the
+FarFoliage shaders from custom.MPQ (without them no cards). Release 2026.10.17-foliage2 rewrote the pictures and the
+draw (the first version, e658201, is described in git history).
 
-A port of wxl-farfield's far foliage (`/root/wxl-farbush-wt/wxl-farfield/src/FarFoliage.cpp`) and of the
-half wxl-wraithhost bakes for it (`wraithhost-lite/src/host/terrain/FarLod.cpp` placements,
-`Impostor.cpp` pictures), all in `WoW/Source/WorldClient/FarFoliage.cpp`. wraithhost does not load in
-Wow32/Wow64, so both bakes run in the client, on the far ground's ADT reads.
+A port of wxl-farfield's far foliage (`/root/wxl-farbush-wt/wxl-farfield/src/FarFoliage.cpp`, its shaders and
+`docs/far-trees-quality-plan.md`) and of wraithhost's placement and picture bakes, all in
+`WoW/Source/WorldClient/FarFoliage.cpp`.
 
 | Step | Where |
 |---|---|
-| The ground bake hands each ADT it has read to the foliage scan | `MapLowDetail.cpp:1210` (PumpBake) |
-| Scan: MMDX/MMID/MDDF; a model is a tree or a bush by wraithhost's name rules (`IsBushName`, the TREE/PALM/KALIDARBUSH list less STREET/LEAVES/STUMP/LOG/ROOT), header box read once; a placement counts if >= 6 yd (tree) or >= 1.5 yd (bush) tall as placed; one card per uniqueId; its stock size class from the yaw-turned box's largest side (`MapDoodadDef.cpp:85`); filed into its 8 x 8-tile block | `FarFoliage.cpp:1175` (FoliageScanTile) |
-| Pictures: the model's skin-00 mesh and textures rasterised on the CPU, orthographic, from 4 sides every 90 deg, bottom-aligned in a square of side max(height, 2 x reach), blend 0-2 batches at the game's own keys (224/255 blend 1, half blend 2), times the batch colour; 128 px down to 64, empty pixels filled from drawn neighbours, levels box-filtered with the coverage kept. A bush with no cut-out texture (coverage >= 0.95: a solid prop) is dropped | `FarFoliage.cpp:545` (RenderPicture) |
-| Atlas: one 4096 x 2048 DXT5, 64 px a view, 4 views a model in a row (512 models; past that a model goes without, as wraithhost's kImpMax). Levels 0-4 per view; 5-9 box-filtered from a kept copy of level 4. Alpha: 0 cut out, else 136..255 per-texel noise (`NoiseAlpha`, `:453`), so the distance fade dissolves a card. One model baked a frame (main pass), its rectangle uploaded | `:984` (PumpPictures), `:952` (StoreSmallLevels) |
-| Cards: per block, one quad per placement facing the camera, showing the view nearest the camera (view k = the model's +x turned k x 90 deg, yaw = MDDF rot.y + 180), side = frame x scale, bottom at z + picture bottom x scale; normal up leaning toward the camera; sorted by size class, chunks of 16384 cards (one shared 16-bit index buffer). Rebuilt when the camera has moved more than a quarter of the block's distance (min 150 yd), when a missing picture is baked, or when the device drops the buffer; at most 2 rebuilds a frame, nearest first | `:1080` (BuildBlock), `:1348` (RenderFoliage) |
-| Draw: main pass before RenderHorizon (normal projection, blocks nearer than farZ) and again inside RenderHorizon after the WDL (horizon projection and depth band, blocks reaching past farZ - 50); blocks front to back, one draw per chunk and size class, 4 constants a block | `CWorldSceneRender.cpp:206`, `World.cpp:4960` |
+| The ground bake hands each ADT it reads to the scan | `MapLowDetail.cpp` PumpBake -> `FoliageScanTile` |
+| Scan: MMDX/MMID/MDDF; tree or bush by wraithhost's name rules; >= 6 yd (tree) / 1.5 yd (bush) as placed; one card per uniqueId; stock size class from the turned box; the ground under it from this ADT's MCNK: MCCV's nearest outer vertex (tint) and the MCSH bit (shadow); filed into its 8 x 8-tile block with a 3D box for culling | `FoliageScanTile` |
+| Pictures: skin 00 rasterised orthographically from **8 sides** (view k = the model's +x turned k x 45 deg), **4 x 4 samples a pixel**, textures sampled bilinear from a level near the raster's density, keyed at the game's 224/255 (blend 1) / half (blend 2), blend 3+ left out. **Normals** in the view's frame (right, up, toward camera), two-sided, half mesh normal and half a dome over the model. 64 px a view, **128 px** for a model whose header-box frame x largest placed scale is 40 yd or more. Empty pixels filled from neighbours; levels 0-4 per view with **coverage-preserving alpha** (each level keeps level 0's cover at the 0.5 test); levels 5-10 box-filtered from the whole atlas at level 4 | `PrepareJob`, `BakeView`, `StoreSmallLevels` |
+| Atlases: two 4096 x 4096 (albedo + coverage DXT5, normals DXT1, 11 levels each), cells of 512 x 64 px (one small model's 8 views); a big model takes 2 x 2 cells. 512 small or 128 big models; past that a model goes without | `AllocCells`, `EnsureAtlases` |
+| Bake budget: a view at a time, under 3 ms a frame on the main thread (`kBakeMs`), the model's rectangle uploaded when its 8 views are done | `PumpPictures` |
+| Cards: per block, one **static** quad a placement (PNCT: base, corner/turn/side packed in the normal, ground tint in the colour, atlas row in the texcoord), sorted by size class, chunks of 16384. Built once; rebuilt only when a missing picture is baked (2 a frame, main pass) or the device drops the buffer, **never because the camera moved** | `BuildBlock` |
+| Draw: main pass before RenderHorizon (blocks nearer than farZ) and inside RenderHorizon after the WDL (blocks reaching past farZ - 50); **frustum test per block** (3D box against the side planes); one draw per chunk and class present | `RenderFoliage`, `BoxOnScreen` |
 
-**Shader and fog.** The cards use the stock **DetailDoodad** shaders (the ground-effect grass's,
-`CDetailDoodad::s_vertexShader[0]` / `s_pixelShader[0]`): world-space PNCT, sun light per vertex, and the
-same fog formula on the same `DNInfo::m_fog` as the terrain (vertex **c8** here, c12 for the terrain; fog
-colour pixel c2 or `GxRs_FogColor`), so a card fades into fog exactly like the far ground behind it. The
-constants are the grass's own for the frame (`CDetailDoodad::InitializeShaderConstants`,
-`FarFoliage.cpp:1462`, the grass's copy restored after), with c0-c3 = translate(block centre - camera) x
-view per block and c9 = the class fade. Nothing new in custom.MPQ: the shaders exist on D3D9, D3D11 (SM4
-pack) and Vulkan (translated) already.
+**Shaders (custom.MPQ).** `FarFoliage` (vs_3_0) and `FarFoliagePs` (ps_3_0), source in
+`Tools/CustomMpq/ShaderSrc/FarFoliage{Vs,Ps}.hlsl`, built by `build_shaders.py` to vs/ps_3_0 (D3D9) and vs/ps_4_0
+(D3D11); the Vulkan translator reads the 3_0 ones like any client shader. The vertex shader turns the card about the
+vertical to face the camera and picks the **two views nearest the camera's bearing** round the tree (relative to the
+placement's turn), with the fraction between them; the pixel shader **mixes** them (albedo, coverage and normal).
+Registers are the terrain's (`FarField::TerrainConstants`: c0-c3 world-view per block, c4-c7 projection, **c12 fog,
+c24 sun direction**), plus c8 the camera in block coords, c9 the class fade, c10 the view widths. Pixel c3/c4 the
+terrain's **ambient / diffuse** (c25/c26), c5 the fog colour (always a constant, so `GxRs_FogColor` caps do not
+matter), c6 tint strength (0.5) and shadow level (0.7).
 
-**Alpha test on every backend.** Blend `GxBlend_AlphaKey`, `GxRs_AlphaRef` 128, depth write on, culling
-off (`:1449`). D3D9 tests natively; D3D11 (`CGxDeviceD3d11.cpp:2292`) and Vulkan (`misc.x`,
-`CGxDeviceVulkanShader.cpp:14`) apply the same reference in the shader, as for the grass. Never blended:
-a fading card must write depth (memory feedback_sky_before_blended_far_passes), and the sky after it only
-fills far-depth pixels.
+```
+light = min(ambient + diffuse * saturate(dot(N_baked, sun_card)), 1)      // the terrain's formula, per pixel
+c     = albedo * lerp(1, 2 * MCCV, 0.5) * (in MCSH shadow ? 0.7 : 1) * light
+out   = lerp(fogColour, c, fog)        fog = min(pow(max(viewZ * c12.x + c12.y, 0), c12.z), 1)
+```
 
-**Hand-over (no pop).** The shader multiplies the texture's alpha by `saturate(viewZ * c9.x + c9.y)`.
-Per size class the card is whole at the place its model starts to fade, `CWorldScene::s_fadeDistMin[c]`
-(scaled by environmentDetail), less 24 yd (the stock cull goes by chunk distance), or `farZ - 35` if
-nearer (no doodad is drawn past farclip), times the cosine of the half horizontal FOV (the shader fades by
-view depth, the game by distance, so the screen edge is covered too). It comes in over one band before
-that (max(20 yd, 10%)) (`:1426`). The card is whole before the model starts to go, never a complement
-cross-fade (the wxl lesson); the price is a stretch where both are drawn.
+**Cut-out and hand-over.** Opaque blend, depth write, culling off, `clip()` in the pixel shader on coverage < 0.5
+and on the dissolve: a hash of a 16 x 16 cell grid in the card's own uv (plus a per-placement seed) against
+`saturate(viewZ * c9.x + c9.y)`. The pattern is fixed to the card, never to the screen or a mip, so it does not
+crawl while moving. The card is whole where its model starts to fade (`s_fadeDistMin[c]` - 24 yd, or farZ - 35,
+times the cosine of the half horizontal FOV), coming in over max(20 yd, 10%) before that. Until the model is surely
+gone (fade end + 47 yd, `c9.z`) the card stands **behind** its tree: pushed back half its side along the view ray
+and scaled about the camera (same pixels), eased out over 20 yd, so the tree hides it and it fills the tree's holes
+as the tree fades; no depth fight with the model.
 
-**Draws.** About one draw per visible block and class present (trees: classes 2-4, bushes 1-2) in each
-pass: typically 10-30 a frame, plus one 4-register constant upload a block, no buffer writes except a
-rebuild. No frustum culling (the GPU clips; a block is 4266 yd across).
+**The flicker (2026.10.17-fartex).** Two causes. (1) Cards: each block's quads were rebuilt facing the camera
+whenever it moved a quarter of the block's distance (37 yd near the camera), snapping every card's turn and its
+nearest-of-4 view at once, two blocks a frame in turn; plus a per-texel noise alpha that differed per mip level, so
+the dissolve pattern changed as the mip did. (2) Real WMOs and doodads (not creatures), Vulkan only:
+`OcclusionCull` (d2605ac) hid objects on 1-3 frame old query answers measured from a different camera position; a
+near occluder's edge sweeps far objects by far more than any box padding, so objects at every silhouette blinked
+out while moving. An "occluded" answer now holds only while the camera stays within 0.05 yd of where its query was
+drawn (`kAnswerMoveSq`), so culling works when standing still and is stock while moving.
+
+**Draws and cost.** One draw per visible block, chunk and class present, per pass: typically 5-25 a frame, plus
+one 5-register constant upload a block; no buffer writes except a rebuild. Memory: atlases 33.6 MB as a CPU copy
+(the latch source) plus the same on the GPU; cards 128 bytes each (2.5 MB for 20k cards). Bake: a 64 px view a
+fraction of a ms to ~2 ms, a 128 px view (512 px raster) a few ms; `farTreesStats 1` reports the real figures.
 
 ### Grass (farGrass)
 
@@ -336,21 +349,19 @@ request was less grass where it cannot be seen, not more).
 
 ### Where future light and colour settings hook in (foliage)
 
-- Card brightness / tint: the vertex colour in `BuildBlock` (white now; the shader multiplies it in), or
-  the picture colours in `RenderPicture` (a far colour match like wxl's `gMatch` belongs there).
-- Card light: the normal in `BuildBlock`, and the sun the grass gets (`CDetailDoodad::InitializeShaderConstants`,
-  `DetailDoodad.cpp:224`), which follows `CM2Lighting` and the map light.
-- Fog: nothing of its own; it follows `DayNight::UpdateFog` and the stretch like every far pass.
-- Hand-over distances: `RenderFoliage` (`:1426`); the stock fade tables are `CWorldScene::ScaleFadeDist`.
+- Light and fog: nothing of their own; they come from `FarField::TerrainConstants` (terrain sun, ambient, diffuse,
+  fog) and `DNInfo::m_fog` colour each frame, in `RenderFoliage`.
+- Tint strength / shadow level: `kTintStrength`, `kShadowLevel` (pixel c6). Picture colours: `BakeView`.
+- Hand-over distances: `RenderFoliage` (fade table); the stock fade tables are `CWorldScene::ScaleFadeDist`.
 
 ### Known limits (foliage)
 
-- No normal map: a card is lit per vertex (one normal), flatter than wxl's per-pixel light. No glow
-  picture (additive layers) and no second texture of two-texture batches (Crystalsong).
-- Views switch (nearest of 4) on a rebuild rather than turning smoothly; the pop is at far distance.
-- Pictures are baked on the main thread, one model a frame (a few ms each) for the first seconds on a map.
-- Tilted placements (MDDF rot.x/z) are drawn upright.
-- Fixed-function fallback (no DetailDoodad shaders): no cards.
+- No far grass cards (wxl-farfield has them, from each chunk's ground effects); the stock grass is only cut by its
+  size on screen (`farGrass`). It is lit and fogged by the stock DetailDoodad shader.
+- No glow picture (additive layers) and no second texture of two-texture batches (Crystalsong).
+- Tilted placements (MDDF rot.x/z) are drawn upright; no top view (giant flat canopies seen from above).
+- The bake is main-thread (budgeted), not a worker thread; frustum culling is per 8 x 8-tile block, not finer.
+- Fixed-function fallback (no shaders, or custom.MPQ without FarFoliage): no cards.
 
 ## Where future light settings hook in
 

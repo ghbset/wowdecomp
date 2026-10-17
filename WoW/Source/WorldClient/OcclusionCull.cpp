@@ -30,12 +30,22 @@ namespace {
     constexpr uint32_t kStallMs = 250;
     /// Doodads smaller than this (sphere radius, yards) cost less to draw than to query.
     constexpr float kMinDoodadRadius = 1.0f;
+    /// An "occluded" answer holds only while the camera is within this of where its query was drawn.
+    /// Occlusion from a point does not depend on the view direction, but it does on the position: a
+    /// near occluder's edge sweeps far objects by (move x object distance / occluder distance), which no
+    /// box padding covers, and the answer is 1-3 frames old. Honouring stale answers while moving hid
+    /// visible WMOs and doodads for several frames at every silhouette (the "flicker when moving").
+    /// ponytail: culling is in effect only while (nearly) standing still; a reprojected or same-frame
+    /// test is the upgrade if moving-camera savings matter.
+    constexpr float kAnswerMoveSq = 0.05f * 0.05f;
 
     struct Entry {
         CAaBox box;
         uint32_t lastSeen = 0;      ///< frame it was last a culling candidate
         CGxQuery* query = nullptr;  ///< in flight
         bool occluded = false;      ///< the last answer
+        C3Vector queryAt;           ///< camera position the query in flight was drawn from
+        C3Vector answerAt;          ///< camera position the last answer belongs to
         bool queued = false;        ///< in s_toQuery this frame
     };
 
@@ -142,6 +152,7 @@ void OcclusionCull::BeginFrame() {
             if (GxQueryGetParam(e.query, GxQueryParam_Unk1, &available) && available) {
                 uint32_t samples = 1;
                 e.occluded = GxQueryGetData(e.query, &samples) && samples == 0;
+                e.answerAt = e.queryAt;
                 Release(e);
             }
         }
@@ -180,7 +191,8 @@ bool OcclusionCull::IsOccluded(const void* key, const CAaBox& box) {
         s_toQuery.push_back(&e);
     }
 
-    return e.occluded;
+    const C3Vector d = CWorldScene::s_activeWorldView - e.answerAt;
+    return e.occluded && d.x * d.x + d.y * d.y + d.z * d.z <= kAnswerMoveSq;
 }
 
 bool OcclusionCull::IsOccluded(const void* key, const CAaSphere& sphere) {
@@ -216,6 +228,7 @@ void OcclusionCull::IssueQueries() {
             continue;
         }
 
+        e->queryAt = CWorldScene::s_activeWorldView;
         batch.push_back(e);
     }
 

@@ -5,6 +5,8 @@
 // depth. The answer, read whenever the backend has it (non-blocking), decides whether the object is
 // drawn on later frames. Anything without an answer, newly in view, moved, or after a camera jump
 // counts as visible; occluded objects keep being queried so they come back.
+// An "occluded" answer only counts while the camera is where its query was drawn (see
+// kAnswerMoveSq): stale answers from a moving camera hid visible objects for frames at a time.
 //
 // Active only on the Vulkan backend with CVar occlusionCulling = 1. Otherwise every call is a no-op
 // and culling is exactly stock.

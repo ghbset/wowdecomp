@@ -18,7 +18,11 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(os.path.dirname(HERE), 'Shaders')
 # name: (profile, record a, b, c, d) -- the masks copied from the stock shader it stands beside
-SHADERS = {'FarBlend': ('ps_3_0', 0x1e80, 0x200, 1, 0)}
+# record masks: inputs / outputs, a bit a register (1 position, 8 normal, 0x80 fog, 0x200 colour 0, 0x400 colour 1,
+# 0x800 texcoord 0, 0x1000 texcoord 1), as the stock DetailDoodad / Terrain records carry them.
+SHADERS = {'FarBlend': ('ps_3_0', 0x1e80, 0x200, 1, 0),
+           'FarFoliage': ('vs_3_0', 0xa09, 0x1e81, 0, 0, 'FarFoliageVs'),
+           'FarFoliagePs': ('ps_3_0', 0x1e80, 0x200, 1, 0, 'FarFoliagePs')}
 
 
 def bls(code, a, b, c, d):
@@ -33,8 +37,9 @@ def main(argv):
     a = ap.parse_args(argv)
     vk = os.environ.get('VKD3D_PREFIX', os.path.join(a.xlate, '..', 'vkd3d-install'))
     env = dict(os.environ, LD_LIBRARY_PATH=os.path.join(vk, 'lib'))
-    for name, (prof, ra, rb, rc, rd) in SHADERS.items():
-        src = os.path.join(HERE, name + '.hlsl')
+    for name, spec in SHADERS.items():
+        prof, ra, rb, rc, rd = spec[:5]
+        src = os.path.join(HERE, (spec[5] if len(spec) > 5 else name) + '.hlsl')
         r = subprocess.run([os.path.join(vk, 'bin', 'vkd3d-compiler'), '-x', 'hlsl', '-p', prof, '-b', 'd3dbc', '-o', '-', src],
                            capture_output=True, env=env)
         if r.returncode or not r.stdout:
