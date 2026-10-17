@@ -1084,7 +1084,7 @@ void CGxDeviceD3d11::ISetCaps(const CGxFormat& format) {
     this->m_caps.m_shaderAlphaRef = 1;
     this->m_caps.m_stencilBits = s_GxFormatToDxgiDepth[format.m_depthFormat][1] == DXGI_FORMAT_D24_UNORM_S8_UINT ? 8 : 0;  // DECOMP
 
-    for (uint32_t i = 0; i < 4; i++) {
+    for (uint32_t i = 0; i < 3; i++) {
         this->m_caps.unused_0118[i] = 0;
     }
 

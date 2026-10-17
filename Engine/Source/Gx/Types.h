@@ -232,15 +232,15 @@ class CGxCaps {
     /* 010C */ int32_t m_pointSprite;
     /* 0110 */ uint32_t m_blendFactor;
     /* 0114 */ int32_t m_rttAbgr16161616F;   // VFOG: GxTex_Abgr16161616F renders (and filters), the m_rttFormat of format 13
-    /* 0118 */ uint32_t unused_0118 [4];
+    /* 0118 */ uint32_t unused_0118 [3];
+    // DECOMP: was unused_0118[3] (the size must not change: wxl reads fixed device offsets). Stencil bits of
+    // the scene depth-stencil (8 with D24S8/D32S8, 0 without); GxRs_Stencil* are ignored when 0.
+    /* 0124 */ int32_t m_stencilBits;
     /* 0128 */ int32_t m_oglRtAlpha;
     /* 012C */ int32_t m_stereoAvailable;
     /* 0130 */ int32_t m_shaderAlphaRef;
     /* 0134 */ int32_t unk_0134;
     /* 0138 */ int32_t unk_0138;
-    // DECOMP: not in the stock client. Stencil bits of the scene depth-stencil (8 with D24S8/D32S8, 0 without);
-    // GxRs_Stencil* are ignored when 0.
-    /* 013C */ int32_t m_stencilBits;
 };
 
 class CGxQuery {

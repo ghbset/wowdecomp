@@ -160,7 +160,6 @@ void CGxDeviceVulkan::ISetCaps(const CGxFormat& format) {
     this->m_caps.unused_0118[0] = 0;
     this->m_caps.unused_0118[1] = 0;
     this->m_caps.unused_0118[2] = 0;
-    this->m_caps.unused_0118[3] = 0;
     this->m_caps.unk_0134 = this->m_caps.m_shaderTargets[GxSh_Pixel] != 4;
     this->m_caps.unk_0138 = this->m_caps.m_shaderTargets[GxSh_Pixel] != 4;
 
