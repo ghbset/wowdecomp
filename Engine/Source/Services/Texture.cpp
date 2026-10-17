@@ -791,7 +791,7 @@ void UpdateBlpTextureAsync(EGxTexCommand command, uint32_t width, uint32_t heigh
             const uint8_t* bits = reinterpret_cast<const uint8_t*>(s_mipBits[level].m_mip[0]);
             texels = bits;
 
-            if (texture->m_gxTexTarget == GxTex_CubeMap) {
+            if (texture->m_gxTexTarget == GxTex_CubeMap && bits) {
                 uint32_t order = face;
 
                 switch (face) {

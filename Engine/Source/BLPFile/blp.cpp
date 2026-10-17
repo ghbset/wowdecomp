@@ -945,8 +945,16 @@ int32_t CBLPFile::LockChain2(const char* fileName, PIXEL_FORMAT format, MipBits*
 
         if (!setImages) {
             // images[0] is mipLevel, as in the decode path below (the texture is created at the bestMip size).
-            for (uint32_t i = 0; mipLevel + i < 16 && this->m_header.m_mipSizes[mipLevel + i]; i++) {
+            uint32_t i = 0;
+
+            for (; mipLevel + i < 16 && this->m_header.m_mipSizes[mipLevel + i]; i++) {
                 images[i].m_mip[0] = reinterpret_cast<C4Pixel*>(static_cast<uint8_t*>(this->m_inMemoryImage) + this->m_header.m_mipOffsets[mipLevel + i]);
+            }
+
+            // Not stock: a file with a short chain left the later slots pointing into an earlier texture's freed
+            // file buffer, and the upload latched them (Wow64 Vulkan crash 2026-10-17). Null slots are skipped.
+            for (uint32_t count = CalcLevelCount(this->Width(mipLevel), this->Height(mipLevel)); i < count; i++) {
+                images[i].m_mip[0] = nullptr;
             }
 
             this->m_inMemoryImage = nullptr;
