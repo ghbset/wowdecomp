@@ -7,10 +7,31 @@
 #if LOCAL_LIGHTS
 #define VF_AUTHORED_NOISE 0
 #endif
+// SPLIT: VFogCompositeSplit{Q}[L][N], coa vf_composite_split.hlsl: drawn over the stencil-marked near (c80.x = 0) or
+// far (c80.x = 1) samples of an MSAA silhouette (VFogSilhouette), fogged at that side's depth; c80.y = 1: the pixel's own
+// side was already drawn by the plain composite, so it is clipped here.
+#if SPLIT
+#include "vf_sample_split.hlsli"
+float4 cSampleSide : register(c80);
+#else
 #include "vf_composite.hlsli"
+#endif
 
 float4 main(float2 targetUv : TEXCOORD0) : COLOR0
 {
     float2 pixel = FullPixelFromUv(targetUv);
-    return Dithered(CompositeAtDepth(pixel, SampleDepth(sDepth, pixel)), pixel, float2(211, 97), FrameIndex());
+#if SPLIT
+    DepthNeighbourhood n = NeighbourhoodOf(pixel);
+    const bool farSamples = cSampleSide.x > 0.5;
+    const bool ownSide = (n.own > SplitDepth(n)) == farSamples;
+    [branch] if (ownSide && cSampleSide.y > 0.5)
+    {
+        clip(-1);
+        return 0;
+    }
+    float depth = ownSide ? n.own : (farSamples ? n.farthest : n.nearest);
+#else
+    float depth = SampleDepth(sDepth, pixel);
+#endif
+    return Dithered(CompositeAtDepth(pixel, depth), pixel, float2(211, 97), FrameIndex());
 }

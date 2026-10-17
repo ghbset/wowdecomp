@@ -21,7 +21,7 @@ VFog (docs/VFOG_PORT.md section 5): VFogMarch{Q}[L][N] and VFogComposite{Q}[L][N
 plus VFogTemporal and VFogHistoryDepth, and the god rays VFogRayMask, VFogRayBlur and VFogRayComposite.
 Grading (coa vp_grade): VFogGrade.
 Water (coa vw_*): VFogWaterDepth, VFogWaterMask, VFogWater{1,2,3} (SSR_STEPS 0/16/32) and VFogRippleStep.
-Fading models (wxl-vfog 0.6.3): VFogDepthCopy.
+Fading models (wxl-vfog 0.6.3): VFogDepthCopy. MSAA sample split (coa): VFogSilhouette and VFogCompositeSplit{Q}[L][N].
 """
 import argparse
 import concurrent.futures
@@ -61,6 +61,8 @@ SHADERS = {
     'VFogRippleStep': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0), 0, 'VFogRippleStep', {}),
     # fading models' cross-fade (wxl-vfog 0.6.3, vfogFadeStencil): the scene depth into R32F, behind and with them
     'VFogDepthCopy': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0), 0, 'VFogDepthCopy', {}),
+    # MSAA silhouette samples marked in the stencil by an oDepth pass (coa vf_silhouette_mask; D3D only)
+    'VFogSilhouette': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0), 0, 'VFogSilhouette', {}),
 }
 # VFogWater{1,2,3}: coa ps_vw_shade_low/mid/high (SSR_STEPS 0/16/32, cmake/WaterShaders.cmake)
 for _v, _ssr in ((1, 0), (2, 16), (3, 32)):
@@ -77,6 +79,10 @@ for _q, _steps in ((1, 16), (2, 24), (3, 32)):
                                               'VFogMarch', _defs)
             SHADERS['VFogComposite' + _suffix] = ('ps_3_0', TEXCOORD0, COLOR0,
                                                   samplers(0, 1, 3, 4, *_composite_noise), 0, 'VFogComposite', _defs)
+            # MSAA sample split (coa vf_composite_split, vfogMsaaSplit): the same composite per silhouette side
+            SHADERS['VFogCompositeSplit' + _suffix] = ('ps_3_0', TEXCOORD0, COLOR0,
+                                                       samplers(0, 1, 3, 4, *_composite_noise), 0, 'VFogComposite',
+                                                       dict(_defs, SPLIT=1))
 
 
 def bls(code, a, b, c, d):

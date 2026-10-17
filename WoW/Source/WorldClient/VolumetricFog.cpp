@@ -76,6 +76,7 @@ struct CVars {
     CVar* hdrTargets;
     CVar* fadeEarly;
     CVar* fadeStencil;
+    CVar* msaaSplit;
 };
 
 // coa forever_look.cpp GradingFrame: decided at the end of the world, drawn after the glow.
@@ -141,6 +142,7 @@ Config ReadConfig() {
     cfg.transparentFog = CVarInt(s_cvars.transparent, 1) != 0;
     cfg.fadeEarly = CVarInt(s_cvars.fadeEarly, 1) != 0;
     cfg.fadeStencil = CVarInt(s_cvars.fadeStencil, 1) != 0;
+    cfg.msaaSplit = CVarInt(s_cvars.msaaSplit, 1) != 0;
     cfg.startOffset = std::max(CVarFloat(s_cvars.startOffset, cfg.startOffset), 0.0f);
     cfg.maxDistance = std::max(CVarFloat(s_cvars.maxDistance, cfg.maxDistance), 100.0f);
     cfg.noiseAmount = std::clamp(CVarFloat(s_cvars.noise, cfg.noiseAmount), 0.0f, 1.0f);
@@ -480,6 +482,7 @@ void RegisterCVars() {
     s_cvars.transparent = CVar::Register("vfogTransparent", "Volumetric fog: 1 = composite before transparents and fit the fog onto them, 0 = one composite after the whole world", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.fadeEarly = CVar::Register("vfogFadeEarly", "Volumetric fog: 1 = M2s fading at their draw distance are drawn before the early composite, so it fogs them at their own depth (default), 0 = stock pass 1 with the fitted fog", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.fadeStencil = CVar::Register("vfogFadeStencil", "Volumetric fog: 1 = fading M2s drawn early cross-fade by their alpha between the fog behind them and their own (wxl-vfog 0.6.3, needs a stencil), 0 = they take their own fog at any alpha", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    s_cvars.msaaSplit = CVar::Register("vfogMsaaSplit", "Volumetric fog with MSAA: 1 = the near and far samples of an edge pixel each fogged at their own depth (coa sample split, D3D9/D3D11), 0 = the fog of one sample", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.startOffset = CVar::Register("vfogStartOffset", "Volumetric fog start distance (yards)", 1, "10", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.maxDistance = CVar::Register("vfogMaxDistance", "Volumetric fog maximum march distance (yards)", 1, "5000", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.noise = CVar::Register("vfogNoise", "Volumetric fog density noise amount", 1, "0.15", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);

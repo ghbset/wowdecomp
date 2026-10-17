@@ -1,7 +1,7 @@
 // VFOG WP6: GPU passes, a port of coa-vfog src/renderer.cpp (RenderPasses :1265-1525) onto the Gx API.
 // docs/VFOG_PORT.md sections 2-5 are the spec: pass list, targets, register and sampler contract.
 // God rays: coa DrawGodRayMask / DrawGodRaysOverScene (renderer.cpp:1189-1260), always drawn after the world.
-// Not ported (doc section 1): the MSAA sample split (one depth sample per pixel, doc section 3), the depth probe, logging.
+// Not ported (doc section 1): the depth probe, logging.
 #include "WoW/Source/WorldClient/VolumetricFogModel.h"
 #include "WoW/Source/WorldClient/VolumetricFogWater.h"
 #include <algorithm>
@@ -31,6 +31,7 @@ constexpr uint32_t kLocalControlRegister = 53;
 constexpr uint32_t kVariationRegister = 78;
 constexpr uint32_t kCompositeRegister = 96;
 constexpr uint32_t kHorizonBandRegister = 99;
+constexpr uint32_t kSampleSideRegister = 80;        // VFogCompositeSplit c80 (coa c99, which is the horizon band here)
 constexpr uint32_t kDitherRegister = 79;            // vf_common cDither (x on, y frame)
 constexpr uint32_t kGradeRegister = 10;             // VFogGrade c10 strength, c11-c18 curve
 constexpr uint32_t kLocalLightRegister = 100;
@@ -56,6 +57,8 @@ enum Blend { Blend_GammaFixedFunction = 0, Blend_LinearOverSceneCopy = 1, Blend_
 struct Shaders {
     CGxShader* march[3][2][2];          // [quality-1][local lights][noise]
     CGxShader* composite[3][2][2];
+    CGxShader* compositeSplit[3][2][2]; // VFogCompositeSplit: one side of an MSAA silhouette (vfogMsaaSplit)
+    CGxShader* silhouette;              // VFogSilhouette: oDepth, so D3D only (the Vulkan translator has no oDepth)
     CGxShader* temporal;
     CGxShader* historyDepth;
     CGxShader* rayMask;
@@ -535,6 +538,45 @@ bool CopyRawDepth(CGxTex*& target, CGxTex* depth) {
     return true;
 }
 
+// coa Renderer::DrawCompositeBySampleDepth + MarkSilhouetteSamples (vfogMsaaSplit, docs section 3 MSAA): the samples
+// of each silhouette are marked in the stencil by VFogSilhouette's oDepth against the live multisampled depth (far =
+// 0xFF, near = 1, the rest 0), then the plain composite draws (everywhere when it overwrites, i.e. over the scene copy;
+// else the unmarked samples), and the split composite fogs the near and the far samples at their own side's depth.
+// The pixel shader runs once per pixel; the stencil test is per sample, so each side lands on its own samples.
+void DrawCompositeBySampleDepth(CGxShader* composite, CGxShader* split, bool overwrites, const WorldViewport& vp) {
+    CGxDevice* device = g_theGxDevicePtr;
+    const uint32_t w = static_cast<uint32_t>(vp.w);
+    const uint32_t h = static_cast<uint32_t>(vp.h);
+    GxXformSetViewport(vp.minX, vp.maxX, vp.minY, vp.maxY, 0.0f, 1.0f);
+    GxSceneClear(GxBufferBit_Stencil, CImVector { 0, 0, 0, 0 });
+    GxRsSet(GxRs_ColorWrite, 0);
+    GxRsSet(GxRs_DepthTest, 1);
+    GxRsSet(GxRs_DepthFunc, 3);     // LESS (s_cmpFunc[3])
+    SetStencil(GxStencilCmp_Always, 1, 0xFF, 0xFF, GxStencilOp_Invert, GxStencilOp_Replace);
+    device->RsSet(GxRs_PixelShader, s_shaders.silhouette);
+    DrawQuad(w, h, vp.minX, vp.maxX, vp.minY, vp.maxY);
+    GxRsSet(GxRs_DepthTest, 0);
+    GxRsSet(GxRs_ColorWrite, 7);
+
+    const float nearSide[4] = { 0.0f, overwrites ? 1.0f : 0.0f, 0.0f, 0.0f };
+    const float farSide[4] = { 1.0f, overwrites ? 1.0f : 0.0f, 0.0f, 0.0f };
+    if (overwrites) {
+        GxRsSet(GxRs_StencilTest, 0);
+    } else {
+        SetStencil(GxStencilCmp_Equal, 0, 0xFF, 0, GxStencilOp_Keep);
+    }
+    device->RsSet(GxRs_PixelShader, composite);
+    DrawQuad(w, h, vp.minX, vp.maxX, vp.minY, vp.maxY);
+    device->RsSet(GxRs_PixelShader, split);
+    SetStencil(GxStencilCmp_Equal, 1, 0xFF, 0, GxStencilOp_Keep);
+    SetPs(kSampleSideRegister, nearSide, 1);
+    DrawQuad(w, h, vp.minX, vp.maxX, vp.minY, vp.maxY);
+    SetStencil(GxStencilCmp_Equal, 0xFF, 0xFF, 0, GxStencilOp_Keep);
+    SetPs(kSampleSideRegister, farSide, 1);
+    DrawQuad(w, h, vp.minX, vp.maxX, vp.minY, vp.maxY);
+    GxRsSet(GxRs_StencilTest, 0);
+}
+
 }  // namespace
 
 bool KeepDepthBehindFading() {
@@ -609,6 +651,11 @@ bool RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg,
     CGxShader* unlitMarch = VariantShader(s_shaders.march, "VFogMarch", quality, false, noiseVariant);
     CGxShader* litMarch = lit ? VariantShader(s_shaders.march, "VFogMarch", quality, true, noiseVariant) : unlitMarch;
     CGxShader* composite = VariantShader(s_shaders.composite, "VFogComposite", quality, lit, noiseVariant);
+    // vfogMsaaSplit: only with a multisampled depth (D3D9 RESZ / D3D11; Vulkan has none, and cannot load VFogSilhouette).
+    CGxShader* splitComposite = cfg.msaaSplit && device->m_format.m_multisampleCount > 1 && StencilAvailable() && !vp.target
+            && Shader(s_shaders.silhouette, "VFogSilhouette")
+        ? VariantShader(s_shaders.compositeSplit, "VFogCompositeSplit", quality, lit, noiseVariant)
+        : nullptr;
     bool temporal = cfg.temporal > 0.0f;
     if (!unlitMarch || !litMarch || !composite || (temporal && (!Shader(s_shaders.temporal, "VFogTemporal") || !Shader(s_shaders.historyDepth, "VFogHistoryDepth")))) {
         s_shaderMissing = true;
@@ -855,9 +902,13 @@ bool RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg,
     Bind(4, s_targets.march);
     device->RsSet(GxRs_PixelShader, composite);
     // VFogComposite reads TEXCOORD0 as uv across the world viewport (vf_common FullPixelFromUv: c0.xy + uv * c0.zw).
-    device->DeviceSceneDepthBound(false);   // D3D9: s0 is the INTZ depth-stencil the back buffer uses
-    DrawQuad(static_cast<uint32_t>(vpW), static_cast<uint32_t>(vpH), vpMinX, vpMaxX, vpMinY, vpMaxY);
-    device->DeviceSceneDepthBound(true);
+    if (splitComposite) {
+        DrawCompositeBySampleDepth(composite, splitComposite, sceneCopy != nullptr, vp);   // MSAA: INTZ is a copy, the MS depth stays bound
+    } else {
+        device->DeviceSceneDepthBound(false);   // D3D9: s0 is the INTZ depth-stencil the back buffer uses
+        DrawQuad(static_cast<uint32_t>(vpW), static_cast<uint32_t>(vpH), vpMinX, vpMaxX, vpMinY, vpMaxY);
+        device->DeviceSceneDepthBound(true);
+    }
 
     if (fadeDepth && copy) {
         // wxl-vfog Renderer::DrawOverMarked: out = lerp(frame fogged behind, the unfogged copy fogged at the model's
