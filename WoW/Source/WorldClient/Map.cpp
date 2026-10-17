@@ -3396,11 +3396,6 @@ CMapAreaLow* CMap::AllocAreaLow() {
 void CMapAreaLowHeap::Delete(CMapAreaLow* areaLow) {
     areaLow->m_horizonLink.Unlink();
 
-    if (areaLow->m_minimapTex) {
-        HandleClose(reinterpret_cast<HOBJECT>(areaLow->m_minimapTex));
-        areaLow->m_minimapTex = nullptr;
-    }
-
     ObjectFree(this->m_heapId, areaLow->m_objectIndex);
 }
 

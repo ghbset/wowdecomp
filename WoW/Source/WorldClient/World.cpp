@@ -4944,12 +4944,16 @@ void CWorldScene::RenderHorizon() {
     world.Translate(C3Vector(-CWorldScene::s_activeWorldView.x, -CWorldScene::s_activeWorldView.y, -CWorldScene::s_activeWorldView.z));
     g_theGxDevicePtr->XformPushAndSet(GxXform_World, world);
 
-    CMapAreaLow* nextArea;
+    // Not in 12340: the WDL tiles batched from static buffers (FarField::RenderTerrain); 12340's one
+    // draw per tile when that path does not apply.
+    if (!FarField::RenderTerrain()) {
+        CMapAreaLow* nextArea;
 
-    for (CMapAreaLow* area = CWorldScene::sortTable.m_horizonChunkList.Head(); area; area = nextArea) {
-        nextArea = CWorldScene::sortTable.m_horizonChunkList.Next(area);
-        CMap::RenderLowDetail(area);
-        area->m_horizonLink.Unlink();
+        for (CMapAreaLow* area = CWorldScene::sortTable.m_horizonChunkList.Head(); area; area = nextArea) {
+            nextArea = CWorldScene::sortTable.m_horizonChunkList.Next(area);
+            CMap::RenderLowDetail(area);
+            area->m_horizonLink.Unlink();
+        }
     }
 
     uint32_t count = 0;

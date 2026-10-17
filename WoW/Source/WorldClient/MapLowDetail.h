@@ -28,8 +28,7 @@ class CMapAreaLow {
     /* 004C */ TSLink<CMapAreaLow> m_horizonLink;
     /* 0054 */ FVBBList::Block* m_block;
     /* 0058 */ uint32_t m_flags;
-    // Not in 12340 (wdlTextured): the tile's minimap texture, and the tint its vertices were built with.
-    CTexture* m_minimapTex;
+    // Not in 12340 (wdlTextured): the tint its vertices were built with (the per-tile fallback path).
     uint32_t m_builtTint;
 
     CMapAreaLow();
@@ -54,6 +53,12 @@ namespace FarField {
     void TerrainConstants(CMapRenderChunk::SVertexShaderConstants& consts);
     // The fog colour where the terrain pixel shaders read it (pixel c2, or GxRs_FogColor).
     void BindFogColor();
+    // The WDL terrain pass (CWorldScene::RenderHorizon): streams the ground bake and draws every horizon
+    // tile from static per-block buffers in a few merged draws. False when the per-tile path must draw
+    // instead (wdlTextured 0, horizonBatched 0, stock fog, no terrain shaders); the list is then untouched.
+    bool RenderTerrain();
+    // Drops the map's far-terrain buffers, bake and atlas (map load / unload).
+    void Reset();
 }
 
 class CMapLowDetail {
