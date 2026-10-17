@@ -44,7 +44,6 @@ constexpr uint32_t kGrid = 129;
 constexpr float kStep = kTileYd / 128.0f;
 constexpr float kSkirt = 25.0f;          // farfield's: yards a tile's edges hang down
 constexpr uint32_t kBuildsPerFrame = 2;  // ponytail: a count, not a timed budget (a level-0 build is ~0.5 ms)
-constexpr uint32_t kIdleFrames = 120;    // a level not drawn for this long may be evicted for another
 
 enum : uint8_t { Lod_None, Lod_Reading, Lod_Ready, Lod_Failed };
 
@@ -67,6 +66,8 @@ struct Tile {
     float err[4];                 // yards: levels 0-2 against the real terrain, 3 the WDL
     float lo, hi;
     Level lv[3];
+    uint8_t level;                // the level its distance calls for this frame (3: the WDL), whether in view or not
+    float d;                      // its nearest point, yards
 };
 
 struct Shared {
@@ -92,7 +93,7 @@ struct LodState {
     Tile* tiles[4096] = {};
     std::vector<uint32_t> loaded;
     Shared shared[3];
-    std::vector<Drawn> drawn[2];
+    std::vector<Drawn> drawn[4];
     std::vector<Want> want;
     uint32_t frame = 0;
     size_t bytes = 0;
@@ -114,7 +115,7 @@ CVar* PixelsCVar() {
 }
 
 CVar* MemoryCVar() {
-    static CVar* s_cvar = CVar::Register("farTerrainLodMemory", "Engine option: megabytes the far terrain's detailed levels may hold (heights and buffers)", 0x1, "64", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    static CVar* s_cvar = CVar::Register("farTerrainLodMemory", "Engine option: megabytes the far terrain's detailed levels may hold (heights and buffers)", 0x1, "160", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     return s_cvar;
 }
 
@@ -389,24 +390,29 @@ bool Built(const Tile& tile, uint32_t level) {
     return Valid(lv.vertexBuf) && Valid(lv.indexBuf);
 }
 
-// Frees the least recently drawn levels that have been idle a while until `need` more bytes fit.
+// Frees levels their tile's distance no longer asks for, farthest tile first, until `need` more bytes fit.
+// A level the distance asks for is never freed for another: what is built does not depend on the view.
 bool MakeRoom(size_t need) {
     while (s_lod.bytes + need > Cap()) {
-        Level* oldest = nullptr;
+        Level* victim = nullptr;
+        float farthest = -1.0f;
 
         for (uint32_t t : s_lod.loaded) {
-            for (Level& lv : s_lod.tiles[t]->lv) {
-                if (lv.vertexBuf && lv.used + kIdleFrames < s_lod.frame && (!oldest || lv.used < oldest->used)) {
-                    oldest = &lv;
+            Tile& tile = *s_lod.tiles[t];
+
+            for (uint32_t l = 0; l < 3; l++) {
+                if (tile.lv[l].vertexBuf && l != tile.level && tile.d > farthest) {
+                    victim = &tile.lv[l];
+                    farthest = tile.d;
                 }
             }
         }
 
-        if (!oldest) {
+        if (!victim) {
             return false;
         }
 
-        FreeLevel(*oldest);
+        FreeLevel(*victim);
     }
 
     return true;
@@ -578,6 +584,9 @@ void FarLod::AdtRead(uint32_t t, const uint8_t* buf, uint32_t size) {
         lv = Level {};
     }
 
+    tile->level = 3;
+    tile->d = 1e30f;
+
     s_lod.tiles[t] = tile;
     s_lod.state[t] = Lod_Ready;
     s_lod.loaded.push_back(t);
@@ -586,8 +595,11 @@ void FarLod::AdtRead(uint32_t t, const uint8_t* buf, uint32_t size) {
 
 void FarLod::BeginFrame() {
     s_lod.frame++;
-    s_lod.drawn[0].clear();
-    s_lod.drawn[1].clear();
+
+    for (std::vector<Drawn>& list : s_lod.drawn) {
+        list.clear();
+    }
+
     s_lod.want.clear();
     s_lod.draws = 0;
     memset(s_lod.perLevel, 0, sizeof(s_lod.perLevel));
@@ -611,45 +623,69 @@ void FarLod::BeginFrame() {
             }
         }
     }
+
+    // Every tile with heights gets the level its distance calls for, in view or not, and the missing ones
+    // queue nearest first (EndFrame): turning the camera neither drops nor rebuilds anything.
+    if (!On()) {
+        return;
+    }
+
+    const C3Vector& cam = CWorldScene::s_activeWorldView;
+    const float farZ = CGWorldFrame::GetActiveCamera()->m_farZ;
+    // Pixels a yard of height error covers at the tile's nearest point: half the viewport's height times the
+    // projection's y scale (1 / tan(fov / 2)), over the distance (at least the horizon's near plane).
+    const CRect& rect = g_theGxDevicePtr->m_curWindowRect;
+    const float pxScale = 0.5f * (rect.maxY - rect.minY) * fabsf(g_theGxDevicePtr->m_projNative.b1);
+    const float limit = std::max(PixelsCVar()->m_floatValue, 0.05f);
+
+    for (uint32_t t : s_lod.loaded) {
+        Tile& tile = *s_lod.tiles[t];
+        const float x1 = kOrigin - (t / 64) * kTileYd, x0 = x1 - kTileYd;
+        const float y1 = kOrigin - (t % 64) * kTileYd, y0 = y1 - kTileYd;
+        const float dx = std::max({ x0 - cam.x, cam.x - x1, 0.0f });
+        const float dy = std::max({ y0 - cam.y, cam.y - y1, 0.0f });
+        const float dz = std::max({ tile.lo - cam.z, cam.z - tile.hi, 0.0f });
+        float dmin, dmax;
+        TileDistance(t, dmin, dmax);
+        tile.d = sqrtf(dx * dx + dy * dy + dz * dz);
+
+        if (dmax < farZ - 50.0f) {
+            tile.level = 3;  // wholly inside the horizon's near plane: never drawn by it
+            continue;
+        }
+
+        const float pxPerYd = pxScale / std::max(tile.d, farZ - 50.0f);
+        uint32_t level = 0;
+
+        // The real terrain reaches into this tile (it draws whole chunks out to farclip): level 0, so its edge
+        // meets vertices and normals that are its own.
+        if (tile.d > farZ + 34.0f) {
+            if (tile.err[3] * pxPerYd <= limit) {
+                level = 3;  // the WDL is good enough here, and batched
+            } else {
+                for (level = 2; level > 0 && tile.err[level] * pxPerYd > limit; level--) {
+                }
+            }
+        }
+
+        tile.level = static_cast<uint8_t>(level);
+
+        if (level < 3 && !Built(tile, level)) {
+            s_lod.want.push_back({ tile.d, t, level });
+        }
+    }
 }
 
-bool FarLod::Claim(uint32_t t, bool textured) {
-    if (!On() || s_lod.state[t] != Lod_Ready) {
+bool FarLod::Claim(uint32_t t, uint32_t set) {
+    if (!On() || s_lod.state[t] != Lod_Ready || s_lod.tiles[t]->level == 3) {
         return false;
     }
 
     Tile& tile = *s_lod.tiles[t];
-    const C3Vector& cam = CWorldScene::s_activeWorldView;
-    const float x1 = kOrigin - (t / 64) * kTileYd, x0 = x1 - kTileYd;
-    const float y1 = kOrigin - (t % 64) * kTileYd, y0 = y1 - kTileYd;
-    const float dx = std::max({ x0 - cam.x, cam.x - x1, 0.0f });
-    const float dy = std::max({ y0 - cam.y, cam.y - y1, 0.0f });
-    const float dz = std::max({ tile.lo - cam.z, cam.z - tile.hi, 0.0f });
-    const float dmin = sqrtf(dx * dx + dy * dy + dz * dz);
-    const float farZ = CGWorldFrame::GetActiveCamera()->m_farZ;
-
-    // Pixels a yard of height error covers at the tile's nearest drawn point: half the viewport's height
-    // times the projection's y scale (1 / tan(fov / 2)), over the distance.
-    const CRect& rect = g_theGxDevicePtr->m_curWindowRect;
-    const float pxPerYd = 0.5f * (rect.maxY - rect.minY) * fabsf(g_theGxDevicePtr->m_projNative.b1) / std::max(dmin, farZ - 50.0f);
-    const float limit = std::max(PixelsCVar()->m_floatValue, 0.05f);
-    uint32_t level = 0;
-
-    // The real terrain reaches into this tile (it draws whole chunks out to farclip): level 0, so its edge
-    // meets vertices and normals that are its own.
-    if (dmin > farZ + 34.0f) {
-        if (tile.err[3] * pxPerYd <= limit) {
-            return false;  // the WDL is good enough here, and batched
-        }
-
-        for (level = 2; level > 0 && tile.err[level] * pxPerYd > limit; level--) {
-        }
-    }
-
+    const uint32_t level = tile.level;
     uint32_t draw = level;
 
     if (!Built(tile, level)) {
-        s_lod.want.push_back({ dmin, t, level });
         // Meanwhile the nearest built level, finer first; the WDL when none is.
         draw = 3;
 
@@ -666,9 +702,12 @@ bool FarLod::Claim(uint32_t t, bool textured) {
         }
     }
 
-    tile.lv[draw].used = s_lod.frame;
-    s_lod.drawn[textured ? 0 : 1].push_back({ dmin, t, draw });
+    s_lod.drawn[set].push_back({ tile.d, t, draw });
     return true;
+}
+
+bool FarLod::Drawing(uint32_t set) {
+    return !s_lod.drawn[set].empty();
 }
 
 void FarLod::Draw(uint32_t set) {

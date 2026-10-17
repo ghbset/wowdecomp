@@ -2642,6 +2642,8 @@ void CWorldScene::RenderChunksSolid() {
             }
         }
 
+        FarField::NoteChunk(renderChunk);  // not in 12340: the far blend band (RenderBlend)
+
         renderChunk->m_renderChunkLink.Unlink();
         CMap::s_mapRenderChunkUpdateList.LinkToTail(renderChunk);
         renderChunk = next;
@@ -3683,6 +3685,8 @@ void CWorldScene::RenderChunksSinglePass() {
                     }
                 }
 
+                FarField::NoteChunk(renderChunk);  // not in 12340: the far blend band (RenderBlend)
+
                 renderChunk->m_renderChunkLink.Unlink();
 
                 if (CWorld::enables & 0x40000000) {
@@ -3774,6 +3778,7 @@ void CWorldScene::RenderChunks() {
     CWorldScene::RenderChunksSinglePass();
     CWorldScene::RenderChunksSolid();
     CWorldScene::RenderChunksZoneDebug();
+    FarField::RenderBlend();  // not in 12340: the far blend band (farTexBand)
 
     for (int32_t i = 0; i < 5; i++) {
         g_theGxDevicePtr->m_xforms[i].Identity();

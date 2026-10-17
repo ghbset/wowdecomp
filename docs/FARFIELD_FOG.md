@@ -1,7 +1,8 @@
 # Far-field fog (WDL horizon and later far passes)
 
 Not stock. CVars: `wdlTextured` (1), `horizonFog` (1), `horizonBatched` (1), `horizonFarclipScale`
-(stock, 4.0). `horizonFog 0` or `wdlTextured 0` gives back 12340's fog everywhere. `horizonBatched 0`
+(stock, 4.0); the far ground texture's `farTexQuality`, `farTexPixels`, `farTexMemory`, `farTexBand`,
+`farTexBandWidth` (see "The ground texture" and "The blend band"). `horizonFog 0` or `wdlTextured 0` gives back 12340's fog everywhere. `horizonBatched 0`
 draws the WDL one tile at a time again (same look, for comparing cost).
 Line numbers are for the commit that adds the batched pass (2026.10.17-wdlperf).
 
@@ -121,7 +122,7 @@ set once. Then:
 ## Detailed levels (farTerrainLod)
 
 CVars: `farTerrainLod` (1; 0 = WDL only, as before), `farTerrainLodPixels` (1.5, the largest height
-error allowed on screen, px), `farTerrainLodMemory` (64 MB for heights and level buffers),
+error allowed on screen, px), `farTerrainLodMemory` (160 MB for heights and level buffers),
 `farTerrainLodStats` (0; 1 prints tiles, levels, draws and MB to the console every 600 frames).
 Code: `WoW/Source/WorldClient/FarTerrainLod.{h,cpp}`, hooked into `MapLowDetail.cpp` at five places
 (grep `FarLod::`).
@@ -148,7 +149,8 @@ from the same ADTs the ground bake reads, and there are three grid levels instea
   level's surface and the real terrain at every MCVT vertex (outer and inner). Level 3 measures the WDL
   mesh itself (12340's four-triangle fan), so a tile whose WDL is already right stays on the cheap batched
   pass.
-- **Pick** (`FarLod::Claim`, `:616`, called per visible horizon tile from `RenderTerrain`): px per yard
+- **Pick** (`FarLod::BeginFrame`, for every tile with heights, in view or not; `FarLod::Claim` only reads
+  the result for the visible ones): px per yard
   = 0.5 x viewport height x projection y-scale / distance to the tile's nearest point (at least the
   horizon near plane). The coarsest level with `err x px/yd <= farTerrainLodPixels` wins; level 3
   means the tile stays in the WDL runs. Tiles the real terrain reaches into (nearest point within
@@ -163,9 +165,10 @@ from the same ADTs the ground bake reads, and there are three grid levels instea
   (`AllHoles`).
 - **Buffers and cache** (`Build`, `:416`): static PN vertex buffer per tile and level, built once and
   refilled only when the device drops it; index buffers per level shared by every tile without holes.
-  Missing levels queue nearest first and at most 2 build a frame (`FarLod::EndFrame`, `:700`); until
-  then the nearest built level draws, else the WDL. Over the cap, levels idle 120 frames go, least
-  recently drawn first. Heights for tiles 2.5 tiles past the horizon's reach go every 60 frames.
+  Missing levels queue nearest first, whether in view or not, and at most 2 build a frame
+  (`FarLod::EndFrame`); until then the nearest built level draws, else the WDL. Over the cap, only levels
+  their tile's distance no longer asks for go, farthest tile first: looking away never drops a level
+  (2026.10.17-farlod rebuilt off-screen tiles on the LRU and drew them on the WDL meanwhile). Heights for tiles 2.5 tiles past the horizon's reach go every 60 frames.
 - **Draw** (`FarLod::Draw`, `:674`): inside the WDL pass's `RsPush`, after each set's WDL runs, with
   the same shaders, constants, atlas and fog (set 1 fog-coloured for tiles not baked yet). One draw a
   detailed tile, culling off, front to back.
@@ -174,36 +177,81 @@ from the same ADTs the ground bake reads, and there are three grid levels instea
   level-0 tiles round the view distance, a few dozen at levels 1-2 where hills need them, the rest on
   the WDL: 30-60 extra draws, 15-30 MB. `farTerrainLodStats 1` prints the real numbers.
 
-## The ground colour (no minimap)
+## The ground texture (no minimap)
 
 The WDL shows the ground that is really on each tile, baked in the client the way wxl-wraithhost bakes
-the far-land colour wxl-farfield lays on its coarse WDL (`/root/wxl-farbush-wt/wraithhost-lite/src/host/terrain/FarLod.cpp`,
-the 64 x 64 per tile `colour` block). Chosen over reading wraithhost's `.faralb` files because those
-are a cache built on each player's PC by a plugin that does not load in Wow32/Wow64; the bake itself is
-a few hundred lines and needs nothing but the ADTs.
+wxl-farfield's `.faralb` (the map's layer textures composited by their alpha maps; farfield lays it on its
+detailed tiles at 2.083 yd a texel, `/root/wxl-farbush-wt/wxl-farfield/src/FarTerrain.cpp` header and
+`albedo`). Baked here because wraithhost does not load in Wow32/Wow64; it needs nothing but the ADTs.
 
-- `PumpBake` (`MapLowDetail.cpp:1125`): nearest tile first within the horizon reach, two ADT reads in
-  flight on the async file queue (`AsyncFileReadObject`, as CMapArea loads), one finished tile baked a
-  frame. Stale reads after a map change free themselves (generation check in `ReadDone`).
-- `BakeTile` (`:657`): per MCNK, each layer's texture as one average colour (`TextureColour`, `:505`:
-  the smallest DXT mip still a block across, read alone, cached by name), composited by the alpha maps
-  as the terrain pixel shader does (big alpha: weighted sum; else layered lerp), 16 x 16 alpha texels to
-  an atlas texel, times the MCCV vertex colours (x 2 / 255) and the MCSH shadow (0.7 + 0.3 lit). MCAL
-  is sized by the MCNK's `sizeAlpha`, never the MCAL header (Northrend's headers say 512; with them the
-  far land came out dark). Cells with liquid (MH2O exists bits, or the old MCNK liquid flags) take the
-  liquid's colour by LiquidType kind (water, ocean, magma, slime; wraithhost's values, `:448`).
-- Colour match: the bake then opens the saturation about each texel's brightness by 1.4
-  (wxl-farfield's `match_chroma`; an 8.3 yd average is greyer than the ground it averages), and the
-  WDL is drawn with the terrain's own shader, fog and sun, so it is lit like the ground in front.
-  farfield's second step, a per-channel gain measured live against the near ground on the GPU, is not
-  done.
-- `StoreTile` (`:1005`): one 4096 px DXT1 atlas for the whole 64 x 64 map, 64 px (8.3 yd/texel) a
-  tile, laid out like the world, so its uv is linear in the position for every tile and a mip or a
-  bilinear tap across a tile edge reaches the real neighbour. Levels 0-4 are box-filtered from the
-  tile; levels 5-10 (a texel spans tiles) from the baked tiles' average colours. The whole chain is
-  kept on the CPU (10.7 MB) for the texture's user callback; each bake uploads only its tile's
-  rectangle (`GxTexUpdate`, immediate), the first one uploads everything.
-- The per-tile path (`horizonBatched 0`) and the fixed-function fallback use the same atlas.
+CVars: `farTexQuality` (2; 0 coarse only, 1 + mid, 2 + near), `farTexPixels` (1.5: the largest far texel
+allowed on screen, px), `farTexMemory` (72 MB: each atlas costs 21.3 MB, 10.7 on the GPU and its 10.7 MB
+CPU copy for the texture callback; coarse always, then mid, then near while they fit).
+
+| Atlas | A tile | A texel | Holds | Texture |
+|---|---|---|---|---|
+| near | 512 px | 1.04 yd | the 7 x 7 tiles round the camera's (8 x 8 slots) | 4096 px DXT1, 11 levels |
+| mid | 256 px | 2.08 yd (farfield's) | 15 x 15 tiles (16 x 16 slots) | 4096 px DXT1 |
+| coarse | 64 px | 8.3 yd | the whole 64 x 64 map | 4096 px DXT1 |
+
+- **Window atlases** (farfield's `albedo` layout): a tile lives in the slot `(col mod n, row mod n)`, so the
+  uv stays linear in the position: `uv = (pos.yx - c23.yx) * c18.yx` with c23 the map corner and
+  `c18 = -1 / (n x 533.33)`, wrap addressing. One constant pair and one texture per atlas; a bilinear tap or
+  a mip that crosses a slot edge reaches the tile that really is next door (except at the window's edge,
+  which only the farthest window tiles touch). The coarse atlas is the same code with n = 64.
+- **Which atlas a tile draws with** (`PickAtlas`): the coarsest one that holds it whose texel stays under
+  `farTexPixels` at the tile's nearest point (px per yd = 0.5 x viewport height x projection y scale /
+  distance, as farTerrainLod), else the finest that holds it, else fog-coloured. Distance only.
+- **Bake** (`PumpBake`, `StepJob`): nearest tile first within the horizon's reach, two ADT reads in flight
+  on the async file queue; a tile is read when its coarse bake is missing, it is inside a window atlas that
+  does not hold it yet, or farTerrainLod wants its heights. A finished read is baked in slices, about 2 ms a
+  frame (one slice always runs): heights (FarLod), 16 chunk rows composited at the finest resolution any
+  wanted atlas needs, then each wanted atlas's levels box-filtered down and DXT1-encoded 16 block rows a
+  slice; the tile's slot rectangle is uploaded once at the end (`GxTexUpdate`). Levels where a texel spans
+  tiles come from the slots' tile averages. The ADT buffer is freed after the composite.
+- **Composite** (`CompositeRow`): per atlas texel, each MCLY layer's texture at the texel's place in its
+  repeat (8 repeats a chunk, u along the columns, v along the rows, as the Terrain vertex shader maps
+  them; `LayerTexOf` reads the texture's smallest mip of 4 x 4 or more, reduced to 4 x 4, 2 x 2, 1 x 1:
+  at 1.04 yd a texel a repeat is 4 texels, so this is the mip the real terrain samples there), blended by
+  the alpha maps averaged over the texel (big alpha: weighted sum, perm 14; else layered lerp, perm 6),
+  times MCCV (x 2 / 255, bilinear) and MCSH (the shader's 0.7 + 0.3 lit). MCAL is sized by the MCNK's
+  `sizeAlpha`, never the MCAL header (Northrend's headers say 512). Liquid cells take their LiquidType's
+  colour (wraithhost's). No saturation boost any more: the old 1.4 opened up 8.3 yd averages; these are
+  the texels the real terrain itself shows at that density.
+- **Cost**: `farTerrainLodStats 1` prints tiles held per atlas, bakes and the average bake time a tile
+  (all slices summed). Expect a few ms of work a tile spread over several frames; each frame spends at most
+  about 2 ms plus one slice. Memory: 64 MB at the defaults (three atlases), plus 7 MB static scratch.
+- No eviction pass: a window atlas's slot is overwritten only when a tile nearer the camera claims it, so
+  nothing is lost by looking away.
+
+## The blend band (farTexBand)
+
+CVars: `farTexBand` (1), `farTexBandWidth` (150 yd). Port of farfield's `blend` (kBlendPs): the last
+stretch of real terrain fades into the far land's colour at the same ground point, so by the cut-off the
+two are one picture and there is no line.
+
+- `CWorldScene::RenderChunks` notes every real chunk it draws (`FarField::NoteChunk`, both chunk loops in
+  `World.cpp`); after them `FarField::RenderBlend` redraws the chunks reaching into the band from their own
+  buffers with the stock `Terrain` vertex shader (permutation 0: no vertex colour, the bake holds MCCV) and
+  our pixel shader **FarBlend** (`Tools/CustomMpq/ShaderSrc/FarBlend.hlsl`). The far land's colour, lit and
+  fogged as the far pass paints it (`atlas x light x 2`, `lerp(c2, colour, fog)` with the terrain's own fog
+  factor), at alpha `smoothstep` over the band (pixel c3 = start, 1 / width, strength). c23 = the camera, so
+  texcoord1 (c14 / c19 = 1) is the ground offset in yards; texcoord0 is the atlas uv (c13 / c18 per atlas).
+- Each chunk paints from the finest atlas holding its tile (near, almost always). Alpha blend, no depth
+  write; the projection's z is pulled 4e-7 toward the camera so the paint passes the depth test over its
+  own triangles on every backend.
+- Farfield works from the depth buffer as a full-screen post pass with a height test for objects; drawing
+  the terrain's own triangles needs neither: trees, buildings and water are never painted.
+- The band ends 4% short of the view distance and is measured in the ground plane (the shader only gets x/y):
+  terrain far below the camera reaches the view-depth cut at a shorter ground distance.
+- Not ported: farfield's live colour match (`match`, a per-channel gain measured on the GPU against the near
+  ground). The bake now uses the real texels with the terrain's own blend, MCCV, shadow, light and fog, so
+  the colours should already agree; the band hides what is left.
+- Shader pipeline: `python3 -I Tools/CustomMpq/ShaderSrc/build_shaders.py` compiles the HLSL to ps_3_0
+  (vkd3d-compiler) as `Tools/CustomMpq/Shaders/Pixel/ps_3_0/FarBlend.bls` (D3D9) and, through shader-xlate,
+  `ps_4_0/FarBlend.bls` (D3D11); both are committed. `Tools/VulkanShaders/translate_shaders.py` reads
+  `Tools/CustomMpq/Shaders` after the client's archives, so the Vulkan manifest gets it; build_custom_mpq.py
+  packs all three. Needs ps_3_0 (`Caps().unk_0134 == 0`); otherwise the band is off.
 
 wxl-light, vfog and the other wxl plugins do not load in Wow32/Wow64 (they hook stock 12340
 addresses; see `/root/d3d11-port/notes/vulkan-plugin-parity.md`). When they come back as an
@@ -314,7 +362,7 @@ request was less grass where it cannot be seen, not more).
   reaches them with no code of their own. Only their geometry (`FarTerrainLod.cpp`) is separate.
 - **Far-only adjustments** (e.g. a horizon tint, or a fog bias for far geometry):
   `FarField::TerrainConstants` / `FarField::BindFogColor` (`MapLowDetail.cpp:383`, `:405`). This is
-  the one place every far pass reads from. A far colour correction belongs in `BakeTile` (baked) or
+  the one place every far pass reads from. A far colour correction belongs in `CompositeRow` (baked) or
   in the far shader.
 - **Per-zone light:** comes in through Light.dbc in `DayNight::CalcColors` (`DayNight.cpp:447`) and
   is already reflected in both of the above.
@@ -326,6 +374,7 @@ request was less grass where it cannot be seen, not more).
   the stock silhouette remain as fallbacks).
 - `WoW/Source/WorldClient/MapLowDetail.h:47`: `namespace FarField`.
 - `WoW/Source/WorldClient/FarTerrainLod.{h,cpp}`: the detailed levels (`namespace FarLod`).
+- `Tools/CustomMpq/ShaderSrc/FarBlend.hlsl`, `build_shaders.py`; `Tools/CustomMpq/Shaders/`: the blend band shader.
 - `WoW/Source/WorldClient/World.cpp:4949`: RenderHorizon calls the pass.
 - `WoW/Source/WorldClient/DayNight.cpp:2123-2140`: the stretch.
 - `WoW/Source/WorldClient/World.cpp:1561`: farFog clamp.
@@ -333,9 +382,10 @@ request was less grass where it cannot be seen, not more).
 
 ## Known limits
 
-- The bake is 8.3 yd a texel from per-layer average colours: roads, dirt patches and snow lines are
-  there, texture detail is not. It is redone every session (no disk cache); a continent's horizon
-  (about 250 tiles at farclip 1000) fills in over a few seconds after login or a teleport, nearest first.
+- Texel detail: 1.04 yd near the view distance, 2.08 yd to about 4000 yd, 8.3 yd past that. It is redone
+  every session (no disk cache); a continent's horizon fills in over some seconds after login or a
+  teleport, nearest first.
+- The blend band paints lake beds under water in the liquid's colour, then the water draws over them.
 - Water is a flat colour on the WDL's (bed) heights; nothing lifts lakes to their surface or draws a
   far sea.
 - WDL heights are 33 yd apart; `farTerrainLod` replaces them wherever the error would show. Past

@@ -73,6 +73,11 @@ namespace FarField {
     // falls under farGrassMinPixels with the projection and viewport bound now.
     bool GrassSizeCull();
     float GrassCutDistance(float height);
+    // The blend band (farTexBand): CWorldScene::RenderChunks notes every real chunk it draws, then
+    // RenderBlend paints the far ground's colour over those reaching the last farTexBandWidth yards before
+    // the view distance, fading in to all of it at the cut-off, so the seam with the far land shows no line.
+    void NoteChunk(CMapRenderChunk* chunk);
+    void RenderBlend();
 }
 
 class CMapLowDetail {

@@ -14,12 +14,14 @@ namespace FarLod {
     void MarkReading(uint32_t t);
     // A finished read of tile t's ADT (null: it could not be opened or parsed).
     void AdtRead(uint32_t t, const uint8_t* buf, uint32_t size);
-    // RenderTerrain, before its tile loop.
+    // RenderTerrain, before its tile loop: picks every loaded tile's level by distance and queues the missing.
     void BeginFrame();
     // Tile t is visible this frame: true when a detailed level draws it (the WDL pass then leaves it out).
-    // `textured`: the ground bake has it (else it is drawn fog-coloured, as the WDL is).
-    bool Claim(uint32_t t, bool textured);
-    // Draws the claimed tiles of one set (0 textured, 1 fogged) with the WDL pass's state and constants.
+    // `set`: the WDL pass's draw set it belongs to (0-2 the atlas it is textured from, 3 fog-coloured).
+    // The level itself was picked in BeginFrame by distance alone.
+    bool Claim(uint32_t t, uint32_t set);
+    bool Drawing(uint32_t set);
+    // Draws the claimed tiles of one set with the WDL pass's state and constants.
     void Draw(uint32_t set);
     // After the draws: builds the levels the claims asked for, nearest first, within the frame's budget.
     void EndFrame();

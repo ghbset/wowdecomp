@@ -2,6 +2,8 @@
 #include "FarTerrainLod.h"
 #include <cmath>
 #include <cctype>
+#include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <unordered_map>
@@ -22,6 +24,7 @@
 #include "Engine/Source/Gx/CGxVertexPCT.h"
 #include "Engine/Source/Base/Handle.h"
 #include "Engine/Source/ConsoleBase/ConsoleVar.h"
+#include "Engine/Source/ConsoleBase/IConsole.h"
 #include "Engine/Source/ConsoleBase/Types.h"
 #include "Engine/Source/Services/Texture.h"
 #include "WoW/Source/WorldClient/MapChunk.h"
@@ -415,36 +418,36 @@ void FarField::BindFogColor() {
     }
 }
 
-// Not in 12340 (wdlTextured): the WDL horizon's ground colour and its batched draw. docs/FARFIELD_FOG.md.
+// Not in 12340 (wdlTextured): the WDL horizon's ground texture and its batched draw. docs/FARFIELD_FOG.md.
 //
-// The colour is the map's own ground, baked in the client the way wxl-wraithhost bakes its far-land
-// colour (FarLod.cpp, the 8.3 yd colour wxl-farfield puts on the coarse WDL): each ADT chunk's layers, one
-// average colour per layer texture, composited by their alpha maps as the terrain shader composites them,
-// times the vertex colours (MCCV) and the baked shadow, water cells in their liquid's colour. The ADT is
-// read through the async file queue, nearest tile first, and one tile a frame is baked into a 4096 px DXT1
-// atlas of the whole 64 x 64 map (64 px a tile, so a texel is 8.3 yd). The atlas is laid out like the
-// world, so its uv is a linear function of the position for every tile: one set of shader constants and
-// one texture bind for the whole horizon, and a mip or a bilinear tap that crosses a tile edge reaches the
-// tile that really is next door. A tile not baked yet is drawn fully fogged, as 12340 drew every tile.
+// The ground is the map's own, baked in the client the way wxl-wraithhost bakes wxl-farfield's `.faralb`:
+// each ADT chunk's layer textures (their real texels, at the mip the distance calls for), tiled as the
+// terrain shader tiles them and composited by the alpha maps as it composites them, times the vertex
+// colours (MCCV) and the baked shadow; water cells in their liquid's colour. The ADT is read through the
+// async file queue, nearest tile first, and baked a slice at a time under a per-frame budget into three
+// 4096 px DXT1 atlases: near (512 px a tile, 1.04 yd a texel, the 8 x 8 tiles round the camera), mid
+// (256 px, 2.08 yd, 16 x 16 tiles: farfield's) and coarse (64 px, 8.3 yd, the whole map). A window atlas
+// keeps each tile in the slot its own position modulo the window, so its uv is still a linear function of
+// the position (one constant set per atlas, wrap addressing) and a bilinear tap or a mip that crosses a
+// slot edge reaches the tile that really is next door. Each drawn tile takes the coarsest atlas whose
+// texel is at most farTexPixels on screen (by distance only, never by what is in view).
 //
 // The geometry is the WDL heights in static buffers, one vertex and one index buffer per 8 x 8 tiles,
 // built when first seen (the heights never change). A frame draws each block's visible tiles as merged
-// index runs, blocks front to back, state set once.
+// index runs, blocks front to back, one set per atlas, state set once.
 namespace {
 
 constexpr float kOrigin = 17066.666f;
 constexpr float kTileYd = 533.33331f;
-constexpr uint32_t kTilePx = 64;
-constexpr uint32_t kAtlasPx = 64 * kTilePx;
+constexpr uint32_t kAtlasPx = 4096;
 constexpr uint32_t kLevels = 11;          // 4096 .. 4 px: the DXT chain CGxDevice::ITexWHDStartEnd asks for
+constexpr uint32_t kAtlases = 3;          // near, mid, coarse
+constexpr uint32_t kTilePxOf[kAtlases] = { 512, 256, 64 };
+constexpr uint32_t kBakePx = 512;
 constexpr uint32_t kTileVerts = 545;
 constexpr uint32_t kTileIndices = 3072;
 constexpr uint32_t kReadsInFlight = 2;
-// wxl-farfield's match_chroma default: an average over 8.3 yd is greyer than the ground it averages
-// (measured 0.27 against 0.39 saturation), so the spread about its own brightness is opened back up.
-// ponytail: fixed; farfield also closes a per-channel gain measured live against the near ground on the
-// GPU, which this skips.
-constexpr float kChroma = 1.4f;
+constexpr double kBakeBudgetMs = 2.0;     // ponytail: fixed; one slice always runs, so a slow PC still progresses
 // wraithhost's liquid colours (water, ocean, magma, slime).
 constexpr float kLiquid[4][3] = { { 34, 62, 70 }, { 22, 48, 66 }, { 235, 95, 25 }, { 90, 140, 40 } };
 
@@ -456,7 +459,7 @@ struct FarRead {
     uint32_t size;
     uint32_t tile;
     uint32_t gen;
-    bool bake;     // for the ground bake
+    bool bake;     // for the ground bake (any atlas)
     bool heights;  // for the detailed levels (FarTerrainLod.cpp)
 };
 
@@ -469,22 +472,87 @@ struct FarBlock {
     bool init;
 };
 
+// One ground texture's texels as the bake samples them: its 4 x 4 (one tile repeat over 4 texels), 2 x 2
+// and 1 x 1 reductions, RGB 0..255.
+struct LayerTex {
+    float m4[16][3];
+    float m2[4][3];
+    float m1[3];
+};
+
+struct Atlas {
+    uint8_t* chain = nullptr;   // the whole DXT chain, kept for the texture's user callback
+    CTexture* tex = nullptr;
+    int16_t owner[4096];        // per slot: the tile baked into it, -1 none
+};
+
+// The tile being baked, a slice a frame: heights, 16 chunk rows composited at kBakePx, then each wanted
+// atlas's levels encoded a few block rows at a time.
+struct BakeJob {
+    FarRead* read = nullptr;
+    uint32_t step = 0;          // 0 heights, 1..16 chunk rows, then store
+    uint32_t px = 0;            // composite resolution a tile
+    bool want[kAtlases] = {};
+    uint32_t atlas = 0, level = 0, row = 0;
+    bool prepared = false;      // the current atlas's level images are built
+    double ms = 0.0;
+    // parsed once
+    std::vector<const char*> textures;
+    const uint8_t* mh2o = nullptr;
+    uint32_t mh2oLen = 0;
+    const uint8_t* chunks[256] = {};
+    uint32_t chunkLen[256] = {};
+};
+
 struct FarState {
     uint32_t gen = 1;
-    uint8_t tile[4096] = {};
+    uint8_t tile[4096] = {};               // the coarse bake (and whether the ADT is readable at all)
+    uint8_t busy[4096] = {};               // a read or bake of it is under way
     uint8_t avg[4096][3] = {};
     uint32_t start[4096][2] = {};          // per tile: index start / count of its culled-off and culled-on cells
     uint32_t count[4096][2] = {};
-    uint8_t* chain = nullptr;
     uint32_t levelOffset[kLevels] = {};
-    CTexture* atlas = nullptr;
+    Atlas atlas[kAtlases];
     FarBlock blocks[64] = {};
     std::vector<FarRead*> ready;
     uint32_t inFlight = 0;
-    std::unordered_map<std::string, uint32_t> colours;
+    BakeJob job;
+    std::unordered_map<std::string, LayerTex> textures;
+    // farTerrainLodStats
+    uint32_t baked = 0;
+    double bakeMs = 0.0;
+    std::vector<CMapRenderChunk*> band;    // this frame's real chunks reaching into the blend band
+    size_t lastBand = 0;
+    CGxShader* blendPs = nullptr;
+    bool blendTried = false;
 };
 
 FarState s_far;
+
+CVar* TexQualityCVar() {
+    static CVar* s_cvar = CVar::Register("farTexQuality", "Engine option: far ground texture detail (0: 8.3 yd a texel everywhere; 1: also 2.08 yd within 16 x 16 tiles; 2: also 1.04 yd within 8 x 8 tiles, the view distance's)", 0x1, "2", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    return s_cvar;
+}
+
+CVar* TexPixelsCVar() {
+    static CVar* s_cvar = CVar::Register("farTexPixels", "Engine option: the largest far ground texel allowed on screen, in pixels; a tile takes the coarsest baked texture that stays under it", 0x1, "1.5", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    return s_cvar;
+}
+
+CVar* TexMemoryCVar() {
+    static CVar* s_cvar = CVar::Register("farTexMemory", "Engine option: megabytes the far ground textures may hold (each atlas is 10.7 MB on the GPU plus its 10.7 MB copy; coarse first, then mid, then near)", 0x1, "72", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    return s_cvar;
+}
+
+CVar* BandCVar() {
+    static CVar* s_cvar = CVar::Register("farTexBand", "Engine option: fade the last stretch of real terrain into the far ground's colour, so the view distance shows no line (0: off)", 0x1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    return s_cvar;
+}
+
+CVar* BandWidthCVar() {
+    static CVar* s_cvar = CVar::Register("farTexBandWidth", "Engine option: yards of real terrain the blend band fades over, ending just short of the view distance", 0x1, "150", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    return s_cvar;
+}
 
 CVar* HorizonBatchedCVar() {
     static CVar* s_cvar = CVar::Register("horizonBatched", "Engine option: draw the WDL horizon from static buffers in a few batched draws (0: one draw per tile, the old path, for comparison)", 0x1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
@@ -503,22 +571,56 @@ void From565(uint16_t v, float* c) {
     c[2] = static_cast<float>((v & 31) * 255 / 31);
 }
 
-// A ground texture's average colour (0xRRGGBB): its smallest mip that is still a DXT block across, read
-// alone (wraithhost AverageColour). Mid grey when unreadable.
-uint32_t TextureColour(const char* name) {
+// One DXT block's 16 colours (the colour half; DXT3/5 carry it in their last 8 bytes).
+void DecodeDxtBlock(const uint8_t* blk, bool dxt1, float (*out)[3]) {
+    const uint16_t v0 = static_cast<uint16_t>(blk[0] | blk[1] << 8);
+    const uint16_t v1 = static_cast<uint16_t>(blk[2] | blk[3] << 8);
+    float c[4][3];
+    From565(v0, c[0]);
+    From565(v1, c[1]);
+
+    for (int j = 0; j < 3; j++) {
+        if (v0 > v1 || !dxt1) {
+            c[2][j] = (2 * c[0][j] + c[1][j]) / 3;
+            c[3][j] = (c[0][j] + 2 * c[1][j]) / 3;
+        } else {
+            c[2][j] = (c[0][j] + c[1][j]) / 2;
+            c[3][j] = 0.0f;
+        }
+    }
+
+    const uint32_t bits = Rd32(blk + 4);
+
+    for (uint32_t p = 0; p < 16; p++) {
+        for (int j = 0; j < 3; j++) {
+            out[p][j] = c[(bits >> (2 * p)) & 3][j];
+        }
+    }
+}
+
+// A ground texture as the bake samples it: its smallest mip that is still 4 x 4 or more, read alone and
+// box-reduced to 4 x 4 (at 1.04 yd a texel a tile repeat, 4.17 yd, is 4 texels, so this is the mip the
+// real terrain's sampler is on at that density), then 2 x 2 and 1 x 1. Cached by name. Mid grey when
+// unreadable.
+const LayerTex& LayerTexOf(const char* name) {
     std::string key(name);
 
     for (char& c : key) {
         c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
     }
 
-    auto it = s_far.colours.find(key);
+    auto it = s_far.textures.find(key);
 
-    if (it != s_far.colours.end()) {
+    if (it != s_far.textures.end()) {
         return it->second;
     }
 
-    uint32_t rgb = 0x808080;
+    LayerTex tex;
+
+    for (auto& c : tex.m4) {
+        c[0] = c[1] = c[2] = 128.0f;
+    }
+
     SFileImpl* file = nullptr;
 
     if (SFileOpenFile(name, &file) && file) {
@@ -536,48 +638,45 @@ uint32_t TextureColour(const char* name) {
                 level = l;
             }
 
+            const uint32_t mw = w >> level, mh = ht >> level;
             const uint32_t bytes = dxt1 ? 8 : 16;
-            const uint32_t blocks = ((w >> level) / 4 ? (w >> level) / 4 : 1) * ((ht >> level) / 4 ? (ht >> level) / 4 : 1);
-            const uint32_t len = blocks * bytes;
+            const uint32_t bw = mw / 4, bh = mh / 4;
+            const uint32_t len = bw * bh * bytes;
 
-            if (w && ht && w <= 4096 && ht <= 4096 && Rd32(h + 84 + level * 4) >= len) {
+            if (w && ht && w <= 4096 && ht <= 4096 && bw && bh && mw <= 64 && mh <= 64 && Rd32(h + 84 + level * 4) >= len) {
                 std::vector<uint8_t> data(len);
                 SFile::SetFilePointer(file, static_cast<int32_t>(Rd32(h + 20 + level * 4)), nullptr, 0);
 
                 if (SFileReadFile(file, data.data(), len, &got, nullptr, 0) && got == len) {
-                    double acc[3] = {};
+                    std::vector<float> px(mw * mh * 3);
 
-                    for (uint32_t k = 0; k < blocks; k++) {
-                        const uint8_t* blk = data.data() + k * bytes + (bytes - 8);
-                        const uint16_t v0 = static_cast<uint16_t>(blk[0] | blk[1] << 8);
-                        const uint16_t v1 = static_cast<uint16_t>(blk[2] | blk[3] << 8);
-                        float c[4][3];
-                        From565(v0, c[0]);
-                        From565(v1, c[1]);
+                    for (uint32_t by = 0; by < bh; by++) {
+                        for (uint32_t bx = 0; bx < bw; bx++) {
+                            float c[16][3];
+                            DecodeDxtBlock(data.data() + (by * bw + bx) * bytes + (bytes - 8), dxt1, c);
 
-                        for (int j = 0; j < 3; j++) {
-                            if (v0 > v1 || !dxt1) {
-                                c[2][j] = (2 * c[0][j] + c[1][j]) / 3;
-                                c[3][j] = (c[0][j] + 2 * c[1][j]) / 3;
-                            } else {
-                                c[2][j] = (c[0][j] + c[1][j]) / 2;
-                                c[3][j] = 0.0f;
-                            }
-                        }
-
-                        const uint32_t bits = Rd32(blk + 4);
-
-                        for (uint32_t p = 0; p < 16; p++) {
-                            for (int j = 0; j < 3; j++) {
-                                acc[j] += c[(bits >> (2 * p)) & 3][j];
+                            for (uint32_t k = 0; k < 16; k++) {
+                                for (int j = 0; j < 3; j++) {
+                                    px[((by * 4 + k / 4) * mw + bx * 4 + k % 4) * 3 + j] = c[k][j];
+                                }
                             }
                         }
                     }
 
-                    rgb = 0;
+                    const uint32_t fx = mw / 4, fy = mh / 4;
 
-                    for (int j = 0; j < 3; j++) {
-                        rgb |= static_cast<uint32_t>(acc[j] / (blocks * 16.0)) << (16 - 8 * j);
+                    for (uint32_t k = 0; k < 16; k++) {
+                        for (int j = 0; j < 3; j++) {
+                            float acc = 0.0f;
+
+                            for (uint32_t y = 0; y < fy; y++) {
+                                for (uint32_t x = 0; x < fx; x++) {
+                                    acc += px[(((k / 4) * fy + y) * mw + (k % 4) * fx + x) * 3 + j];
+                                }
+                            }
+
+                            tex.m4[k][j] = acc / static_cast<float>(fx * fy);
+                        }
                     }
                 }
             }
@@ -586,8 +685,19 @@ uint32_t TextureColour(const char* name) {
         SFileCloseFile(file);
     }
 
-    s_far.colours.emplace(key, rgb);
-    return rgb;
+    for (uint32_t k = 0; k < 4; k++) {
+        const uint32_t x = (k % 2) * 2, y = (k / 2) * 2;
+
+        for (int j = 0; j < 3; j++) {
+            tex.m2[k][j] = (tex.m4[y * 4 + x][j] + tex.m4[y * 4 + x + 1][j] + tex.m4[y * 4 + x + 4][j] + tex.m4[y * 4 + x + 5][j]) / 4.0f;
+        }
+    }
+
+    for (int j = 0; j < 3; j++) {
+        tex.m1[j] = (tex.m2[0][j] + tex.m2[1][j] + tex.m2[2][j] + tex.m2[3][j]) / 4.0f;
+    }
+
+    return s_far.textures.emplace(key, tex).first->second;
 }
 
 // One alpha map as 64 x 64 bytes (wraithhost DecodeAlpha): RLE, 8-bit (big alpha) or 4-bit, the last
@@ -656,22 +766,13 @@ const uint8_t* FindSub(const uint8_t* mcnk, uint32_t len, uint32_t ofs, uint32_t
     return mcnk + ofs + 8;
 }
 
-// The tile's ground as 64 x 64 RGB (row = the tile's rows, as the atlas). False when it is not an ADT.
-bool BakeTile(const uint8_t* b, uint32_t n, float* img) {
+// The ADT's chunks, textures and MH2O, for the composite. False when it is not a whole ADT.
+bool ParseAdt(BakeJob& job) {
     const uint32_t kMTEX = 0x4D544558;
     const uint32_t kMH2O = 0x4D48324F;
     const uint32_t kMCNK = 0x4D434E4B;
-    const uint32_t kMCLY = 0x4D434C59;
-    const uint32_t kMCAL = 0x4D43414C;
-    const uint32_t kMCSH = 0x4D435348;
-    const uint32_t kMCCV = 0x4D434356;
-    const bool bigAlpha = (CMap::header.m_flags & 0x4) != 0;
-
-    std::vector<const char*> textures;
-    const uint8_t* mh2o = nullptr;
-    uint32_t mh2oLen = 0;
-    const uint8_t* chunks[256] = {};
-    uint32_t chunkLen[256] = {};
+    const uint8_t* b = job.read->buf;
+    const uint32_t n = job.read->size;
     uint32_t seen = 0;
 
     for (uint32_t o = 0; o + 8 <= n;) {
@@ -691,12 +792,12 @@ bool BakeTile(const uint8_t* b, uint32_t n, float* img) {
                     break;  // unterminated: not a name to open
                 }
 
-                textures.push_back(name);
+                job.textures.push_back(name);
                 i += len + 1;
             }
         } else if (magic == kMH2O) {
-            mh2o = b + o + 8;
-            mh2oLen = size;
+            job.mh2o = b + o + 8;
+            job.mh2oLen = size;
         } else if (magic == kMCNK && size >= 0x80) {
             uint32_t ix = Rd32(b + o + 8 + 4);
             uint32_t iy = Rd32(b + o + 8 + 8);
@@ -707,8 +808,8 @@ bool BakeTile(const uint8_t* b, uint32_t n, float* img) {
             }
 
             if (seen < 256) {
-                chunks[iy * 16 + ix] = b + o;
-                chunkLen[iy * 16 + ix] = size + 8;
+                job.chunks[iy * 16 + ix] = b + o;
+                job.chunkLen[iy * 16 + ix] = size + 8;
             }
 
             seen++;
@@ -717,25 +818,46 @@ bool BakeTile(const uint8_t* b, uint32_t n, float* img) {
         o += 8 + size;
     }
 
-    if (seen < 256) {
-        return false;
-    }
-
-    uint8_t alpha[3][4096];
-
-    for (uint32_t ch = 0; ch < 256; ch++) {
-        const uint8_t* c = chunks[ch];
-
+    for (const uint8_t* c : job.chunks) {
         if (!c) {
             return false;
         }
+    }
 
+    return seen >= 256;
+}
+
+// One row of 16 chunks into img (job.px a tile, RGB 0..255, rows = the tile's rows): per texel, each layer's
+// texture at the texel's place in its repeat (8 repeats a chunk, u along the columns and v along the rows
+// as the terrain vertex shader maps them, at the 4 x 4 / 2 x 2 / 1 x 1 reduction the density calls for),
+// composited by the alpha maps as the terrain pixel shader does (big alpha: weighted sum, perm 14; else each
+// layer over the ones below, perm 6), times MCCV (x 2 / 255, bilinear on the 9 x 9 grid) and the baked shadow
+// (the shader's 0.7 + 0.3 lit). MCAL is sized by the MCNK's sizeAlpha, as CMapChunk does: the MCAL header lies
+// on Northrend. No saturation boost: these are the texels the real terrain samples at this density.
+void CompositeRow(const BakeJob& job, uint32_t iy, float* img) {
+    const uint32_t kMCLY = 0x4D434C59;
+    const uint32_t kMCAL = 0x4D43414C;
+    const uint32_t kMCSH = 0x4D435348;
+    const uint32_t kMCCV = 0x4D434356;
+    const bool bigAlpha = (CMap::header.m_flags & 0x4) != 0;
+    const uint32_t P = job.px;
+    const uint32_t tp = P / 16;                         // texels a chunk
+    const uint32_t as = 64 / tp;                        // alpha / shadow texels an atlas texel spans
+    const uint32_t rp = tp >= 32 ? 4 : tp >= 16 ? 2 : 1; // texels a texture repeat (4 x 4 / 2 x 2 / 1 x 1)
+    const uint32_t cs = tp >= 8 ? 1 : 8 / tp;           // liquid cells an atlas texel spans
+    static uint8_t alpha[3][4096];
+
+    for (uint32_t ix = 0; ix < 16; ix++) {
+        const uint32_t ch = iy * 16 + ix;
+        const uint8_t* c = job.chunks[ch];
         const uint8_t* h = c + 8;
-        const uint32_t len = chunkLen[ch];
+        const uint32_t len = job.chunkLen[ch];
         const uint32_t flags = Rd32(h);
 
         // Liquid per cell (8 x 8): its LiquidType's kind + 1, 0 = dry. MH2O, or the old per-chunk flags.
         uint8_t wet[64] = {};
+        const uint8_t* mh2o = job.mh2o;
+        const uint32_t mh2oLen = job.mh2oLen;
 
         if (mh2o && mh2oLen >= 256 * 12) {
             const uint32_t ofs = Rd32(mh2o + ch * 12);
@@ -770,7 +892,6 @@ bool BakeTile(const uint8_t* b, uint32_t n, float* img) {
         const uint8_t* mcly = FindSub(c, len, Rd32(h + 0x1C), kMCLY, mclyLen);
         const uint8_t* mcal = FindSub(c, len, Rd32(h + 0x24), kMCAL, mcalLen);
 
-        // Sized by the MCNK's sizeAlpha, as CMapChunk does; the MCAL header lies on Northrend.
         if (mcal) {
             const uint32_t declared = Rd32(h + 0x28);
             const uint32_t room = static_cast<uint32_t>(c + len - mcal);
@@ -794,17 +915,14 @@ bool BakeTile(const uint8_t* b, uint32_t n, float* img) {
         uint32_t layers = Rd32(h + 0xC);
         layers = layers < (mcly ? mclyLen / 16 : 0) ? layers : (mcly ? mclyLen / 16 : 0);
         layers = layers < 4 ? layers : 4;
-        float col[4][3] = {};
+        const LayerTex* tex[4] = {};
         bool hasAlpha[4] = {};
 
         for (uint32_t l = 0; l < layers; l++) {
             const uint8_t* e = mcly + l * 16;
-            const uint32_t tex = Rd32(e);
-            const uint32_t rgb = tex < textures.size() ? TextureColour(textures[tex]) : 0x808080;
-
-            for (int j = 0; j < 3; j++) {
-                col[l][j] = static_cast<float>((rgb >> (16 - 8 * j)) & 0xFF);
-            }
+            const uint32_t t = Rd32(e);
+            static const LayerTex s_grey = [] { LayerTex g; for (auto& v : g.m4) { v[0] = v[1] = v[2] = 128.0f; } for (auto& v : g.m2) { v[0] = v[1] = v[2] = 128.0f; } g.m1[0] = g.m1[1] = g.m1[2] = 128.0f; return g; }();
+            tex[l] = t < job.textures.size() ? &LayerTexOf(job.textures[t]) : &s_grey;
 
             if (l && (Rd32(e + 4) & 0x100)) {
                 DecodeAlpha(mcal, mcalLen, Rd32(e + 8), Rd32(e + 4), bigAlpha, (flags & 0x8000) != 0, alpha[l - 1]);
@@ -812,25 +930,23 @@ bool BakeTile(const uint8_t* b, uint32_t n, float* img) {
             }
         }
 
-        const uint32_t ix = ch % 16;
-        const uint32_t iy = ch / 16;
-
-        // 4 x 4 texels a chunk, each over a 16 x 16 patch of the alpha maps.
-        for (uint32_t py = 0; py < 4; py++) {
-            for (uint32_t px = 0; px < 4; px++) {
-                float* out = img + ((iy * 4 + py) * 64 + ix * 4 + px) * 3;
-                const uint8_t* cells[4] = { &wet[(py * 2) * 8 + px * 2], &wet[(py * 2) * 8 + px * 2 + 1], &wet[(py * 2 + 1) * 8 + px * 2], &wet[(py * 2 + 1) * 8 + px * 2 + 1] };
+        for (uint32_t py = 0; py < tp; py++) {
+            for (uint32_t px = 0; px < tp; px++) {
+                float* out = img + ((iy * tp + py) * P + ix * tp + px) * 3;
+                const uint32_t cx0 = px * 8 / tp, cy0 = py * 8 / tp;
                 uint32_t wetCount = 0;
                 uint8_t kind = 0;
 
-                for (const uint8_t* cell : cells) {
-                    if (*cell) {
-                        wetCount++;
-                        kind = *cell;
+                for (uint32_t y = 0; y < cs; y++) {
+                    for (uint32_t x = 0; x < cs; x++) {
+                        if (const uint8_t k = wet[(cy0 + y) * 8 + cx0 + x]) {
+                            wetCount++;
+                            kind = k;
+                        }
                     }
                 }
 
-                if (wetCount >= 2) {
+                if (wetCount * 2 >= cs * cs && wetCount) {
                     for (int j = 0; j < 3; j++) {
                         out[j] = kLiquid[kind - 1][j];
                     }
@@ -847,17 +963,18 @@ bool BakeTile(const uint8_t* b, uint32_t n, float* img) {
 
                     uint32_t sum = 0;
 
-                    for (uint32_t yy = 0; yy < 16; yy++) {
-                        for (uint32_t xx = 0; xx < 16; xx++) {
-                            sum += alpha[l - 1][(py * 16 + yy) * 64 + px * 16 + xx];
+                    for (uint32_t yy = 0; yy < as; yy++) {
+                        for (uint32_t xx = 0; xx < as; xx++) {
+                            sum += alpha[l - 1][(py * as + yy) * 64 + px * as + xx];
                         }
                     }
 
-                    a[l] = static_cast<float>(sum) / (256.0f * 255.0f);
+                    a[l] = static_cast<float>(sum) / (static_cast<float>(as * as) * 255.0f);
                 }
 
-                // As the terrain pixel shader blends: big alpha (perm 14) weighs every layer, else each
-                // layer is laid over the ones below (perm 6).
+                const uint32_t k = (py % rp) * rp + px % rp;
+                auto colour = [&](uint32_t l) { return rp == 4 ? tex[l]->m4[k] : rp == 2 ? tex[l]->m2[k] : tex[l]->m1; };
+
                 if (!layers) {
                     out[0] = out[1] = out[2] = 128.0f;
                 } else if (bigAlpha) {
@@ -868,64 +985,57 @@ bool BakeTile(const uint8_t* b, uint32_t n, float* img) {
                     }
 
                     for (int j = 0; j < 3; j++) {
-                        out[j] = col[0][j] * (base > 0.0f ? base : 0.0f);
+                        out[j] = colour(0)[j] * (base > 0.0f ? base : 0.0f);
 
                         for (uint32_t l = 1; l < layers; l++) {
-                            out[j] += col[l][j] * a[l];
+                            out[j] += colour(l)[j] * a[l];
                         }
                     }
                 } else {
                     for (int j = 0; j < 3; j++) {
-                        out[j] = col[0][j];
+                        out[j] = colour(0)[j];
 
                         for (uint32_t l = 1; l < layers; l++) {
-                            out[j] += (col[l][j] - out[j]) * a[l];
+                            out[j] += (colour(l)[j] - out[j]) * a[l];
                         }
                     }
                 }
 
-                // Vertex colours (0x7F = unchanged), bilinear at the texel's centre on the 9 x 9 grid.
                 if (mccv) {
-                    const float gx = (px + 0.5f) * 2.0f;
-                    const float gy = (py + 0.5f) * 2.0f;
-                    const uint32_t c0 = static_cast<uint32_t>(gx);
-                    const uint32_t r0 = static_cast<uint32_t>(gy);
+                    const float gx = (px + 0.5f) * 8.0f / tp;
+                    const float gy = (py + 0.5f) * 8.0f / tp;
+                    const uint32_t c0 = static_cast<uint32_t>(gx) < 7 ? static_cast<uint32_t>(gx) : 7;
+                    const uint32_t r0 = static_cast<uint32_t>(gy) < 7 ? static_cast<uint32_t>(gy) : 7;
                     const float fx = gx - c0;
                     const float fy = gy - r0;
 
                     for (int j = 0; j < 3; j++) {
-                        auto v = [&](uint32_t r, uint32_t k) { return static_cast<float>(mccv[(r * 17 + k) * 4 + (2 - j)]); };
+                        auto v = [&](uint32_t r, uint32_t q) { return static_cast<float>(mccv[(r * 17 + q) * 4 + (2 - j)]); };
                         const float m = (v(r0, c0) * (1 - fx) + v(r0, c0 + 1) * fx) * (1 - fy) + (v(r0 + 1, c0) * (1 - fx) + v(r0 + 1, c0 + 1) * fx) * fy;
                         out[j] *= m * 2.0f / 255.0f;
                     }
                 }
 
-                // The baked shadow: the shader's 0.7 + 0.3 * alpha, over the patch.
                 if (mcsh) {
                     uint32_t on = 0;
 
-                    for (uint32_t y = 0; y < 16; y++) {
-                        for (uint32_t x = 0; x < 16; x++) {
-                            on += (mcsh[(py * 16 + y) * 8 + (px * 16 + x) / 8] >> ((px * 16 + x) % 8)) & 1;
+                    for (uint32_t y = 0; y < as; y++) {
+                        for (uint32_t x = 0; x < as; x++) {
+                            on += (mcsh[(py * as + y) * 8 + (px * as + x) / 8] >> ((px * as + x) % 8)) & 1;
                         }
                     }
 
                     for (int j = 0; j < 3; j++) {
-                        out[j] *= 1.0f - 0.3f * static_cast<float>(on) / 256.0f;
+                        out[j] *= 1.0f - 0.3f * static_cast<float>(on) / static_cast<float>(as * as);
                     }
                 }
 
-                const float luma = 0.299f * out[0] + 0.587f * out[1] + 0.114f * out[2];
-
                 for (int j = 0; j < 3; j++) {
-                    const float v = luma + (out[j] - luma) * kChroma;
-                    out[j] = v < 0.0f ? 0.0f : v > 255.0f ? 255.0f : v;
+                    out[j] = out[j] < 0.0f ? 0.0f : out[j] > 255.0f ? 255.0f : out[j];
                 }
             }
         }
     }
-
-    return true;
 }
 
 uint16_t To565(const float* c) {
@@ -935,7 +1045,9 @@ uint16_t To565(const float* c) {
     return static_cast<uint16_t>((r > 31 ? 31 : r) << 11 | (g > 63 ? 63 : g) << 5 | (b > 31 ? 31 : b));
 }
 
-// 16 RGB texels as one opaque DXT1 block: the box's corners as the ends, four-colour mode.
+// 16 RGB texels as one opaque DXT1 block: the box's corners as the ends, four-colour mode, each texel the
+// palette entry its projection on the end-to-end line falls nearest (range fit; about 3x the old nearest-of-4
+// search, which mattered once a tile became 28 000 blocks).
 void EncodeDxt1(const float (*px)[3], uint8_t* out) {
     float lo[3] = { 255.0f, 255.0f, 255.0f };
     float hi[3] = { 0.0f, 0.0f, 0.0f };
@@ -958,30 +1070,23 @@ void EncodeDxt1(const float (*px)[3], uint8_t* out) {
     }
 
     if (c0 != c1) {
-        float p[4][3];
-        From565(c0, p[0]);
-        From565(c1, p[1]);
+        float e0[3], e1[3], axis[3];
+        From565(c0, e0);
+        From565(c1, e1);
+        float len = 0.0f;
 
         for (int j = 0; j < 3; j++) {
-            p[2][j] = (2 * p[0][j] + p[1][j]) / 3;
-            p[3][j] = (p[0][j] + 2 * p[1][j]) / 3;
+            axis[j] = e0[j] - e1[j];
+            len += axis[j] * axis[j];
         }
 
+        const float inv = len > 0.0f ? 1.0f / len : 0.0f;
+        static const uint32_t s_index[4] = { 1, 3, 2, 0 };  // t from c1 (0) to c0 (1): c1, 1/3, 2/3, c0
+
         for (uint32_t k = 0; k < 16; k++) {
-            uint32_t best = 0;
-            float bestD = 1e30f;
-
-            for (uint32_t i = 0; i < 4; i++) {
-                const float dr = px[k][0] - p[i][0], dg = px[k][1] - p[i][1], db = px[k][2] - p[i][2];
-                const float d = dr * dr + dg * dg + db * db;
-
-                if (d < bestD) {
-                    bestD = d;
-                    best = i;
-                }
-            }
-
-            bits |= best << (2 * k);
+            const float t = ((px[k][0] - e1[0]) * axis[0] + (px[k][1] - e1[1]) * axis[1] + (px[k][2] - e1[2]) * axis[2]) * inv;
+            const int32_t q = static_cast<int32_t>(t * 3.0f + 0.5f);
+            bits |= s_index[q < 0 ? 0 : q > 3 ? 3 : q] << (2 * k);
         }
     }
 
@@ -992,99 +1097,236 @@ void EncodeDxt1(const float (*px)[3], uint8_t* out) {
     memcpy(out + 4, &bits, 4);
 }
 
-uint8_t* AtlasBlock(uint32_t level, uint32_t bx, uint32_t by) {
-    return s_far.chain + s_far.levelOffset[level] + (by * ((kAtlasPx >> level) / 4) + bx) * 8;
+uint8_t* AtlasBlock(Atlas& at, uint32_t level, uint32_t bx, uint32_t by) {
+    return at.chain + s_far.levelOffset[level] + (by * ((kAtlasPx >> level) / 4) + bx) * 8;
 }
 
 void AtlasUserFunc(EGxTexCommand command, uint32_t width, uint32_t height, uint32_t depth, uint32_t mipLevel, void* userArg, uint32_t& texelStrideInBytes, const void*& texels) {
-    if (command == GxTex_Latch && s_far.chain && mipLevel < kLevels) {
+    const Atlas* at = static_cast<const Atlas*>(userArg);
+
+    if (command == GxTex_Latch && at && at->chain && mipLevel < kLevels) {
         texelStrideInBytes = (kAtlasPx >> mipLevel) / 4 * 8;
-        texels = s_far.chain + s_far.levelOffset[mipLevel];
+        texels = at->chain + s_far.levelOffset[mipLevel];
     }
 }
 
-// The baked tile into the atlas: levels 0-4 (64 .. 4 px a tile) box-filtered from it, and the block that
-// holds it on each smaller level, where a texel spans tiles, from the baked tiles' averages.
-void StoreTile(uint32_t t, const float* img) {
-    // A new atlas goes up whole the first time, so no texel on the GPU is left uninitialised.
-    const bool fresh = !s_far.chain;
+uint32_t Slots(uint32_t a) {
+    return kAtlasPx / kTilePxOf[a];
+}
 
-    if (fresh) {
+uint32_t SlotOf(uint32_t a, uint32_t t) {
+    const uint32_t n = Slots(a);
+    return ((t / 64) % n) * n + (t % 64) % n;
+}
+
+// The atlases farTexQuality and farTexMemory allow: coarse always (the old 8.3 yd ground), then mid, then near,
+// each 21.3 MB (10.7 on the GPU, the same again for its copy).
+bool AtlasOn(uint32_t a) {
+    if (a == 2) {
+        return true;
+    }
+
+    const int32_t quality = TexQualityCVar()->m_intValue;
+    const float mb = static_cast<float>(TexMemoryCVar()->m_intValue);
+    return quality >= static_cast<int32_t>(2 - a) && mb >= 21.4f * static_cast<float>(3 - a);
+}
+
+// A window atlas holds the tiles within half its slots less one of the camera's tile (so no two of them share
+// a slot); the coarse one holds the map.
+bool InWindow(uint32_t a, uint32_t t) {
+    if (a == 2) {
+        return true;
+    }
+
+    const C3Vector& cam = CWorldScene::s_activeWorldView;
+    const int32_t cc = static_cast<int32_t>(floorf((kOrigin - cam.y) / kTileYd));
+    const int32_t cr = static_cast<int32_t>(floorf((kOrigin - cam.x) / kTileYd));
+    const int32_t half = static_cast<int32_t>(Slots(a) / 2) - 1;
+    return abs(static_cast<int32_t>(t % 64) - cc) <= half && abs(static_cast<int32_t>(t / 64) - cr) <= half;
+}
+
+bool Has(uint32_t a, uint32_t t) {
+    return s_far.atlas[a].tex && (a == 2 ? s_far.tile[t] == Tile_Baked : s_far.atlas[a].owner[SlotOf(a, t)] == static_cast<int16_t>(t));
+}
+
+bool Wants(uint32_t a, uint32_t t) {
+    return AtlasOn(a) && InWindow(a, t) && (a == 2 ? s_far.tile[t] == Tile_None : !Has(a, t));
+}
+
+CGxTex* AtlasTex(uint32_t a) {
+    return s_far.atlas[a].tex ? TextureGetGxTex(s_far.atlas[a].tex, 0, nullptr) : nullptr;
+}
+
+// The atlas a tile draws with: the coarsest one baked whose texel stays under farTexPixels at pxPerYd, else
+// the finest baked; -1 when none has it (drawn fog-coloured). Distance only: the same whatever is in view.
+int32_t PickAtlas(uint32_t t, float pxPerYd) {
+    const float limit = fmaxf(TexPixelsCVar()->m_floatValue, 0.1f);
+    int32_t finest = -1;
+
+    for (int32_t a = 2; a >= 0; a--) {
+        if (!AtlasOn(a) || !Has(a, t)) {
+            continue;
+        }
+
+        if (kTileYd / kTilePxOf[a] * pxPerYd <= limit) {
+            return a;
+        }
+
+        finest = a;
+    }
+
+    return finest;
+}
+
+// Box-filter src (n x n RGB) to n / 2.
+void Half(const float* src, uint32_t n, float* dst) {
+    const uint32_t m = n / 2;
+
+    for (uint32_t y = 0; y < m; y++) {
+        for (uint32_t x = 0; x < m; x++) {
+            for (int j = 0; j < 3; j++) {
+                dst[(y * m + x) * 3 + j] = (src[((2 * y) * n + 2 * x) * 3 + j] + src[((2 * y) * n + 2 * x + 1) * 3 + j] + src[((2 * y + 1) * n + 2 * x) * 3 + j] + src[((2 * y + 1) * n + 2 * x + 1) * 3 + j]) * 0.25f;
+            }
+        }
+    }
+}
+
+float s_img[kBakePx * kBakePx * 3];
+float s_lv[kBakePx * kBakePx * 3 * 4 / 3 + 64];   // the current atlas's tile levels, largest first
+uint32_t s_lvOffset[kLevels];
+
+void EnsureAtlas(uint32_t a) {
+    Atlas& at = s_far.atlas[a];
+
+    if (at.tex) {
+        return;
+    }
+
+    if (!s_far.levelOffset[1]) {
         uint32_t size = 0;
 
         for (uint32_t l = 0; l < kLevels; l++) {
             s_far.levelOffset[l] = size;
             size += (kAtlasPx >> l) * (kAtlasPx >> l) / 2;
         }
-
-        s_far.chain = new uint8_t[size]();
-        s_far.atlas = TextureCreate(kAtlasPx, kAtlasPx, GxTex_Dxt1, GxTex_Dxt1, CGxTexFlags(GxTex_LinearMipLinear, 0, 0, 0, 0, 0, 1), nullptr, AtlasUserFunc, "WdlGroundAtlas", 0);
     }
 
-    const uint32_t tx = t % 64;
-    const uint32_t ty = t / 64;
-    float sum[3] = {};
+    const uint32_t bytes = s_far.levelOffset[kLevels - 1] + 8;
+    at.chain = new uint8_t[bytes]();
+    memset(at.owner, 0xFF, sizeof(at.owner));
+    static const char* const s_names[kAtlases] = { "WdlGroundNear", "WdlGroundMid", "WdlGroundAtlas" };
+    at.tex = TextureCreate(kAtlasPx, kAtlasPx, GxTex_Dxt1, GxTex_Dxt1, CGxTexFlags(GxTex_LinearMipLinear, 0, 0, 0, 0, 0, 1), &at, AtlasUserFunc, s_names[a], 0);
 
-    for (uint32_t i = 0; i < 64 * 64; i++) {
-        for (int j = 0; j < 3; j++) {
-            sum[j] += img[i * 3 + j];
-        }
+    if (CGxTex* gxTex = AtlasTex(a)) {
+        GxTexUpdate(gxTex, 0, 0, kAtlasPx, kAtlasPx, 1);  // the whole chain once, so nothing on the GPU is uninitialised
     }
+}
 
-    for (int j = 0; j < 3; j++) {
-        s_far.avg[t][j] = static_cast<uint8_t>(sum[j] / 4096.0f);
-    }
+// The job's current atlas: its tile's levels from the composite (box-filtered down from job.px).
+void PrepareLevels(BakeJob& job) {
+    const uint32_t q = kTilePxOf[job.atlas];
+    float* l0 = s_lv;
+    const uint32_t f = job.px / q;
 
-    s_far.tile[t] = Tile_Baked;
+    for (uint32_t y = 0; y < q; y++) {
+        for (uint32_t x = 0; x < q; x++) {
+            for (int j = 0; j < 3; j++) {
+                float acc = 0.0f;
 
-    for (uint32_t l = 0; l < 5; l++) {
-        const uint32_t f = 1u << l;
-        const uint32_t bw = (kTilePx >> l) / 4;
-
-        for (uint32_t by = 0; by < bw; by++) {
-            for (uint32_t bx = 0; bx < bw; bx++) {
-                float px[16][3] = {};
-
-                for (uint32_t k = 0; k < 16; k++) {
-                    const uint32_t x0 = (bx * 4 + k % 4) * f;
-                    const uint32_t y0 = (by * 4 + k / 4) * f;
-
-                    for (uint32_t yy = 0; yy < f; yy++) {
-                        for (uint32_t xx = 0; xx < f; xx++) {
-                            for (int j = 0; j < 3; j++) {
-                                px[k][j] += img[((y0 + yy) * 64 + x0 + xx) * 3 + j];
-                            }
-                        }
-                    }
-
-                    for (int j = 0; j < 3; j++) {
-                        px[k][j] /= static_cast<float>(f * f);
+                for (uint32_t yy = 0; yy < f; yy++) {
+                    for (uint32_t xx = 0; xx < f; xx++) {
+                        acc += s_img[((y * f + yy) * job.px + x * f + xx) * 3 + j];
                     }
                 }
 
-                EncodeDxt1(px, AtlasBlock(l, tx * bw + bx, ty * bw + by));
+                l0[(y * q + x) * 3 + j] = acc / static_cast<float>(f * f);
             }
         }
     }
 
-    for (uint32_t l = 5; l < kLevels; l++) {
-        const uint32_t bx = ((tx * kTilePx) >> l) / 4;
-        const uint32_t by = ((ty * kTilePx) >> l) / 4;
+    uint32_t off = 0;
+
+    for (uint32_t l = 0; l < kLevels && (q >> l) >= 1; l++) {
+        s_lvOffset[l] = off;
+
+        if (l) {
+            Half(s_lv + s_lvOffset[l - 1], q >> (l - 1), s_lv + off);
+        }
+
+        off += (q >> l) * (q >> l) * 3;
+    }
+
+    const uint32_t last = s_lvOffset[__builtin_ctz(q)];  // the 1 x 1 level: the tile's average
+
+    for (int j = 0; j < 3; j++) {
+        s_far.avg[job.read->tile][j] = static_cast<uint8_t>(s_lv[last + j]);
+    }
+}
+
+// One slice of the store: up to 16 block rows of the current level, or (past the tile's own levels) the
+// blocks where a texel spans tiles, from the slots' averages. True when the atlas is finished.
+bool StoreSlice(BakeJob& job) {
+    const uint32_t a = job.atlas;
+    Atlas& at = s_far.atlas[a];
+    const uint32_t q = kTilePxOf[a];
+    const uint32_t n = Slots(a);
+    const uint32_t t = job.read->tile;
+    const uint32_t sx = (t % 64) % n, sy = (t / 64) % n;
+
+    if ((q >> job.level) >= 4) {
+        const uint32_t w = q >> job.level;
+        const uint32_t bw = w / 4;
+        const float* src = s_lv + s_lvOffset[job.level];
+
+        for (uint32_t end = job.row + 16 < bw ? job.row + 16 : bw; job.row < end; job.row++) {
+            for (uint32_t bx = 0; bx < bw; bx++) {
+                float px[16][3];
+
+                for (uint32_t k = 0; k < 16; k++) {
+                    for (int j = 0; j < 3; j++) {
+                        px[k][j] = src[((job.row * 4 + k / 4) * w + bx * 4 + k % 4) * 3 + j];
+                    }
+                }
+
+                EncodeDxt1(px, AtlasBlock(at, job.level, sx * bw + bx, sy * bw + job.row));
+            }
+        }
+
+        if (job.row >= bw) {
+            job.row = 0;
+            job.level++;
+        }
+
+        return false;
+    }
+
+    // Levels where a block spans slots: each texel the average of the slots it covers that hold a tile.
+    at.owner[sy * n + sx] = static_cast<int16_t>(t);
+
+    if (a == 2) {
+        s_far.tile[t] = Tile_Baked;
+    }
+
+    for (uint32_t l = job.level; l < kLevels; l++) {
+        const uint32_t bx = ((sx * q) >> l) / 4;
+        const uint32_t by = ((sy * q) >> l) / 4;
         float px[16][3] = {};
 
         for (uint32_t k = 0; k < 16; k++) {
             const uint32_t p = bx * 4 + k % 4;
-            const uint32_t q = by * 4 + k / 4;
-            const uint32_t c0 = (p << l) / kTilePx, c1 = (((p + 1) << l) - 1) / kTilePx;
-            const uint32_t r0 = (q << l) / kTilePx, r1 = (((q + 1) << l) - 1) / kTilePx;
+            const uint32_t r = by * 4 + k / 4;
+            const uint32_t c0 = (p << l) / q, c1 = (((p + 1) << l) - 1) / q;
+            const uint32_t r0 = (r << l) / q, r1 = (((r + 1) << l) - 1) / q;
             float acc[3] = {};
             uint32_t got = 0;
 
-            for (uint32_t r = r0; r <= r1; r++) {
-                for (uint32_t c = c0; c <= c1; c++) {
-                    if (s_far.tile[r * 64 + c] == Tile_Baked) {
+            for (uint32_t y = r0; y <= r1 && y < n; y++) {
+                for (uint32_t x = c0; x <= c1 && x < n; x++) {
+                    const int16_t o = at.owner[y * n + x];
+
+                    if (o >= 0 && (a != 2 || s_far.tile[o] == Tile_Baked)) {
                         for (int j = 0; j < 3; j++) {
-                            acc[j] += s_far.avg[r * 64 + c][j];
+                            acc[j] += s_far.avg[o][j];
                         }
 
                         got++;
@@ -1097,15 +1339,97 @@ void StoreTile(uint32_t t, const float* img) {
             }
         }
 
-        EncodeDxt1(px, AtlasBlock(l, bx, by));
+        EncodeDxt1(px, AtlasBlock(at, l, bx, by));
     }
 
-    if (CGxTex* gxTex = TextureGetGxTex(s_far.atlas, 0, nullptr)) {
-        if (fresh) {
-            GxTexUpdate(gxTex, 0, 0, kAtlasPx, kAtlasPx, 1);
-        } else {
-            GxTexUpdate(gxTex, tx * kTilePx, ty * kTilePx, (tx + 1) * kTilePx, (ty + 1) * kTilePx, 1);
+    if (CGxTex* gxTex = AtlasTex(a)) {
+        GxTexUpdate(gxTex, sx * q, sy * q, (sx + 1) * q, (sy + 1) * q, 1);
+    }
+
+    return true;
+}
+
+void EndJob(BakeJob& job) {
+    if (job.read) {
+        s_far.busy[job.read->tile] = 0;
+        delete[] job.read->buf;
+        delete job.read;
+    }
+
+    job = BakeJob {};
+}
+
+// One slice of the job: the heights, one chunk row of the composite, or one store slice.
+void StepJob(BakeJob& job) {
+    FarRead* read = job.read;
+    const uint32_t t = read->tile;
+
+    if (job.step == 0) {
+        job.step = 1;
+
+        if (read->heights) {
+            FarLod::AdtRead(t, read->buf, read->size);
         }
+
+        // Not in 12340 (farTrees): the same ADT's tree and bush placements, once a tile (its first bake read).
+        if (read->bake && s_far.tile[t] == Tile_None) {
+            FarField::FoliageScanTile(t, read->buf, read->size);
+        }
+
+        uint32_t px = 0;
+
+        for (uint32_t a = 0; a < kAtlases; a++) {
+            job.want[a] = read->bake && Wants(a, t);
+            px = job.want[a] && kTilePxOf[a] > px ? kTilePxOf[a] : px;
+        }
+
+        if (!px) {
+            EndJob(job);
+        } else if (!ParseAdt(job)) {
+            s_far.tile[t] = Tile_Failed;
+            EndJob(job);
+        } else {
+            job.px = px;
+        }
+
+        return;
+    }
+
+    if (job.step <= 16) {
+        CompositeRow(job, job.step - 1, s_img);
+
+        if (++job.step > 16) {
+            delete[] read->buf;  // the composite is all the store needs
+            read->buf = nullptr;
+            job.atlas = 0;
+        }
+
+        return;
+    }
+
+    while (job.atlas < kAtlases && (!job.want[job.atlas] || !AtlasOn(job.atlas) || !InWindow(job.atlas, t))) {
+        job.atlas++;  // not wanted, or the camera has moved it out of the window since
+    }
+
+    if (job.atlas >= kAtlases) {
+        s_far.baked++;
+        s_far.bakeMs += job.ms;
+        EndJob(job);
+        return;
+    }
+
+    if (!job.prepared) {
+        EnsureAtlas(job.atlas);
+        PrepareLevels(job);
+        job.prepared = true;
+        job.level = 0;
+        job.row = 0;
+        return;
+    }
+
+    if (StoreSlice(job)) {
+        job.atlas++;
+        job.prepared = false;
     }
 }
 
@@ -1123,20 +1447,21 @@ void ReadDone(void* param) {
     s_far.ready.push_back(read);
 }
 
-// Nearest tile first, within the horizon's reach: a couple of ADT reads in flight on the async queue, and
-// one finished read baked a frame.
+// Nearest tile first, within the horizon's reach: a couple of ADT reads in flight on the async queue, and the
+// finished ones baked a slice at a time, about kBakeBudgetMs a frame (one slice always). Which tiles and
+// atlases is by distance only, so turning the camera changes nothing.
 void PumpBake() {
     const C3Vector& cam = CWorldScene::s_activeWorldView;
     const float cc = (kOrigin - cam.y) / kTileYd;
     const float cr = (kOrigin - cam.x) / kTileYd;
     const float reach = World::s_horizonFarClipScale * World::s_farClip / kTileYd + 1.5f;
 
-    while (s_far.inFlight < kReadsInFlight) {
+    while (s_far.inFlight < kReadsInFlight && s_far.ready.size() < kReadsInFlight) {
         int32_t best = -1;
         float bestD = reach * reach;
 
         for (uint32_t i = 0; i < 4096; i++) {
-            if ((s_far.tile[i] != Tile_None && !FarLod::WantsAdt(i)) || !CMap::s_lowDetail.m_areas[i]) {
+            if (s_far.busy[i] || s_far.tile[i] == Tile_Failed || !CMap::s_lowDetail.m_areas[i]) {
                 continue;
             }
 
@@ -1144,7 +1469,7 @@ void PumpBake() {
             const float dy = static_cast<float>(i / 64) + 0.5f - cr;
             const float d = dx * dx + dy * dy;
 
-            if (d < bestD) {
+            if (d < bestD && (Wants(2, i) || Wants(1, i) || Wants(0, i) || FarLod::WantsAdt(i))) {
                 bestD = d;
                 best = static_cast<int32_t>(i);
             }
@@ -1158,7 +1483,7 @@ void PumpBake() {
         SStrPrintf(name, sizeof(name), "%s\\%s_%d_%d.adt", CMap::mapPath, CMap::mapName, best % 64, best / 64);
         SFileImpl* file = nullptr;
 
-        const bool bake = s_far.tile[best] == Tile_None;
+        const bool bake = Wants(2, best) || Wants(1, best) || Wants(0, best);
         const bool heights = FarLod::WantsAdt(best);
 
         if (heights) {
@@ -1166,7 +1491,7 @@ void PumpBake() {
         }
 
         if (!SFileOpenFile(name, &file) || !file) {
-            if (bake) {
+            if (s_far.tile[best] != Tile_Baked) {
                 s_far.tile[best] = Tile_Failed;
             }
 
@@ -1190,39 +1515,35 @@ void PumpBake() {
         read->obj->m_size = read->size;
         read->obj->m_userArg = read;
         read->obj->m_userPostloadCallback = reinterpret_cast<void*>(&ReadDone);
-        if (bake) {
-            s_far.tile[best] = Tile_Reading;
-        }
-
+        s_far.busy[best] = 1;
         s_far.inFlight++;
         AsyncFileReadObject(read->obj, 0);
     }
 
-    // ponytail: one tile a frame (about 2-3 ms the first time its textures are averaged, under 1 ms after),
-    // not a timed budget.
-    if (!s_far.ready.empty()) {
-        FarRead* read = s_far.ready.front();
-        s_far.ready.erase(s_far.ready.begin());
-        static float s_img[64 * 64 * 3];
+    const auto begin = std::chrono::steady_clock::now();
 
-        // Not in 12340 (farTrees): the same ADT's tree and bush placements (once a tile: its bake read).
-        if (read->bake) {
-            FarField::FoliageScanTile(read->tile, read->buf, read->size);
+    for (;;) {
+        if (!s_far.job.read) {
+            if (s_far.ready.empty()) {
+                break;
+            }
+
+            s_far.job.read = s_far.ready.front();
+            s_far.ready.erase(s_far.ready.begin());
         }
 
-        if (!read->bake) {
-        } else if (BakeTile(read->buf, read->size, s_img)) {
-            StoreTile(read->tile, s_img);
-        } else {
-            s_far.tile[read->tile] = Tile_Failed;
+        const auto t0 = std::chrono::steady_clock::now();
+        BakeJob& job = s_far.job;
+        StepJob(job);
+        const auto t1 = std::chrono::steady_clock::now();
+
+        if (job.read) {
+            job.ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
         }
 
-        if (read->heights) {
-            FarLod::AdtRead(read->tile, read->buf, read->size);
+        if (std::chrono::duration<double, std::milli>(t1 - begin).count() >= kBakeBudgetMs) {
+            break;
         }
-
-        delete[] read->buf;
-        delete read;
     }
 }
 
@@ -1340,15 +1661,16 @@ void DrawRuns(uint32_t b, uint64_t mask, uint32_t pass) {
     flush();
 }
 
-// The atlas, when this tile's bake is in it.
+// The coarse atlas, when this tile's bake is in it (the per-tile path and the fixed-function fallback).
 CGxTex* FarAtlasFor(const CMapAreaLow* area) {
     const uint32_t t = static_cast<uint32_t>(area->m_index.y) * 64 + area->m_index.x;
-    return s_far.atlas && s_far.tile[t] == Tile_Baked ? TextureGetGxTex(s_far.atlas, 0, nullptr) : nullptr;
+    return Has(2, t) ? AtlasTex(2) : nullptr;
 }
 
-// The terrain shader's uv for the atlas: uv = (pos.yx - c23.yx) * scale.yx, the map's corner at 0.
-void AtlasTexConstants(CMapRenderChunk::SVertexShaderConstants& consts) {
-    const float scale = -1.0f / (64.0f * kTileYd);
+// The terrain shader's uv for atlas a: uv = (pos.yx - c23.yx) * scale.yx, the map's corner at 0, one window of
+// tiles to 1 (wrap addressing takes the rest).
+void AtlasTexConstants(CMapRenderChunk::SVertexShaderConstants& consts, uint32_t a) {
+    const float scale = -1.0f / (static_cast<float>(Slots(a)) * kTileYd);
     consts.m_position.x = kOrigin;
     consts.m_position.y = kOrigin;
     consts.m_position.z = 0.0f;
@@ -1359,6 +1681,20 @@ void AtlasTexConstants(CMapRenderChunk::SVertexShaderConstants& consts) {
         consts.m_texScale[i + 1].x = consts.m_texScale[i + 1].y = scale;
         consts.m_texScale[i + 1].z = consts.m_texScale[i + 1].w = 0.0f;
     }
+}
+
+// Binds atlas a on stages 0 and 1 (wrapping) and uploads its uv scale (c18, c19).
+void BindAtlas(CMapRenderChunk::SVertexShaderConstants& consts, uint32_t a) {
+    CGxTex* tex = AtlasTex(a);
+
+    if (tex) {
+        GxTexSetWrap(tex, GxTex_Wrap, GxTex_Wrap);
+    }
+
+    GxRsSet(GxRs_Texture0, static_cast<void*>(tex));
+    GxRsSet(GxRs_Texture1, static_cast<void*>(tex));
+    AtlasTexConstants(consts, a);
+    g_theGxDevicePtr->ShaderConstantsSet(GxSh_Vertex, offsetof(CMapRenderChunk::SVertexShaderConstants, m_texScale[1]) / sizeof(C4Vector), reinterpret_cast<const float*>(&consts.m_texScale[1]), 2);
 }
 
 }  // namespace
@@ -1403,15 +1739,22 @@ void FarField::Reset() {
         block = FarBlock {};
     }
 
-    if (s_far.atlas) {
-        HandleClose(reinterpret_cast<HOBJECT>(s_far.atlas));
-        s_far.atlas = nullptr;
+    EndJob(s_far.job);
+
+    for (Atlas& at : s_far.atlas) {
+        if (at.tex) {
+            HandleClose(reinterpret_cast<HOBJECT>(at.tex));
+            at.tex = nullptr;
+        }
+
+        delete[] at.chain;
+        at.chain = nullptr;
     }
 
-    delete[] s_far.chain;
-    s_far.chain = nullptr;
     memset(s_far.tile, 0, sizeof(s_far.tile));
     FarField::FoliageReset();
+    memset(s_far.busy, 0, sizeof(s_far.busy));
+    s_far.band.clear();
 }
 
 bool FarField::RenderTerrain() {
@@ -1428,12 +1771,14 @@ bool FarField::RenderTerrain() {
         return false;
     }
 
-    // The visible tiles per block, baked (textured) and not (fog-coloured). Tiles wholly nearer than the
-    // horizon's near plane (farZ - 50) are skipped: every point of them is clipped.
+    // The visible tiles per block, one set per atlas (by distance: PickAtlas) and the not-baked ones
+    // (fog-coloured). Tiles wholly nearer than the horizon's near plane (farZ - 50) are skipped: every point of
+    // them is clipped.
     const C3Vector& cam = CWorldScene::s_activeWorldView;
     const float nearZ = CGWorldFrame::GetActiveCamera()->m_farZ - 50.0f;
-    uint64_t textured[64] = {};
-    uint64_t fogged[64] = {};
+    const CRect& rect = g_theGxDevicePtr->m_curWindowRect;
+    const float pxScale = 0.5f * (rect.maxY - rect.minY) * fabsf(g_theGxDevicePtr->m_projNative.b1);
+    uint64_t masks[kAtlases + 1][64] = {};
     CMapAreaLow* next;
     FarLod::BeginFrame();
 
@@ -1451,12 +1796,16 @@ bool FarField::RenderTerrain() {
 
         const uint32_t col = area->m_index.x;
         const uint32_t row = area->m_index.y;
+        const uint32_t t = row * 64 + col;
         const uint32_t b = (row / 8) * 8 + col / 8;
         const uint64_t bit = 1ull << ((row % 8) * 8 + col % 8);
-        const bool baked = s_far.tile[row * 64 + col] == Tile_Baked && s_far.atlas;
+        const float nx = fmaxf(fmaxf(area->m_bbox.b.x - cam.x, cam.x - area->m_bbox.t.x), 0.0f);
+        const float ny = fmaxf(fmaxf(area->m_bbox.b.y - cam.y, cam.y - area->m_bbox.t.y), 0.0f);
+        const int32_t a = PickAtlas(t, pxScale / fmaxf(sqrtf(nx * nx + ny * ny), nearZ));
+        const uint32_t set = a < 0 ? kAtlases : static_cast<uint32_t>(a);
 
-        if (!FarLod::Claim(row * 64 + col, baked)) {  // a detailed level draws it instead (FarTerrainLod.cpp)
-            (baked ? textured : fogged)[b] |= bit;
+        if (!FarLod::Claim(t, set)) {  // a detailed level draws it instead (FarTerrainLod.cpp)
+            masks[set][b] |= bit;
         }
     }
 
@@ -1466,7 +1815,7 @@ bool FarField::RenderTerrain() {
     uint32_t count = 0;
 
     for (uint32_t b = 0; b < 64; b++) {
-        if (!(textured[b] | fogged[b]) || !BuildBlock(b)) {
+        if (!(masks[0][b] | masks[1][b] | masks[2][b] | masks[3][b]) || !BuildBlock(b)) {
             continue;
         }
 
@@ -1489,28 +1838,36 @@ bool FarField::RenderTerrain() {
 
     CMapRenderChunk::SVertexShaderConstants consts;
     FarField::TerrainConstants(consts);
-    AtlasTexConstants(consts);
+    AtlasTexConstants(consts, 2);
     GxRsSet(GxRs_VertexShader, vertexShader);
     GxRsSet(GxRs_PixelShader, pixelShader);
     g_theGxDevicePtr->ShaderConstantsSet(GxSh_Vertex, 0, reinterpret_cast<const float*>(&consts), sizeof(consts) / sizeof(C4Vector));
     FarField::BindFogColor();
 
     CImVector color = DayNight::GetInfo()->m_fog.m_color;
-    CGxTex* atlas = s_far.atlas ? TextureGetGxTex(s_far.atlas, 0, nullptr) : nullptr;
     GxRsSet(GxRs_FogColor, *reinterpret_cast<int32_t*>(&color));
     GxRsSet(GxRs_Lighting, 0);
-    GxRsSet(GxRs_Texture0, static_cast<void*>(atlas));
-    GxRsSet(GxRs_Texture1, static_cast<void*>(atlas));
     GxRsSet(GxRs_ColorOp0, 0);
     GxRsSet(GxRs_AlphaOp0, 0);
     g_theGxDevicePtr->m_xforms[GxXform_Tex0].Identity();
 
-    // Pass 0 textured; pass 1 the tiles not baked yet, fully fogged: fog = pow(max(viewZ * 0 + 0, 0), 1) = 0,
-    // so the shader outputs exactly the fog colour (12340's silhouette).
-    for (uint32_t set = 0; set < 2; set++) {
-        const uint64_t* masks = set ? fogged : textured;
+    // Sets 0-2 textured from their atlas; set 3 the tiles not baked yet, fully fogged: fog =
+    // pow(max(viewZ * 0 + 0, 0), 1) = 0, so the shader outputs exactly the fog colour (12340's silhouette).
+    for (uint32_t set = 0; set <= kAtlases; set++) {
+        bool any = false;
 
-        if (set) {
+        for (uint32_t b = 0; b < 64 && !any; b++) {
+            any = masks[set][b] != 0;
+        }
+
+        if (!any && !FarLod::Drawing(set)) {
+            continue;
+        }
+
+        if (set < kAtlases) {
+            BindAtlas(consts, set);
+        } else {
+            BindAtlas(consts, 2);
             const float fogged4[4] = { 0.0f, 0.0f, 1.0f, 0.0f };
             g_theGxDevicePtr->ShaderConstantsSet(GxSh_Vertex, offsetof(CMapRenderChunk::SVertexShaderConstants, m_fog) / sizeof(C4Vector), fogged4, 1);
         }
@@ -1518,16 +1875,16 @@ bool FarField::RenderTerrain() {
         for (uint32_t i = 0; i < count; i++) {
             const uint32_t b = order[i];
 
-            if (!masks[b]) {
+            if (!masks[set][b]) {
                 continue;
             }
 
             GxPrimVertexPtr(s_far.blocks[b].vertexBuf, GxVBF_PN);
             g_theGxDevicePtr->PrimIndexPtr(s_far.blocks[b].indexBuf);
             GxRsSet(GxRs_Culling, 0);
-            DrawRuns(b, masks[b], 0);
+            DrawRuns(b, masks[set][b], 0);
             GxRsSet(GxRs_Culling, 1);
-            DrawRuns(b, masks[b], 1);
+            DrawRuns(b, masks[set][b], 1);
         }
 
         FarLod::Draw(set);
@@ -1535,8 +1892,165 @@ bool FarField::RenderTerrain() {
 
     g_theGxDevicePtr->RsPop();
     FarLod::EndFrame();
+
+    static uint32_t s_frame = 0;
+    static CVar* s_stats = CVar::Lookup("farTerrainLodStats");
+
+    if (s_stats && s_stats->m_intValue && ++s_frame % 600 == 0) {
+        uint32_t held[kAtlases] = {};
+
+        for (uint32_t a = 0; a < kAtlases; a++) {
+            for (uint32_t i = 0; i < Slots(a) * Slots(a); i++) {
+                held[a] += s_far.atlas[a].owner[i] >= 0 ? 1 : 0;
+            }
+        }
+
+        uint32_t on = 0;
+
+        for (const Atlas& at : s_far.atlas) {
+            on += at.tex ? 1 : 0;
+        }
+
+        char line[256];
+        SStrPrintf(line, sizeof(line), "farTex: near/mid/coarse tiles %u/%u/%u; %u bakes, %.2f ms a tile (in %.1f ms slices); %u atlases, %.1f MB; band %u chunks",
+            held[0], held[1], held[2], s_far.baked, s_far.baked ? s_far.bakeMs / s_far.baked : 0.0, kBakeBudgetMs, on, on * 2.0 * (s_far.levelOffset[kLevels - 1] + 8) / 1048576.0,
+            static_cast<uint32_t>(s_far.lastBand));
+        ConsoleWrite(line, DEFAULT_COLOR);
+    }
     g_theGxDevicePtr->m_xforms[GxXform_Tex0].Identity();
     return true;
+}
+
+namespace {
+
+C4Vector V4(float x, float y, float z, float w) {
+    C4Vector v;
+    v.x = x;
+    v.y = y;
+    v.z = z;
+    v.w = w;
+    return v;
+}
+
+bool BandOn() {
+    return BandCVar()->m_intValue && WdlTexturedCVar()->m_intValue && HorizonBatchedCVar()->m_intValue && FarField::FogStretch() != 1.0f && CMap::enableTerrainShaderVertex && !g_theGxDevicePtr->Caps().unk_0134;
+}
+
+// The band in ground-plane yards from the camera: it ends 4% short of the view distance, because it is
+// measured along the ground and the real terrain is cut by view depth, which a point well below the camera
+// reaches at a shorter ground distance.
+void BandRange(float& start, float& end) {
+    const float cut = CGWorldFrame::GetActiveCamera()->m_farZ;
+    end = cut * 0.96f;
+    start = fmaxf(end - fmaxf(static_cast<float>(BandWidthCVar()->m_intValue), 1.0f), cut * 0.3f);
+}
+
+}  // namespace
+
+void FarField::NoteChunk(CMapRenderChunk* chunk) {
+    if (!BandOn()) {
+        return;
+    }
+
+    float start, end;
+    BandRange(start, end);
+    const C3Vector d = chunk->m_sphere.c - CWorldScene::s_activeWorldView;
+
+    if (sqrtf(d.x * d.x + d.y * d.y) + chunk->m_sphere.r >= start) {
+        s_far.band.push_back(chunk);
+    }
+}
+
+void FarField::RenderBlend() {
+    std::vector<CMapRenderChunk*> chunks;
+    chunks.swap(s_far.band);
+    s_far.lastBand = chunks.size();
+    CGxShader* vertexShader = CMap::vertexShader_Terrain[0];
+
+    if (chunks.empty() || !BandOn() || !vertexShader || !vertexShader->Valid()) {
+        return;
+    }
+
+    if (!s_far.blendTried) {
+        s_far.blendTried = true;
+        g_theGxDevicePtr->ShaderCreate(&s_far.blendPs, GxSh_Pixel, "Shaders\\Pixel", "FarBlend", 1);
+    }
+
+    if (!s_far.blendPs || !s_far.blendPs->Valid()) {
+        return;
+    }
+
+    // Each chunk paints from the finest atlas holding its tile; none, and it is left alone.
+    const C3Vector& cam = CWorldScene::s_activeWorldView;
+    std::vector<CMapRenderChunk*> byAtlas[kAtlases];
+
+    for (CMapRenderChunk* chunk : chunks) {
+        const int32_t col = static_cast<int32_t>((kOrigin - chunk->m_sphere.c.y) / kTileYd);
+        const int32_t row = static_cast<int32_t>((kOrigin - chunk->m_sphere.c.x) / kTileYd);
+
+        if (col < 0 || row < 0 || col > 63 || row > 63) {
+            continue;
+        }
+
+        for (uint32_t a = 0; a < kAtlases; a++) {
+            if (AtlasOn(a) && Has(a, static_cast<uint32_t>(row * 64 + col))) {
+                byAtlas[a].push_back(chunk);
+                break;
+            }
+        }
+    }
+
+    float start, end;
+    BandRange(start, end);
+
+    // The stock Terrain vertex shader (permutation 0: no vertex colour, which the bake already holds) over the
+    // chunks' own buffers: c23 = the camera, so texcoord1 is the ground offset in yards (c14 / c19) and
+    // texcoord0 the atlas uv (c13 / c18, per atlas). The projection's z is pulled 4e-7 toward the camera (about
+    // a yard at the band) so the paint wins the depth test against the very triangles it covers on every backend.
+    CMapRenderChunk::SVertexShaderConstants consts;
+    FarField::TerrainConstants(consts);
+    C44Matrix& p = consts.m_projection;
+    const float eps = 4e-7f;
+    p.a2 -= eps * p.a3;
+    p.b2 -= eps * p.b3;
+    p.c2 -= eps * p.c3;
+    p.d2 -= eps * p.d3;
+    consts.m_position = V4(cam.x, cam.y, 0.0f, 0.0f);
+    consts.m_texOffset[1] = V4(0.0f, 0.0f, 0.0f, 0.0f);
+    consts.m_texScale[2] = V4(1.0f, 1.0f, 0.0f, 0.0f);
+
+    g_theGxDevicePtr->RsPush();
+    GxRsSet(GxRs_DepthWrite, 0);
+    GxRsSet(GxRs_BlendingMode, GxBlend_Alpha);
+    GxRsSet(GxRs_VertexShader, vertexShader);
+    GxRsSet(GxRs_PixelShader, s_far.blendPs);
+    GxRsSet(GxRs_Texture1, static_cast<void*>(nullptr));
+    g_theGxDevicePtr->ShaderConstantsSet(GxSh_Vertex, 0, reinterpret_cast<const float*>(&consts), sizeof(consts) / sizeof(C4Vector));
+    FarField::BindFogColor();
+    const float band[4] = { start, 1.0f / fmaxf(end - start, 1.0f), 1.0f, 0.0f };
+    g_theGxDevicePtr->ShaderConstantsSet(GxSh_Pixel, 3, band, 1);
+
+    for (uint32_t a = 0; a < kAtlases; a++) {
+        if (byAtlas[a].empty()) {
+            continue;
+        }
+
+        CGxTex* tex = AtlasTex(a);
+        GxTexSetWrap(tex, GxTex_Wrap, GxTex_Wrap);
+        GxRsSet(GxRs_Texture0, static_cast<void*>(tex));
+        const float span = static_cast<float>(Slots(a)) * kTileYd;
+        const C4Vector offset = V4((kOrigin - cam.x) / span, (kOrigin - cam.y) / span, 0.0f, 0.0f);
+        const C4Vector scale = V4(-1.0f / span, -1.0f / span, 0.0f, 0.0f);
+        g_theGxDevicePtr->ShaderConstantsSet(GxSh_Vertex, offsetof(CMapRenderChunk::SVertexShaderConstants, m_texOffset[0]) / sizeof(C4Vector), reinterpret_cast<const float*>(&offset), 1);
+        g_theGxDevicePtr->ShaderConstantsSet(GxSh_Vertex, offsetof(CMapRenderChunk::SVertexShaderConstants, m_texScale[1]) / sizeof(C4Vector), reinterpret_cast<const float*>(&scale), 1);
+
+        for (CMapRenderChunk* chunk : byAtlas[a]) {
+            chunk->RenderSetup(1);
+            g_theGxDevicePtr->Draw(&chunk->m_batch, 1);
+        }
+    }
+
+    g_theGxDevicePtr->RsPop();
 }
 
 // VERIFY: c20afbce manual
@@ -1568,7 +2082,7 @@ void CMap::RenderLowDetail(CMapAreaLow* area) {
 
         // The layer (c13 / c18) and alpha (c14 / c19) coordinates both span the map's atlas: stage 1
         // samples it again, whose opaque alpha reads as "no shadow" (0.7 + 0.3 a; the bake has it).
-        AtlasTexConstants(consts);
+        AtlasTexConstants(consts, 2);
 
         GxRsSet(GxRs_VertexShader, vertexShader);
         GxRsSet(GxRs_PixelShader, pixelShader);
