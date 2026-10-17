@@ -2640,6 +2640,8 @@ void CGxDeviceD3d9Ex::IReleaseD3dResources(int32_t freeTextures) {
         this->m_defDepthSurface = nullptr;
     }
 
+    this->IReleaseSceneDepth();
+
     if (this->m_defDepthStencilSurface) {
         this->m_defDepthStencilSurface->Release();
         this->m_defDepthStencilSurface = nullptr;
@@ -2822,6 +2824,11 @@ void CGxDeviceD3d9Ex::DeviceDestroy() {
     }
 
     this->IDestroyD3d();
+
+    if (this->m_sceneDepthTex) {
+        delete this->m_sceneDepthTex;
+        this->m_sceneDepthTex = nullptr;
+    }
 
     if (this->m_d3d) {
         this->m_d3d->Release();
@@ -3133,6 +3140,7 @@ void CGxDeviceD3d9Ex::IStateSetD3DDefaults() {
     }
 
     this->m_d3dDevice->GetRenderTarget(0, &this->m_defColorSurface);
+    this->ICreateSceneDepth();
     this->m_d3dDevice->GetDepthStencilSurface(&this->m_defDepthSurface);
     this->InitLights();
     this->m_ambientOnlyMode = 0;
@@ -3544,6 +3552,87 @@ void CGxDeviceD3d9Ex::DeviceSetRenderTarget(EGxBuffer buffer, CGxTex* texture, u
     this->m_scissorRectDirty = 1;
 }
 
+// VFOG: not in 12340 (coa-vfog d3d9_wrap.cpp CreateDepth). Called from IStateSetD3DDefaults, so after device create
+// and after every Reset (WM_SIZE, lost device), just before m_defDepthSurface is read back: with an INTZ texture
+// bound, m_defDepthSurface is its surface and every place that rebinds the main depth (DeviceSetRenderTarget,
+// DeviceSave/RestoreDepthSurface) keeps it. MSAA back buffer or no INTZ: the auto depth-stencil stays bound.
+// ponytail: the auto depth-stencil is still allocated (unused) while INTZ is bound; turn EnableAutoDepthStencil off in
+// ISetPresentParms if the VRAM matters.
+void CGxDeviceD3d9Ex::ICreateSceneDepth() {
+    const D3DFORMAT intz = static_cast<D3DFORMAT>(MAKEFOURCC('I', 'N', 'T', 'Z'));
+    D3DSURFACE_DESC desc;
+
+    if (this->m_sceneDepthTexture || !this->m_defColorSurface || FAILED(this->m_defColorSurface->GetDesc(&desc)) || desc.MultiSampleType != D3DMULTISAMPLE_NONE) {
+        return;
+    }
+
+    if (FAILED(this->m_d3d->CheckDeviceFormat(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, this->m_devAdapterFormat, D3DUSAGE_DEPTHSTENCIL, D3DRTYPE_TEXTURE, intz))) {
+        return;
+    }
+
+    if (FAILED(this->m_d3dDevice->CreateTexture(desc.Width, desc.Height, 1, D3DUSAGE_DEPTHSTENCIL, intz, D3DPOOL_DEFAULT, &this->m_sceneDepthTexture, nullptr))) {
+        this->m_sceneDepthTexture = nullptr;
+        return;
+    }
+
+    LPDIRECT3DSURFACE9 surface = nullptr;
+
+    if (FAILED(this->m_sceneDepthTexture->GetSurfaceLevel(0, &surface)) || FAILED(this->m_d3dDevice->SetDepthStencilSurface(surface))) {
+        if (surface) {
+            surface->Release();
+        }
+
+        this->IReleaseSceneDepth();
+        return;
+    }
+
+    // The device keeps its own reference while it is bound; m_defDepthSurface takes one more in GetDepthStencilSurface.
+    surface->Release();
+}
+
+// VFOG: D3DPOOL_DEFAULT, so it goes with the other default-pool objects before a Reset (IReleaseD3dResources).
+void CGxDeviceD3d9Ex::IReleaseSceneDepth() {
+    if (this->m_sceneDepthTex) {
+        this->m_sceneDepthTex->m_apiSpecificData = nullptr;
+    }
+
+    if (this->m_sceneDepthTexture) {
+        this->m_sceneDepthTexture->Release();
+        this->m_sceneDepthTexture = nullptr;
+    }
+}
+
+// VFOG: CGxDevice.h contract. No copy: the INTZ texture is the bound depth-stencil itself, sampled (.r = depth 0..1,
+// point filter) while the caller draws with depth test and write off, as coa-vfog does. nullptr when INTZ is not in
+// use (MSAA, unsupported, device lost).
+CGxTex* CGxDeviceD3d9Ex::DeviceCopySceneDepth() {
+    if (!this->m_context || !this->m_sceneDepthTexture) {
+        return nullptr;
+    }
+
+    D3DSURFACE_DESC desc;
+
+    if (FAILED(this->m_sceneDepthTexture->GetLevelDesc(0, &desc))) {
+        return nullptr;
+    }
+
+    if (!this->m_sceneDepthTex) {
+        CGxTexFlags flags(GxTex_Nearest);
+        // Render target: 9Ex's ISetTexture/ITexTouch then never try to acquire it or put it in the texture cache.
+        flags.m_renderTarget = 1;
+        this->m_sceneDepthTex = new CGxTex(GxTex_2d, desc.Width, desc.Height, 0, GxTex_D24X8, GxTex_D24X8, flags, nullptr, nullptr, "VFogSceneDepth");
+    }
+
+    CGxTex* texture = this->m_sceneDepthTex;
+    texture->m_width = desc.Width;
+    texture->m_height = desc.Height;
+    texture->m_apiSpecificData = this->m_sceneDepthTexture;
+    texture->m_needsCreation = 0;
+    texture->m_needsUpdate = 0;
+
+    return texture;
+}
+
 // VERIFY: b2b2eee4 auto
 // OFFSET: 0x006A1530
 void CGxDeviceD3d9Ex::DeviceResolveDepthBuffer(CGxTex* texture) {
@@ -3934,6 +4023,8 @@ CGxDeviceD3d9Ex::CGxDeviceD3d9Ex() : m_desktopDisplayMode() {
     this->m_defColorSurface = nullptr;
     this->m_defDepthSurface = nullptr;
     this->m_surface3B44 = nullptr;
+    this->m_sceneDepthTexture = nullptr;
+    this->m_sceneDepthTex = nullptr;
     this->m_eventQuery = nullptr;
     this->m_hwCursorDirty = 1;
     this->m_hwCursorTexture = nullptr;

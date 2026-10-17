@@ -79,6 +79,17 @@ namespace gxvk::vk::texture
     bool CreateTarget(uint32_t width, uint32_t height, uint32_t levels, bool cube, VkFormat format, Image& out);
 
     /**
+     * VFOG: a sampled copy target for a depth buffer (CGxDevice::DeviceCopySceneDepth): one level,
+     * TRANSFER_DST | TRANSFER_SRC | SAMPLED, the depth format's own, its view the DEPTH aspect only
+     * (sampled, .r = the stored depth 0..1). Never uploaded, cleared or mip-generated: the frame
+     * fills it with frame::CopyDepthFromScene(), which also moves its layout.
+     *
+     * @param VkFormat format : a depth or depth-stencil format (frame::DepthFormat())
+     * @return bool ok : false for a non-depth format, or one the device cannot sample
+     */
+    bool CreateDepthCopy(uint32_t width, uint32_t height, VkFormat format, Image& out);
+
+    /**
      * The tightly packed size of a region of `img`'s format: bytes per row (per block row for a BC
      * format) and the row count. What RecordRegions() expects its source to hold.
      *

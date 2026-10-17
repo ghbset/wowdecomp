@@ -211,6 +211,7 @@ CGxDeviceD3d11::CGxDeviceD3d11() {
     this->m_rtDepthTexture = nullptr;
     this->m_rtDepthDsv = nullptr;
     this->m_resolveTexture = nullptr;
+    this->m_sceneDepthCopy = nullptr;
     this->m_constantBuffers[0] = nullptr;
     this->m_constantBuffers[1] = nullptr;
     memset(this->m_gpuConstants, 0, sizeof(this->m_gpuConstants));
@@ -719,6 +720,12 @@ int32_t CGxDeviceD3d11::DeviceSetFormat(const CGxFormat& format) {
 
 void CGxDeviceD3d11::DeviceDestroy() {
     D3d11Log("CGxDeviceD3d11::DeviceDestroy(): begin");
+
+    if (this->m_sceneDepthCopy) {
+        this->TexDestroy(this->m_sceneDepthCopy);
+        this->m_sceneDepthCopy = nullptr;
+    }
+
     CGxDevice::DeviceDestroy();
     D3d11Log("CGxDeviceD3d11::DeviceDestroy(): CGxDevice::DeviceDestroy done");
 
@@ -1322,6 +1329,52 @@ void CGxDeviceD3d11::DeviceResolveDepthBuffer(CGxTex* texture) {
         this->m_curDsv = api->m_dsv;
         this->m_d3dContext->OMSetRenderTargets(this->m_curRtv ? 1 : 0, this->m_curRtv ? &this->m_curRtv : nullptr, this->m_curDsv);
     }
+}
+
+// VFOG: snapshot of the back buffer's depth for the volumetric fog (CGxDevice.h contract). A GxTex_D24X8 render
+// target made through ITexCreate, so it has the R24_UNORM_X8 SRV; its filter is GxTex_Nearest and the sampler's
+// ComparisonFunc is NEVER, so it samples as plain point depth. It is a separate resource from m_depthTexture, so it
+// can be bound as an SRV while m_depthDsv stays the DSV (IBindRenderTargets only drops SRVs, IStateSyncTextures
+// rebinds it on the next draw). Resize/device recreate: ITexForceRecreation releases it (render-target flag), and
+// a size change makes a new one here. MSAA or a non-D24 depth format: nullptr.
+CGxTex* CGxDeviceD3d11::DeviceCopySceneDepth() {
+    if (!this->m_context || !this->m_depthTexture) {
+        return nullptr;
+    }
+
+    D3D11_TEXTURE2D_DESC desc;
+    this->m_depthTexture->GetDesc(&desc);
+
+    if (desc.SampleDesc.Count > 1 || desc.Format != s_GxTexFmtToDxgiFmt[GxTex_D24X8]) {
+        return nullptr;
+    }
+
+    if (this->m_sceneDepthCopy && (this->m_sceneDepthCopy->m_width != desc.Width || this->m_sceneDepthCopy->m_height != desc.Height)) {
+        this->TexDestroy(this->m_sceneDepthCopy);
+        this->m_sceneDepthCopy = nullptr;
+    }
+
+    if (!this->m_sceneDepthCopy) {
+        CGxTexFlags flags(GxTex_Nearest);
+        flags.m_renderTarget = 1;
+        this->TexCreate(GxTex_2d, desc.Width, desc.Height, 0, GxTex_D24X8, GxTex_D24X8, flags, nullptr, nullptr, "VFogSceneDepth", this->m_sceneDepthCopy);
+    }
+
+    CGxTex* texture = this->m_sceneDepthCopy;
+
+    if (texture->m_needsCreation || !texture->m_apiSpecificData) {
+        this->ITexCreate(texture);
+    }
+
+    TexApi* api = static_cast<TexApi*>(texture->m_apiSpecificData);
+
+    if (!api || !api->m_texture || !api->m_srv) {
+        return nullptr;
+    }
+
+    this->m_d3dContext->CopyResource(api->m_texture, this->m_depthTexture);
+
+    return texture;
 }
 
 // The single-sampled back buffer, or a resolve of the MSAA one (4.3.4 keeps the same copy at +0x2820).

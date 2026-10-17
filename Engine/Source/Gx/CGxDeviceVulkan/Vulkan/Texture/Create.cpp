@@ -9,6 +9,9 @@ namespace gxvk::vk::texture::detail
      * descriptor on the per-frame path, where a create call does not belong).
      *
      * @param VkImageUsageFlags extraUsage : CreateTarget's COLOR_ATTACHMENT bit
+     *
+     * A depth format (CreateDepthCopy, VFOG) has no FormatInfo -- it is never uploaded -- and gets a
+     * DEPTH-aspect view: sampled, .r is the stored depth.
      * @return bool ok : on failure nothing is left created and `out` is untouched
      */
     bool CreateImage(uint32_t width, uint32_t height, uint32_t levels, bool cube, VkFormat format, Image& out, VkImageUsageFlags extraUsage)
@@ -37,8 +40,9 @@ namespace gxvk::vk::texture::detail
             return false;
         }
 
-        const FormatInfo fmt = Describe(format);
-        if (fmt.unitBytes == 0)
+        const bool       depth = IsDepth(format);
+        const FormatInfo fmt   = Describe(format);
+        if (fmt.unitBytes == 0 && !depth)
         {
             Write(Warn, "vulkan: texture: refusing format %s: its texel size is not known here, so an upload's length could not be checked", Name(format));
             ++s.stats.refused;
@@ -150,6 +154,7 @@ namespace gxvk::vk::texture::detail
         view.components.b     = VK_COMPONENT_SWIZZLE_IDENTITY;
         view.components.a     = VK_COMPONENT_SWIZZLE_IDENTITY;
         view.subresourceRange = WholeColour(levels, layers);
+        if (depth) view.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
 
         VkImageView imageView = VK_NULL_HANDLE;
         r = s.dapi->CreateImageView(s.device, &view, nullptr, &imageView);

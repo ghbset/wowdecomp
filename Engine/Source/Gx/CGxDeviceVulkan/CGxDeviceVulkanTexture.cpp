@@ -632,6 +632,85 @@ int32_t CGxDeviceVulkan::ITexResolve(CGxTex* texId, uint32_t stage, pipelines::D
     return 1;
 }
 
+// VFOG: not in 12340. CGxDevice::DeviceCopySceneDepth: the scene's depth buffer copied into a
+// device-owned CGxTex (DEPTH-aspect view, nearest, clamp), bound like any texture through
+// GxRs_TextureN; sampled .r = window-space depth. The CGxTex is a D24X8 texture, so the engine's
+// protocol gives it a record with no image (ITexCreate); the image is made here, at the scene's
+// size in the frame's depth format, and remade on a size change. A record dropped by
+// ITexForceRecreation or IReleaseTextures is remade at the next call. Null while the scene's depth
+// cannot be had (no frame, no pass wrote it, a query pins the pass, the format cannot be sampled).
+namespace {
+    CGxTex*          g_sceneDepth      = nullptr;
+    CGxDeviceVulkan* g_sceneDepthOwner = nullptr;
+    VkFormat         g_sceneDepthRefused = VK_FORMAT_UNDEFINED;   ///< CreateDepthCopy failed for it: not retried (logged once)
+}
+
+CGxTex* CGxDeviceVulkan::DeviceCopySceneDepth() {
+    if (!this->m_context || !this->m_drawPath) {
+        return nullptr;
+    }
+
+    const texture::Image* scene = frame::Scene();
+    const VkFormat format = frame::DepthFormat();
+
+    if (!scene || format == VK_FORMAT_UNDEFINED || format == g_sceneDepthRefused) {
+        return nullptr;
+    }
+
+    const uint32_t width = scene->extent.width;
+    const uint32_t height = scene->extent.height;
+
+    if (g_sceneDepthOwner != this) {
+        g_sceneDepth = nullptr;
+        g_sceneDepthOwner = this;
+    }
+
+    if (!g_sceneDepth) {
+        // Nearest, clamped, one level: a depth texel is never filtered.
+        CGxTexFlags flags(GxTex_Nearest);
+
+        if (!this->TexCreate(GxTex_2d, width, height, 0, GxTex_D24X8, GxTex_D24X8, flags, nullptr, nullptr, "VFogSceneDepth", g_sceneDepth)) {
+            g_sceneDepth = nullptr;
+            return nullptr;
+        }
+    }
+
+    CGxTex* tex = g_sceneDepth;
+
+    // The record (no image of its own: D24X8), made by the engine's protocol.
+    this->ITexMarkAsUpdated(tex);
+    TexRec* r = RecOf(tex);
+
+    if (!r) {
+        return nullptr;
+    }
+
+    if (r->image.handle != VK_NULL_HANDLE && (r->image.extent.width != width || r->image.extent.height != height || r->image.format != format)) {
+        frame::RetireImage(r->image, LastRef(*r));
+    }
+
+    if (r->image.handle == VK_NULL_HANDLE) {
+        tex->m_width = width;
+        tex->m_height = height;
+
+        if (!texture::CreateDepthCopy(width, height, format, r->image)) {
+            r->image = texture::Image();
+            // ponytail: a refused format (not sampleable) disables vfog for the session; a size
+            // the device refuses would too, which no back buffer reaches.
+            g_sceneDepthRefused = format;
+            Write(Warn, "vulkan: VFOG: no sampled copy of the %ux%u scene depth; DeviceCopySceneDepth returns null", width, height);
+            return nullptr;
+        }
+    }
+
+    if (!frame::CopyDepthFromScene(r->image)) {
+        return nullptr;
+    }
+
+    r->lastRef = frame::Serial();
+    return tex;
+}
+
 // The texture's image, made now if the texture is pending (CGxDeviceD3d::DeviceSetRenderTarget
 // creates the texture it is handed). Null when the texture has none.
 texture::Image* CGxDeviceVulkan::ITexImage(CGxTex* texId) {

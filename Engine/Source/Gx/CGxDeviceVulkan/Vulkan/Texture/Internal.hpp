@@ -110,6 +110,13 @@ namespace gxvk::vk::texture::detail
     VkImageSubresourceRange WholeColour(uint32_t levels, uint32_t layers);
     void Transition(VkCommandBuffer cmd, VkImage image, uint32_t levels, uint32_t layers, VkImageLayout from, VkImageLayout to, VkPipelineStageFlags srcStage, VkAccessFlags srcAccess, VkPipelineStageFlags dstStage, VkAccessFlags dstAccess);
 
+    /// VFOG: a depth (or depth-stencil) format: only CreateDepthCopy() makes images of one.
+    inline bool IsDepth(VkFormat f)
+    {
+        return f == VK_FORMAT_D16_UNORM || f == VK_FORMAT_X8_D24_UNORM_PACK32 || f == VK_FORMAT_D32_SFLOAT
+            || f == VK_FORMAT_D16_UNORM_S8_UINT || f == VK_FORMAT_D24_UNORM_S8_UINT || f == VK_FORMAT_D32_SFLOAT_S8_UINT;
+    }
+
     // Create.cpp
     bool CreateImage(uint32_t width, uint32_t height, uint32_t levels, bool cube, VkFormat format, Image& out, VkImageUsageFlags extraUsage = 0);
 }

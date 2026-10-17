@@ -183,7 +183,8 @@ namespace gxvk::vk::frame::detail
         info.arrayLayers   = 1;
         info.samples       = VK_SAMPLE_COUNT_1_BIT;
         info.tiling        = VK_IMAGE_TILING_OPTIMAL;
-        info.usage         = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+        // TRANSFER_SRC: CopyDepthFromScene (VFOG) copies the scene's depth into a sampled image.
+        info.usage         = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
         info.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
         info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         DepthBuffer d;

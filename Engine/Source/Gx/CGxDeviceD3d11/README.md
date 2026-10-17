@@ -22,6 +22,8 @@ reuses the D3D9 mode list.
   - At FL 10_0 with MSAA there is no SRV.
   - `m_depthSrv` is the SRV for later phases.
   - `DeviceReadDepths` really works when MSAA is off. In 12340 D3D9 it returns zeros.
+  - `DeviceCopySceneDepth` (VFOG): `CopyResource(m_depthTexture)` into a backend-owned `GxTex_D24X8` render
+    target (`m_sceneDepthCopy`, R24_UNORM_X8 SRV, point filter), remade on a size change. MSAA or D16/D32: nullptr.
 - **Render targets.** Texture targets, cube faces, depth targets, and a scratch depth of exactly the RT's size.
   `DeviceSave/RestoreDepthSurface` and `DeviceResolveDepthBuffer` are implemented.
 - **Frame calls:**

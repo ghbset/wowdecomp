@@ -103,6 +103,18 @@ namespace gxvk::vk::frame
     bool CopyFromScene(texture::Image& dst, uint32_t layer, uint32_t level, const VkRect2D& src, const VkRect2D& dstRect, bool linear);
 
     /**
+     * VFOG (CGxDevice::DeviceCopySceneDepth): copies the DEPTH aspect of the scene's depth buffer
+     * (the swapchain's size; shared with any render target of that size) into `dst`, outside the
+     * pass. `dst` is a texture::CreateDepthCopy() image of DepthFormat() at the scene's extent; it
+     * ends in SHADER_READ_ONLY_OPTIMAL, the depth buffer back in DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+     * (the next Pass() loads it). Refused while a query pins the pass, or when no pass wrote the
+     * scene's depth this frame.
+     *
+     * @return bool ok
+     */
+    bool CopyDepthFromScene(texture::Image& dst);
+
+    /**
      * Reads a rectangle of the scene back to the host, as B, G, R, A bytes per pixel: submits the
      * frame's work so far, waits for it, copies. The frame is closed afterwards; the next Present()
      * opens a new one and shows the scene as it stands.
@@ -242,6 +254,7 @@ namespace gxvk::vk::frame
         uint32_t depthBuffers    = 0;   ///< alive
         uint32_t framebuffers    = 0;   ///< alive
         uint64_t sceneCopies     = 0;   ///< CopyFromScene() calls
+        uint64_t depthCopies     = 0;   ///< CopyDepthFromScene() calls (VFOG)
         uint64_t sceneReads      = 0;   ///< ReadScene() calls (each submits and waits)
         uint64_t queries         = 0;   ///< queries begun
         uint64_t queriesCut      = 0;   ///< queries the frame ended itself (the pass had to end)

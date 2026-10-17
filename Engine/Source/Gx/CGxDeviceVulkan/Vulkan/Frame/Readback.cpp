@@ -28,6 +28,29 @@ namespace
     }
 
     constexpr VkPipelineStageFlags kReaders = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+
+    /// VFOG: the whole-image depth transition. Every aspect the format has: without
+    /// separateDepthStencilLayouts a depth-stencil image's barrier must name both.
+    void TransitionDepth(VkCommandBuffer cmd, VkImage image, VkFormat format, VkImageLayout from, VkImageLayout to,
+                         VkPipelineStageFlags srcStage, VkAccessFlags srcAccess, VkPipelineStageFlags dstStage, VkAccessFlags dstAccess)
+    {
+        const bool stencil = format == VK_FORMAT_D24_UNORM_S8_UINT || format == VK_FORMAT_D32_SFLOAT_S8_UINT || format == VK_FORMAT_D16_UNORM_S8_UINT;
+        VkImageMemoryBarrier b = {};
+        b.sType                       = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        b.srcAccessMask               = srcAccess;
+        b.dstAccessMask               = dstAccess;
+        b.oldLayout                   = from;
+        b.newLayout                   = to;
+        b.srcQueueFamilyIndex         = VK_QUEUE_FAMILY_IGNORED;
+        b.dstQueueFamilyIndex         = VK_QUEUE_FAMILY_IGNORED;
+        b.image                       = image;
+        b.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | (stencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0u);
+        b.subresourceRange.levelCount = 1;
+        b.subresourceRange.layerCount = 1;
+        s.dapi->CmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &b);
+    }
+
+    constexpr VkPipelineStageFlags kDepthStages = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
 }
 
 namespace gxvk::vk::frame
@@ -74,6 +97,57 @@ namespace gxvk::vk::frame
                    VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT);
         dst.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         ++s.stats.sceneCopies;
+        return true;
+    }
+
+    bool CopyDepthFromScene(texture::Image& dst)
+    {
+        // An active query pins the pass (Outside() would hand out the pre-pass buffer, which runs
+        // ahead of the draws whose depth is wanted): refused rather than cutting the query.
+        if (!s.open || s.queryActive || s.scene.handle == VK_NULL_HANDLE || dst.handle == VK_NULL_HANDLE) return false;
+        if (dst.format != s.depthFormat || dst.extent.width != s.scene.extent.width || dst.extent.height != s.scene.extent.height) return false;
+
+        // The scene's depth buffer: the one of its size (DepthFor() shares it with any target of
+        // that size), written by a pass of this frame.
+        DepthBuffer* depth = nullptr;
+        for (uint32_t i = 0; i < s.depthCount; ++i)
+            if (s.depths[i].extent.width == s.scene.extent.width && s.depths[i].extent.height == s.scene.extent.height) depth = &s.depths[i];
+        if (!depth || !depth->initialised || !UsedThisFrame(depth->lastUsed)) return false;
+
+        VkCommandBuffer cmd = Outside();
+        if (!cmd) return false;
+
+        // The depth buffer from its resting layout (the pass's finalLayout) to a copy source, after
+        // every depth test and write so far; the snapshot from what it holds (sampled last time, or
+        // nothing yet) to a copy target, after the shader reads of the last snapshot.
+        TransitionDepth(cmd, depth->image, s.depthFormat, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        kDepthStages, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+        const VkImageLayout from = dst.layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ? dst.layout : VK_IMAGE_LAYOUT_UNDEFINED;
+        TransitionDepth(cmd, dst.handle, dst.format, from, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                        kReaders, 0,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+
+        // DEPTH aspect only: the stencil is never loaded across passes (stencilLoadOp DONT_CARE).
+        VkImageCopy copy = {};
+        copy.srcSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        copy.srcSubresource.layerCount = 1;
+        copy.dstSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        copy.dstSubresource.layerCount = 1;
+        copy.extent                    = VkExtent3D{ dst.extent.width, dst.extent.height, 1 };
+        s.dapi->CmdCopyImage(cmd, depth->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst.handle, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+
+        // The depth buffer back to its attachment layout, so the rest of the frame's passes LOAD
+        // it (initialised stays true); the snapshot to the layout every descriptor names.
+        TransitionDepth(cmd, depth->image, s.depthFormat, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                        kDepthStages, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+        TransitionDepth(cmd, dst.handle, dst.format, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                        kReaders, VK_ACCESS_SHADER_READ_BIT);
+        dst.layout      = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        depth->lastUsed = s.serial;
+        ++s.stats.depthCopies;
         return true;
     }
 

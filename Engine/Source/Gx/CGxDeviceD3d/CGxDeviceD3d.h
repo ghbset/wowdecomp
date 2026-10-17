@@ -243,6 +243,11 @@ class CGxDeviceD3d : public CGxDevice {
     /* 3BA4 */ uint32_t m_d3dVertexStreamStride [8];
     /* 3BC4 */ uint32_t m_deviceStates [182];
     /* 3E9C */ bool m_texEnabled [8];
+    // VFOG (not 12340): INTZ depth bound as the device depth-stencil in place of the auto one, so the volumetric
+    // fog can sample it (DeviceCopySceneDepth). m_sceneDepthTex wraps it, lives for the device's lifetime and is
+    // never in m_textures, so texture recreation leaves it alone.
+    LPDIRECT3DTEXTURE9 m_sceneDepthTexture;
+    CGxTex* m_sceneDepthTex;
 
     virtual void ITexMarkAsUpdated(CGxTex* texId);
     virtual void IRsSendToHw(EGxRenderState which);
@@ -265,6 +270,7 @@ class CGxDeviceD3d : public CGxDevice {
     virtual void DeviceSaveDepthSurface();
     virtual void DeviceRestoreDepthSurface();
     virtual void DeviceResolveDepthBuffer(CGxTex* texture);
+    virtual CGxTex* DeviceCopySceneDepth();
     virtual void DeviceCopyTex(CGxTex* source, uint32_t sourcePlane, CGxTex* dest, uint32_t destPlane);
     virtual void DeviceOverride(EGxOverride override, uint32_t value);
     virtual void CapsWindowSize(CRect& rect);
@@ -366,6 +372,8 @@ class CGxDeviceD3d : public CGxDevice {
     void IShaderConstantsFlush();
     void IShaderCreateVertex(CGxShader* shader);
     void IStateSetD3DDefaults();
+    void ICreateSceneDepth();
+    void IReleaseSceneDepth();
     void IStateSync();
     void IStateSyncClipPlanes();
     void IStateSyncEnables();

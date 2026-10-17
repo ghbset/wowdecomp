@@ -95,6 +95,12 @@ namespace gxvk::vk::texture
         return CreateImage(width, height, levels, cube, format, out, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
     }
 
+    bool CreateDepthCopy(uint32_t width, uint32_t height, VkFormat format, Image& out)
+    {
+        if (!IsDepth(format)) return false;
+        return CreateImage(width, height, 1, false, format, out);
+    }
+
     bool RegionBytes(const Image& img, uint32_t width, uint32_t height, uint64_t& rowBytes, uint32_t& rowCount)
     {
         const FormatInfo fmt = Describe(img.format);
