@@ -113,6 +113,7 @@ struct WaterConfig {
     float ripples = 0.5f;       // vfogWaterRipples 0..2 (0 = off: no simulation, no reading of the units)
     bool clientSplashes = false;    // vfogWaterClientSplashes (coa WaterClientSplashes)
     int debug = 0;              // vfogWaterDebug 0..6
+    bool stencil = true;        // vfogWaterStencil: coa's stencil class tags (0 = the depth-difference mask)
 };
 
 struct WaterCVars {
@@ -128,6 +129,7 @@ struct WaterCVars {
     CVar* ripples;
     CVar* clientSplashes;
     CVar* debug;
+    CVar* stencil;
 };
 
 WaterCVars s_cvars = {};
@@ -139,6 +141,7 @@ float CVarFloat(CVar* var, float fallback, float low, float high) {
 WaterConfig ReadWaterConfig() {
     WaterConfig c;
     c.enable = !s_cvars.enable || s_cvars.enable->m_intValue != 0;
+    c.stencil = !s_cvars.stencil || s_cvars.stencil->m_intValue != 0;
     c.quality = std::clamp(s_cvars.quality ? s_cvars.quality->m_intValue : c.quality, 1, 3);
     c.waves = CVarFloat(s_cvars.waves, c.waves, 0.0f, 2.0f);
     c.wind = CVarFloat(s_cvars.wind, c.wind, 0.5f, 10.0f);
@@ -655,6 +658,9 @@ struct Pass {
     WorldViewport vp;
     float common[9][4];
     CGxTex* previous;       // the depth copy before the current class (abs = view Z)
+    bool stencil;           // classes tagged in the stencil (coa) instead of the signed depth-difference mask
+    bool tagging;           // the stencil tag states are pushed (between Begin and WaterFlushDone)
+    uint32_t drawnClasses;  // stencil: a bit per class drawn
     int nextMask;
     uint32_t drawnTiles;
     double seconds;
@@ -895,17 +901,32 @@ bool Begin() {
         UploadWaves();
     }
     RippleFrame(*s_pass.in, s_pass.water.ripples, s_pass.water.quality, s_pass.seconds, vp, s_pass.ripples);
+    if (s_pass.stencil) {
+        // coa ClearWaterStencil + ArmStencilWrites: 0 = untagged; each water draw writes its class where it passes
+        // the depth test, so the front water surface's class wins, as the depth does.
+        GxSceneClear(GxBufferBit_Stencil, CImVector { 0, 0, 0, 0 });
+        g_theGxDevicePtr->RsPush();
+        SetStencil(GxStencilCmp_Always, 0, 0xFF, 0xFF, GxStencilOp_Replace);
+        s_pass.tagging = true;
+    }
     return true;
 }
 
-void ShadeClass(WaterClass waterClass) {
+// Stencil scheme: waterDepth is the one copy after all the water, and the pass is tested against the class's tag.
+// Mask scheme: the class's own signed copy is taken here.
+void ShadeClass(WaterClass waterClass, CGxTex* waterDepth = nullptr) {
     const WaterPreset* preset = Preset(waterClass);
-    CGxTex* waterDepth = s_targets.mask[s_pass.nextMask];
-    if (!preset || !CopyDepth(waterDepth, true)) {
+    if (!waterDepth) {
+        waterDepth = s_targets.mask[s_pass.nextMask];
+        if (!preset || !CopyDepth(waterDepth, true)) {
+            return;
+        }
+        s_pass.previous = waterDepth;
+        s_pass.nextMask ^= 1;
+    }
+    if (!preset) {
         return;
     }
-    s_pass.previous = waterDepth;
-    s_pass.nextMask ^= 1;
     for (int32_t tile : preset->tiles) {
         if (tile >= 0 && tile < kWaterMaxTiles) {
             s_pass.drawnTiles |= 1u << tile;
@@ -942,6 +963,9 @@ void ShadeClass(WaterClass waterClass) {
     GxRsSet(GxRs_BlendingMode, GxBlend_Alpha);
     GxRsSet(GxRs_ColorWrite, 7);
     device->RsSet(GxRs_PixelShader, s_shaders.shade[variant]);
+    if (s_pass.stencil) {
+        SetStencil(GxStencilCmp_Equal, static_cast<int32_t>(waterClass), 0xFF, 0, GxStencilOp_Keep);   // coa ShadeClasses
+    }
     const WorldViewport& vp = s_pass.vp;
     DrawQuad(static_cast<uint32_t>(vp.w), static_cast<uint32_t>(vp.h), vp.minX, vp.maxX, vp.minY, vp.maxY);
     for (int stage = 5; stage <= kLastStage; stage++) {
@@ -965,6 +989,7 @@ void RegisterWaterCVars() {
     s_cvars.zoneColors = CVar::Register("vfogWaterZoneColors", "How much the zone's own water colours tint the modern water, 0..1", 1, "0.5", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.ripples = CVar::Register("vfogWaterRipples", "Modern water ripples and wakes where units move through or jump into water, 0..2 (0 = off)", 1, "0.5", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.clientSplashes = CVar::Register("vfogWaterClientSplashes", "Keep the client's own splash discs and wake trails on top of the modern water's ripples (0 = hidden while the ripples run)", 1, "0", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    s_cvars.stencil = CVar::Register("vfogWaterStencil", "Modern water: 1 = water classes tagged in the stencil as they draw and shaded after the liquid pass (coa), 0 = a depth copy per class marks its pixels", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.debug = CVar::Register("vfogWaterDebug", "Modern water debug view: 0 off, 1 normal, 2 foam, 3 transmittance, 4 reflection, 5 class, 6 ripples", 1, "0", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
 }
 
@@ -1002,6 +1027,7 @@ bool WaterArm(Liquid::CInstance** instances, uint32_t count) {
     s_pass.in = in;
     s_pass.cfg = cfg;
     s_pass.water = water;
+    s_pass.stencil = water.stencil && StencilAvailable();
     return true;
 }
 
@@ -1011,6 +1037,17 @@ void WaterBeforeDraw(const Liquid::CInstance* instance) {
     }
     const WaterClass next = ClassOf(instance);
     if (next == s_pass.current) {
+        return;
+    }
+    if (s_pass.stencil) {
+        if (next != WaterClass::None && !s_pass.begun) {
+            s_pass.failed = !Begin();
+        }
+        if (s_pass.tagging) {
+            GxRsSet(GxRs_StencilRef, static_cast<int32_t>(next));
+            s_pass.drawnClasses |= 1u << static_cast<uint32_t>(next);
+        }
+        s_pass.current = next;
         return;
     }
     if (s_pass.current != WaterClass::None && !s_pass.failed) {
@@ -1026,7 +1063,19 @@ void WaterFlushDone() {
     if (!s_pass.armed) {
         return;
     }
-    if (s_pass.current != WaterClass::None && !s_pass.failed) {
+    if (s_pass.tagging) {
+        // coa End: untagged again, one depth copy of the finished water, each drawn class shaded over its tag.
+        g_theGxDevicePtr->RsPop();
+        s_pass.tagging = false;
+        CGxTex* waterDepth = s_targets.mask[0];
+        if (CopyDepth(waterDepth, false)) {
+            for (uint32_t c = 1; c < kWaterClassCount; c++) {
+                if (s_pass.drawnClasses & (1u << c)) {
+                    ShadeClass(static_cast<WaterClass>(c), waterDepth);
+                }
+            }
+        }
+    } else if (!s_pass.stencil && s_pass.current != WaterClass::None && !s_pass.failed) {
         ShadeClass(s_pass.current);
     }
     if (s_pass.begun && !s_pass.failed && s_pass.water.waves > 0.0f) {

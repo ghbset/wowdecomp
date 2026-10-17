@@ -21,6 +21,7 @@ VFog (docs/VFOG_PORT.md section 5): VFogMarch{Q}[L][N] and VFogComposite{Q}[L][N
 plus VFogTemporal and VFogHistoryDepth, and the god rays VFogRayMask, VFogRayBlur and VFogRayComposite.
 Grading (coa vp_grade): VFogGrade.
 Water (coa vw_*): VFogWaterDepth, VFogWaterMask, VFogWater{1,2,3} (SSR_STEPS 0/16/32) and VFogRippleStep.
+Fading models (wxl-vfog 0.6.3): VFogDepthCopy.
 """
 import argparse
 import concurrent.futures
@@ -58,6 +59,8 @@ SHADERS = {
     'VFogWaterMask': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 1), 0, 'VFogWaterDepth', {'MASK': 1}),
     # water ripples and wakes (coa vw_ripple_step): one 30 Hz step of the Gr1616F height field
     'VFogRippleStep': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0), 0, 'VFogRippleStep', {}),
+    # fading models' cross-fade (wxl-vfog 0.6.3, vfogFadeStencil): the scene depth into R32F, behind and with them
+    'VFogDepthCopy': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0), 0, 'VFogDepthCopy', {}),
 }
 # VFogWater{1,2,3}: coa ps_vw_shade_low/mid/high (SSR_STEPS 0/16/32, cmake/WaterShaders.cmake)
 for _v, _ssr in ((1, 0), (2, 16), (3, 32)):

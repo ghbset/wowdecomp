@@ -75,6 +75,7 @@ struct CVars {
     CVar* dither;
     CVar* hdrTargets;
     CVar* fadeEarly;
+    CVar* fadeStencil;
 };
 
 // coa forever_look.cpp GradingFrame: decided at the end of the world, drawn after the glow.
@@ -139,6 +140,7 @@ Config ReadConfig() {
     cfg.localLights = CVarInt(s_cvars.localLights, 1) != 0;
     cfg.transparentFog = CVarInt(s_cvars.transparent, 1) != 0;
     cfg.fadeEarly = CVarInt(s_cvars.fadeEarly, 1) != 0;
+    cfg.fadeStencil = CVarInt(s_cvars.fadeStencil, 1) != 0;
     cfg.startOffset = std::max(CVarFloat(s_cvars.startOffset, cfg.startOffset), 0.0f);
     cfg.maxDistance = std::max(CVarFloat(s_cvars.maxDistance, cfg.maxDistance), 100.0f);
     cfg.noiseAmount = std::clamp(CVarFloat(s_cvars.noise, cfg.noiseAmount), 0.0f, 1.0f);
@@ -477,6 +479,7 @@ void RegisterCVars() {
     s_cvars.localLights = CVar::Register("vfogLocalLights", "Volumetric fog lit by nearby point lights", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.transparent = CVar::Register("vfogTransparent", "Volumetric fog: 1 = composite before transparents and fit the fog onto them, 0 = one composite after the whole world", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.fadeEarly = CVar::Register("vfogFadeEarly", "Volumetric fog: 1 = M2s fading at their draw distance are drawn before the early composite, so it fogs them at their own depth (default), 0 = stock pass 1 with the fitted fog", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    s_cvars.fadeStencil = CVar::Register("vfogFadeStencil", "Volumetric fog: 1 = fading M2s drawn early cross-fade by their alpha between the fog behind them and their own (wxl-vfog 0.6.3, needs a stencil), 0 = they take their own fog at any alpha", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.startOffset = CVar::Register("vfogStartOffset", "Volumetric fog start distance (yards)", 1, "10", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.maxDistance = CVar::Register("vfogMaxDistance", "Volumetric fog maximum march distance (yards)", 1, "5000", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.noise = CVar::Register("vfogNoise", "Volumetric fog density noise amount", 1, "0.15", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
@@ -595,8 +598,9 @@ namespace {
 // the early composite, so it missed the fog every solid model gets. Its depth-writing batches (type 0, base
 // material blend <= 1, material without the no-depth-write flag 0x10) are taken out of the pass-1 list in order
 // and drawn here as CM2Scene::Draw does, so the composite fogs them at their own depth.
-// ponytail: no alpha cross-fade (wxl-vfog 0.6.3 marks alpha in the stencil; Gx has no stencil states), so the
-// background seen through a fading model takes the model's fog (doodad-fade-frame.md 5d).
+// vfogFadeStencil (wxl-vfog 0.6.3): the depth behind them is kept first and each batch writes its alpha into the stencil,
+// so RenderFog fogs the frame from behind them and lays their own fog over them by that alpha. Without it (no stencil,
+// MSAA, CVar 0) the background seen through a fading model takes the model's fog (doodad-fade-frame.md 5d).
 bool FadingOpaqueElement(const M2Element& e) {
     if (e.m_type != 0 || !e.m_model || !e.m_batch || !(e.m_model->m_alpha < 0.99999f)) {
         return false;
@@ -633,7 +637,24 @@ void DrawFadingEarly() {
     }
     list.m_count = kept;   // compacted in place; the list is rebuilt next frame
     CM2SceneRender render(scene);
-    render.Draw(M2PASS_1, scene->m_elements.m_data, early.data(), static_cast<uint32_t>(early.size()));
+    M2Element* elements = scene->m_elements.m_data;
+    if (!s_cfg.fadeStencil || !KeepDepthBehindFading()) {
+        render.Draw(M2PASS_1, elements, early.data(), static_cast<uint32_t>(early.size()));
+        return;
+    }
+    // wxl-vfog MarkLateDepth: stencil = alpha * 255 where each batch passes the depth test; runs of one alpha per draw.
+    GxSceneClear(GxBufferBit_Stencil, CImVector { 0, 0, 0, 0 });
+    g_theGxDevicePtr->RsPush();
+    SetStencil(GxStencilCmp_Always, 0, 0xFF, 0xFF, GxStencilOp_Replace);
+    const auto ref = [&](uint32_t index) { return static_cast<int32_t>(std::clamp(elements[index].m_alpha, 0.0f, 1.0f) * 255.0f + 0.5f); };
+    for (size_t start = 0, end; start < early.size(); start = end) {
+        const int32_t r = ref(early[start]);
+        for (end = start + 1; end < early.size() && ref(early[end]) == r; ++end) {
+        }
+        GxRsSet(GxRs_StencilRef, r);
+        render.Draw(M2PASS_1, elements, early.data() + start, static_cast<uint32_t>(end - start));
+    }
+    g_theGxDevicePtr->RsPop();
 }
 
 }  // namespace

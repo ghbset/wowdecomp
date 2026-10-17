@@ -51,7 +51,7 @@ constexpr float kRayDecay = 0.9f;
 constexpr int kRayTaps = 8;
 constexpr float kMinGodRayStrength = 0.005f;
 
-enum Blend { Blend_GammaFixedFunction = 0, Blend_LinearOverSceneCopy = 1, Blend_LinearFixedFunction = 2 };     // coa FogBlend
+enum Blend { Blend_GammaFixedFunction = 0, Blend_LinearOverSceneCopy = 1, Blend_LinearFixedFunction = 2, Blend_GammaOverSceneCopy = 3 };     // coa FogBlend
 
 struct Shaders {
     CGxShader* march[3][2][2];          // [quality-1][local lights][noise]
@@ -62,6 +62,7 @@ struct Shaders {
     CGxShader* rayBlur;
     CGxShader* rayComposite;
     CGxShader* grade;
+    CGxShader* depthCopy;               // VFogDepthCopy: the scene depth into an R32F target (fading cross-fade)
 };
 
 struct Targets {
@@ -114,6 +115,15 @@ bool s_shaderMissing;           // a needed VFog shader is not in the MPQ
 bool s_overSceneCopy;           // the last composite blended in linear light over a scene copy
 GodRays s_godRays;
 
+// vfogFadeStencil (wxl-vfog 0.6.3 KeepDepthBehind / DrawOverMarked): R32F copies of the depth behind the fading models
+// (taken before they draw) and with them (taken in RenderFog). armed = behind is this frame's.
+struct FadeDepth {
+    CGxTex* behind;
+    CGxTex* with;
+    bool armed;
+};
+FadeDepth s_fade;
+
 CGxShader* Shader(CGxShader*& slot, const char* name) {
     if (!slot) {
         g_theGxDevicePtr->ShaderCreate(&slot, GxSh_Pixel, "Shaders\\Pixel", name, 1);
@@ -149,6 +159,9 @@ void DestroyTargets() {
     s_targets.rayWidth = 0;
     s_targets.rayHeight = 0;
     s_godRays.pending = false;
+    DestroyTex(s_fade.behind);
+    DestroyTex(s_fade.with);
+    s_fade.armed = false;
 
     s_targets.width = 0;
     s_targets.height = 0;
@@ -449,6 +462,22 @@ void BeginPasses(SavedPassState& saved) {
     GxRsSet(GxRs_BlendingMode, GxBlend_Opaque);
     GxRsSet(GxRs_ColorWrite, 15);
     GxRsSet(GxRs_ScissorTest, 0);
+    GxRsSet(GxRs_StencilTest, 0);
+}
+
+bool StencilAvailable() {
+    return g_theGxDevicePtr && g_theGxDevicePtr->m_caps.m_stencilBits > 0;
+}
+
+void SetStencil(EGxStencilCmp func, int32_t ref, int32_t readMask, int32_t writeMask, EGxStencilOp pass, EGxStencilOp zfail) {
+    GxRsSet(GxRs_StencilTest, 1);
+    GxRsSet(GxRs_StencilFunc, static_cast<int32_t>(func));
+    GxRsSet(GxRs_StencilRef, ref);
+    GxRsSet(GxRs_StencilReadMask, readMask);
+    GxRsSet(GxRs_StencilWriteMask, writeMask);
+    GxRsSet(GxRs_StencilFail, static_cast<int32_t>(GxStencilOp_Keep));
+    GxRsSet(GxRs_StencilZFail, static_cast<int32_t>(zfail));
+    GxRsSet(GxRs_StencilPass, static_cast<int32_t>(pass));
 }
 
 void EndPasses(const SavedPassState& saved, const WorldViewport& vp) {
@@ -483,7 +512,43 @@ void DrawToTarget(CGxTex* target, CGxShader* shader) {
     DrawQuad(target->m_width, target->m_height);
 }
 
+// The whole scene depth texture, point for point, into an R32F target of its size (VFogDepthCopy).
+bool CopyRawDepth(CGxTex*& target, CGxTex* depth) {
+    if (target && (target->m_width != depth->m_width || target->m_height != depth->m_height)) {
+        DestroyTex(target);
+    }
+    if (!target) {
+        target = CreateTarget(depth->m_width, depth->m_height, GxTex_Nearest, GxTex_R32F);
+    }
+    if (!target) {
+        return false;
+    }
+    const WorldViewport vp = LiveWorldViewport();
+    static SavedPassState s_saved;
+    BeginPasses(s_saved);
+    Bind(0, depth);
+    g_theGxDevicePtr->DeviceSceneDepthBound(false);
+    DrawToTarget(target, s_shaders.depthCopy);
+    g_theGxDevicePtr->DeviceSceneDepthBound(true);
+    GxRenderTargetSet(GxBuffers_Color, vp.target, 0);
+    EndPasses(s_saved, vp);
+    return true;
+}
+
 }  // namespace
+
+bool KeepDepthBehindFading() {
+    s_fade.armed = false;
+    CGxDevice* device = g_theGxDevicePtr;
+    // wxl-vfog: not on a multisampled depth (the sample split would clear the marks); the weights need BLENDFACTOR.
+    if (!device || s_depthUnsupported || !StencilAvailable() || device->m_format.m_multisampleCount > 1 || !device->m_caps.m_blendFactor
+        || !device->Caps().m_rttFormat[GxTex_R32F] || LiveWorldViewport().target || !Shader(s_shaders.depthCopy, "VFogDepthCopy")) {
+        return false;
+    }
+    CGxTex* depth = device->DeviceCopySceneDepth();
+    s_fade.armed = depth && CopyRawDepth(s_fade.behind, depth);
+    return s_fade.armed;
+}
 
 bool RendererReady() {
     if (!g_theGxDevicePtr || s_depthUnsupported || s_shaderMissing) {
@@ -570,8 +635,18 @@ bool RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg,
     }
 
     if (vpX < 0.0f || vpY < 0.0f || vpX + vpW > depth->m_width || vpY + vpH > depth->m_height) {
+        s_fade.armed = false;
         return false;
     }
+
+    // wxl-vfog 0.6.3 (vfogFadeStencil): with the fading models' depth behind them kept, the frame is fogged from that
+    // depth, and the composite at the live depth goes over each model by its stencil-marked alpha (after the composite).
+    CGxTex* fadeDepth = nullptr;
+    if (s_fade.armed && !prevTarget && CopyRawDepth(s_fade.with, depth)) {
+        fadeDepth = s_fade.with;
+        depth = s_fade.behind;
+    }
+    s_fade.armed = false;
 
     const float* proj = in.glProjection;
 
@@ -755,7 +830,7 @@ bool RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg,
     // coa's default for ColorSpace=1: blend in linear light over a copy of the scene, drawn opaque; the
     // fixed-function alpha blend is the fallback when the copy fails (or the world is not on the back buffer).
     // The god ray mask reads the same copy (coa CopySceneForGodRays :1440, taken whenever rays draw).
-    CGxTex* copy = (fog.linear || rays) && !prevTarget ? CopySceneBeforeFog(static_cast<uint32_t>(vpX), static_cast<uint32_t>(vpY), static_cast<uint32_t>(vpW), static_cast<uint32_t>(vpH)) : nullptr;
+    CGxTex* copy = (fog.linear || rays || fadeDepth) && !prevTarget ? CopySceneBeforeFog(static_cast<uint32_t>(vpX), static_cast<uint32_t>(vpY), static_cast<uint32_t>(vpW), static_cast<uint32_t>(vpH)) : nullptr;
     CGxTex* sceneCopy = fog.linear ? copy : nullptr;
     s_overSceneCopy = sceneCopy != nullptr;
     GxRsSet(GxRs_BlendingMode, sceneCopy ? GxBlend_Opaque : GxBlend_Alpha);
@@ -783,6 +858,25 @@ bool RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg,
     device->DeviceSceneDepthBound(false);   // D3D9: s0 is the INTZ depth-stencil the back buffer uses
     DrawQuad(static_cast<uint32_t>(vpW), static_cast<uint32_t>(vpH), vpMinX, vpMaxX, vpMinY, vpMaxY);
     device->DeviceSceneDepthBound(true);
+
+    if (fadeDepth && copy) {
+        // wxl-vfog Renderer::DrawOverMarked: out = lerp(frame fogged behind, the unfogged copy fogged at the model's
+        // own depth, alpha), the alpha in eight steps from the stencil's top three bits (step 0 is left as is).
+        // The depth-stencil stays bound for the test; s0 is the R32F copy, so nothing samples it.
+        compositeConstants[0][3] = static_cast<float>(fog.linear ? Blend_LinearOverSceneCopy : Blend_GammaOverSceneCopy);
+        SetPs(kCompositeRegister, &compositeConstants[0][0], 1);
+        Bind(0, fadeDepth);
+        Bind(3, copy);
+        GxRsSet(GxRs_BlendingMode, GxBlend_ConstantAlpha);
+        for (int32_t step = 1; step <= 7; step++) {
+            const float weight = step == 7 ? 1.0f : (2 * step + 1) / 16.0f + 0.5f / 255.0f;
+            SetStencil(GxStencilCmp_Equal, step << 5, 0xE0, 0, GxStencilOp_Keep);
+            GxRsSet(Unk84, weight);     // BLENDFACTOR (GxBlend_ConstantAlpha)
+            DrawQuad(static_cast<uint32_t>(vpW), static_cast<uint32_t>(vpH), vpMinX, vpMaxX, vpMinY, vpMaxY);
+        }
+        GxRsSet(GxRs_StencilTest, 0);
+        Bind(0, depth);
+    }
 
     // ---- god ray mask + radial blur (coa DrawGodRayMask :1200-1232) ----------------------------------
     // coa draws these at the end of the world in its early mode (RenderGodRaysAfterWorld), from the scene copy it

@@ -35,6 +35,7 @@ struct Config {
     float farFog = 1.0f;            // vfogFarFog (distance layer; replaces stock linear fog)
     bool transparentFog = true;     // vfogTransparent: early composite + fitted fog for later batches
     bool fadeEarly = true;          // vfogFadeEarly: fading M2s drawn before the early composite (wxl-vfog 0.6)
+    bool fadeStencil = true;        // vfogFadeStencil: their alpha cross-fade (wxl-vfog 0.6.3: depth behind + stencil alpha)
     int dataMode = 1;               // vfogData: 0 derived only, 1 Classic/Forever data where it covers
     int colorSpace = 1;             // 1 = linear-light scattering (gamma-decoded colours)
     int classicPhase = 0;
@@ -185,6 +186,8 @@ StockFogFit FitStockFogAt(const FogParams& fog, const FrameInputs& in, const Con
 // ===== WP6 renderer: VolumetricFogRenderer.cpp
 bool RendererReady();                       // shaders loaded and the device gives a scene depth texture
 bool RenderFog(const FogParams& fog, const FrameInputs& in, const Config& cfg, uint32_t frame, double seconds);
+// vfogFadeStencil: keeps the depth before the fading models draw, for the next RenderFog. False = no cross-fade.
+bool KeepDepthBehindFading();
 void InvalidateHistory();
 bool CompositeOverSceneCopy();              // last RenderFog blended over a scene copy (coa LinearOverSceneCopy)
 void RenderGodRays();                       // OnWorldDone: the rays the last RenderFog masked, over the finished world

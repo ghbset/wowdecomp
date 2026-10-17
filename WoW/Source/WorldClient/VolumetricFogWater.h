@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <vector>
+#include "Engine/Source/Gx/Types.h"
 #include "Engine/Source/Tempest/C44Matrix.h"
 #include "WoW/Source/WorldClient/VolumetricFog.h"
 
@@ -127,7 +128,11 @@ void Bind(int stage, CGxTex* tex);
 void DrawQuad(uint32_t width, uint32_t height, float minX = 0.0f, float maxX = 1.0f, float minY = 0.0f, float maxY = 1.0f);
 WorldViewport LiveWorldViewport();
 void BeginPasses(SavedPassState& saved);
-void EndPasses(const SavedPassState& saved, const WorldViewport& vp);   // unbinds stages 0-4
+void EndPasses(const SavedPassState& saved, const WorldViewport& vp);   // unbinds stages 0-4 (BeginPasses turns the stencil test off)
+// The Gx stencil (GxRs_Stencil*, docs "Stencil"): false when the scene depth has no stencil bits (every user falls back).
+bool StencilAvailable();
+// Test on, front and back: func against ref under readMask; pass / zfail ops written under writeMask; fail keeps.
+void SetStencil(EGxStencilCmp func, int32_t ref, int32_t readMask, int32_t writeMask, EGxStencilOp pass, EGxStencilOp zfail = GxStencilOp_Keep);
 
 // coa GradingRenderer::Grade (VolumetricFogRenderer.cpp): the 32-entry curve over a copy of the world viewport,
 // opaque, RGB. False when it could not draw (shader missing, world not on the back buffer, no copy).
