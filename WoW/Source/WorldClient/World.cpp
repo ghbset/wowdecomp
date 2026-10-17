@@ -74,6 +74,7 @@
 #include "WoW/Source/WorldClient/DayNight__DNInfo.h"
 #include "WoW/Source/WorldClient/DetailDoodad.h"
 #include "WoW/Source/WorldClient/FrameTime.h"
+#include "WoW/Source/WorldClient/VolumetricFog.h"
 #include "WoW/Source/WorldClient/LiquidEnvironment.h"
 #include "WoW/Source/WorldClient/LiquidGeomFactories.h"
 #include "WoW/Source/WorldClient/Map.h"
@@ -1557,6 +1558,7 @@ void CWorld::Update(C3Vector* camPos, C3Vector* camTarget, C3Vector* position) {
     CWorldScene::LocateViewer3();
     DayNight::Update(CWorld::status.m_chunksChanged | CWorld::status.m_prepareAll, camPos);
     CWorld::farFog = DayNight::GetInfo()->m_fog.m_end;
+    VolumetricFog::OnWorldUpdate();   // VFOG: not in 12340 (after farFog, so object fog culling stays stock)
 
     if (!g_theGxDevicePtr->MasterEnable(GxMasterEnable_Fog)) {
         CWorld::farFog = 100000.0f;

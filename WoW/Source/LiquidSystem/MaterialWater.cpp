@@ -3,6 +3,7 @@
 #include "Engine/Source/Gx/Gx.h"
 #include "Engine/Source/Model2/M2Light.h"
 #include "Engine/Source/Storm/H/storm.h"
+#include "WoW/Source/WorldClient/VolumetricFog.h"
 
 // STATIC: 0x00D45098
 CDataAllocator Liquid::s_waterFFPAllocator(sizeof(Liquid::CMaterialWaterFFP), 8);
@@ -146,7 +147,7 @@ void Liquid::CMaterialWater::Render(Liquid::IEnvironment* environment, Liquid::I
     g_theGxDevicePtr->RsSet(GxRs_Culling, 0);
     g_theGxDevicePtr->RsSet(GxRs_BlendingMode, 2);
     GxUpdateAlphaRef(GxRs_AlphaRef);
-    GxRsSet(GxRs_DepthWrite, g_theGxDevicePtr->Caps().m_maxClipPlanes == 0);
+    GxRsSet(GxRs_DepthWrite, g_theGxDevicePtr->Caps().m_maxClipPlanes == 0 || VolumetricFog::LiquidDepthWrite());   // VFOG: not in 12340
     g_theGxDevicePtr->RsSet(GxRs_Fog, 1);
 
     Liquid::s_vsConstants.m_projection = g_theGxDevicePtr->m_projNative;
@@ -225,7 +226,7 @@ void Liquid::CMaterialWaterNoSpec::Render(Liquid::IEnvironment* environment, Liq
     g_theGxDevicePtr->RsSet(GxRs_Culling, 0);
     g_theGxDevicePtr->RsSet(GxRs_BlendingMode, 2);
     GxUpdateAlphaRef(GxRs_AlphaRef);
-    GxRsSet(GxRs_DepthWrite, g_theGxDevicePtr->Caps().m_maxClipPlanes == 0);
+    GxRsSet(GxRs_DepthWrite, g_theGxDevicePtr->Caps().m_maxClipPlanes == 0 || VolumetricFog::LiquidDepthWrite());   // VFOG: not in 12340
     g_theGxDevicePtr->RsSet(GxRs_Fog, 1);
 
     Liquid::s_vsConstants.m_projection = g_theGxDevicePtr->m_projNative;
@@ -305,7 +306,7 @@ void Liquid::CMaterialWaterFFP::Render(Liquid::IEnvironment* environment, Liquid
     g_theGxDevicePtr->RsSet(GxRs_Culling, 0);
     g_theGxDevicePtr->RsSet(GxRs_BlendingMode, 2);
     GxUpdateAlphaRef(GxRs_AlphaRef);
-    GxRsSet(GxRs_DepthWrite, g_theGxDevicePtr->Caps().m_maxClipPlanes == 0);
+    GxRsSet(GxRs_DepthWrite, g_theGxDevicePtr->Caps().m_maxClipPlanes == 0 || VolumetricFog::LiquidDepthWrite());   // VFOG: not in 12340
 
     C44Matrix world = *transform;
 

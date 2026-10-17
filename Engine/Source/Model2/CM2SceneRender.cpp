@@ -31,6 +31,13 @@ const uint32_t s_fogModes[7] = { 1, 1, 1, 2, 2, 3, 4 };
 // STATIC: 0x00AF58A8
 static C44Matrix s_identity;
 
+// VFOG: not in 12340. Hooks for the volumetric fog (WoW/Source/WorldClient/VolumetricFog.cpp sets them in
+// RegisterCVars; Engine does not depend on WoW). BatchFog rewrites a late batch's fog with the fitted linear fog
+// (in: the stock values, out: the fog to draw; returns false to keep stock). FogParticles is true while late
+// particles should take the fog like any late model.
+bool (*g_vfogM2BatchFog)(const float modelPos[3], float& start, float& end, float& density, float color[3]) = nullptr;
+bool (*g_vfogM2FogParticles)() = nullptr;
+
 // Not stock: particle vertices of the current top level Draw, built ahead on the Model2 workers. s_prebuiltAt maps a
 // position in Draw's index list to its s_prebuilt slot (-1: built at draw time as stock).
 #define PARTICLE_MIN_EMITTERS 8
@@ -351,10 +358,25 @@ void CM2SceneRender::SetupLighting() {
 
     if (fogMode) {
         uint32_t color = 0;
+        float fogStart = this->m_curLighting->m_fogStart;
+        float fogEnd = this->m_curLighting->m_fogEnd;
+        float fogDensity = this->m_curLighting->m_fogDensity;
+        C3Vector fogColor = this->m_curLighting->m_fogColor;
+
+        // VFOG: not in 12340. After the fog composite, a late batch takes the fitted fog; only the lighting colour
+        // (mode 1) follows it, additive/modulate keep black/white/grey (coa-vfog transparent_fog.cpp).
+        if (g_vfogM2BatchFog && this->m_curModel) {
+            const C44Matrix& world = this->m_curModel->m_worldTransform;
+            float position[3] = { world.d0, world.d1, world.d2 };
+            float fitted[3] = { fogColor.x, fogColor.y, fogColor.z };
+
+            if (g_vfogM2BatchFog(position, fogStart, fogEnd, fogDensity, fitted) && fogMode == 1) {
+                fogColor = C3Vector(fitted[0], fitted[1], fitted[2]);
+            }
+        }
 
         switch (fogMode) {
             case 1: {
-                const C3Vector& fogColor = this->m_curLighting->m_fogColor;
                 uint8_t b = fogColor.z > 0.0f ? static_cast<uint8_t>(fogColor.z < 1.0f ? fogColor.z * 255.0f + 0.5f : 255.0f) : 0;
                 uint8_t g = fogColor.y > 0.0f ? static_cast<uint8_t>(1.0f > fogColor.y ? fogColor.y * 255.0f + 0.5f : 255.0f) : 0;
                 uint8_t r = 0.0f < fogColor.x ? static_cast<uint8_t>(1.0f > fogColor.x ? 255.0f * fogColor.x + 0.5f : 255.0f) : 0;
@@ -374,7 +396,7 @@ void CM2SceneRender::SetupLighting() {
                 break;
         }
 
-        CShaderEffect::SetFogParams(this->m_curLighting->m_fogStart, this->m_curLighting->m_fogEnd, this->m_curLighting->m_fogDensity, *reinterpret_cast<CImVector*>(&color));
+        CShaderEffect::SetFogParams(fogStart, fogEnd, fogDensity, *reinterpret_cast<CImVector*>(&color));
         CShaderEffect::SetFogEnabled(1);
     } else {
         CShaderEffect::SetFogEnabled(0);
@@ -994,6 +1016,13 @@ uint32_t CM2SceneRender::DrawBatchedParticle(uint32_t index, M2Element* elements
 uint32_t CM2SceneRender::DrawParticle(uint32_t index, M2Element* elements, uint32_t* indices, uint32_t count) {
     CParticleEmitter2* emitter = this->m_curElement->m_emitter;
     uint32_t flags = emitter->m_params.m_materialFlags;
+
+    // VFOG: not in 12340. While the fog is on the frame, opaque/keyed/alpha emitters draw as if fog flag 2 were set,
+    // so they take the fitted fog (wxl-vfog 0.6.12); additive and modulating emitters stay as authored.
+    if (g_vfogM2FogParticles && emitter->m_params.m_materialBlend <= 2 && g_vfogM2FogParticles()) {
+        flags |= 2;
+    }
+
     M2Material material;
     material.m_flags = 4;
 

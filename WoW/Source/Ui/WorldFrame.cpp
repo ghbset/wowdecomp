@@ -85,6 +85,7 @@
 #include "WoW/Source/WorldClient/MapEntity.h"
 #include "WoW/Source/WorldClient/MapWeather.h"
 #include "WoW/Source/WorldClient/World.h"
+#include "WoW/Source/WorldClient/VolumetricFog.h"
 #include <cfloat>
 #include <cmath>
 #include "WoW/Source/Ui/SpellBookFrame.h"
@@ -1661,10 +1662,12 @@ void CGWorldFrame::OnWorldRender() {
     g_theGxDevicePtr->CapsWindowSize(window);
 
     if (0.0f == window.maxY - window.minY || window.maxX - window.minX == 0.0f) {
+        VolumetricFog::OnWorldDone();   // VFOG: not in 12340
         return;
     }
 
     if (!(this->m_viewportNDC.maxY > this->m_viewportNDC.minY && this->m_viewportNDC.maxX > this->m_viewportNDC.minX)) {
+        VolumetricFog::OnWorldDone();   // VFOG: not in 12340
         return;
     }
 
@@ -1738,12 +1741,14 @@ void CGWorldFrame::OnWorldRender() {
     CM2Scene* scene = World::s_m2Scene;
 
     if (!scene) {
+        VolumetricFog::OnWorldDone();   // VFOG: not in 12340
         return;
     }
 
     scene->SetFloat18(-CWorld::s_unk_CD7758);
     scene->m_passMask = CWorld::m_M2PassMask;
     scene->Draw(M2PASS_0);
+    VolumetricFog::OnOpaqueDone();   // VFOG: not in 12340
 
     if (s_spellShadowStyle < 2) {
         DrawSpellCursorShadow(0x200122);
@@ -1762,6 +1767,7 @@ void CGWorldFrame::OnWorldRender() {
     } else {
         scene->Draw(M2PASS_2);
         CWorldScene::RenderLiquidPass();
+        VolumetricFog::OnLiquidDone();   // VFOG: not in 12340 (early composite, above water only)
         CWorldScene::RenderWeather();
         CWorldScene::RenderBarriers(this->m_elapsedSec);
         scene->Draw(M2PASS_1);
@@ -1789,6 +1795,7 @@ void CGWorldFrame::OnWorldRender() {
     SmartScreenRectClearGrid(1);
     CGChatBubbleFrame::OnWorldRender(this);
     GxXformSetViewport(minX, maxX, minY, maxY, minZ, maxZ);
+    VolumetricFog::OnWorldDone();   // VFOG: not in 12340
     FFX::Finish();
     CVehiclePassenger_C::PostRenderUpdateAll();
 }
