@@ -9,6 +9,7 @@
 #include "Engine/Source/Tempest/CAaBox.h"
 #include "Engine/Source/Tempest/CAaSphere.h"
 #include "WoW/Source/WorldClient/FVBBList.h"
+#include "WoW/Source/WorldClient/MapRenderChunk.h"
 
 class CMapObjDef;
 class CTexture;
@@ -40,6 +41,20 @@ class CMapAreaLowHeap {
 
     void Delete(CMapAreaLow* areaLow);
 };
+
+// Not in 12340 (horizonFog): the far fog and light every far pass shares (the WDL horizon now;
+// far tree/grass billboards and WMOs on the WDL later). docs/FARFIELD_FOG.md.
+namespace FarField {
+    // The factor DayNight::UpdateFog stretches the world's fog end by; 1 when wdlTextured or
+    // horizonFog is off (stock fog).
+    float FogStretch();
+    // This frame's terrain vertex constants for a far draw (fog c12, sun c24..c26), with the
+    // projection bound now and no point lights. The caller sets m_position / m_texOffset /
+    // m_texScale for its geometry, or reads m_fog / m_sun* into its own shader's constants.
+    void TerrainConstants(CMapRenderChunk::SVertexShaderConstants& consts);
+    // The fog colour where the terrain pixel shaders read it (pixel c2, or GxRs_FogColor).
+    void BindFogColor();
+}
 
 class CMapLowDetail {
     public:

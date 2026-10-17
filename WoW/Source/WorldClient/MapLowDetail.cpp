@@ -20,6 +20,8 @@
 #include "Engine/Source/ConsoleBase/Types.h"
 #include "Engine/Source/Services/Texture.h"
 #include "WoW/Source/Ui/MinimapFrame.h"
+#include "WoW/Source/WorldClient/MapChunk.h"
+#include "WoW/Source/WorldClient/MapRenderChunk.h"
 
 // VERIFY: 3763adce auto
 // OFFSET: 0x007C06E0
@@ -286,6 +288,119 @@ static CGxTex* WdlMinimapTexture(CMapAreaLow* area) {
     return TextureGetGxTex(area->m_minimapTex, 0, nullptr);
 }
 
+// Not in 12340 (horizonFog): the grid as PN for the terrain vertex shader (the same 24-byte stride
+// as PCT, so the same VBB blocks). Normals from the WDL heights: central differences on the 17x17
+// outer grid (one-sided at the tile's edge), an inner vertex from its cell's four corners. x falls
+// along the rows and y along the columns, 33.33 yd apart.
+static void BuildLowDetailGridNormals(CMapAreaLow* area, CGxBuf* buf) {
+    CGxVertexPN* vertex = reinterpret_cast<CGxVertexPN*>(g_theGxDevicePtr->BufLock(buf));
+    const int16_t* h = area->m_heights;
+    const float step = 33.333332f;
+
+    for (int32_t row = 0; row < 17; row++) {
+        const int32_t r0 = row > 0 ? row - 1 : row;
+        const int32_t r1 = row < 16 ? row + 1 : row;
+
+        for (int32_t col = 0; col < 17; col++) {
+            const int32_t c0 = col > 0 ? col - 1 : col;
+            const int32_t c1 = col < 16 ? col + 1 : col;
+            const float dzdx = (h[17 * r1 + col] - h[17 * r0 + col]) / (-(r1 - r0) * step);
+            const float dzdy = (h[17 * row + c1] - h[17 * row + c0]) / (-(c1 - c0) * step);
+            vertex->m_position = C3Vector(area->m_topLeft.x - row * step, area->m_topLeft.y - col * step, h[17 * row + col]);
+            vertex->m_normal = C3Vector(-dzdx, -dzdy, 1.0f);
+            vertex->m_normal.Normalize();
+            vertex++;
+        }
+    }
+
+    for (int32_t row = 0; row < 16; row++) {
+        for (int32_t col = 0; col < 16; col++) {
+            const float a = h[17 * row + col];
+            const float b = h[17 * row + col + 1];
+            const float c = h[17 * (row + 1) + col];
+            const float d = h[17 * (row + 1) + col + 1];
+            const float dzdx = ((c + d) - (a + b)) / (-2.0f * step);
+            const float dzdy = ((b + d) - (a + c)) / (-2.0f * step);
+            vertex->m_position = C3Vector(area->m_topLeft.x - (row + 0.5f) * step, area->m_topLeft.y - (col + 0.5f) * step, h[289 + 16 * row + col]);
+            vertex->m_normal = C3Vector(-dzdx, -dzdy, 1.0f);
+            vertex->m_normal.Normalize();
+            vertex++;
+        }
+    }
+
+    g_theGxDevicePtr->BufUnlock(buf, 0);
+    buf->m_hasData = 1;
+}
+
+static void BuildLowDetailGrid(CMapAreaLow* area, CGxBuf* buf, bool normals) {
+    if (normals) {
+        BuildLowDetailGridNormals(area, buf);
+    } else {
+        CMap::BuildLowDetailGridVertices(area, buf);
+    }
+}
+
+// Not in 12340 (wdlTextured): texture the WDL horizon with the minimap tiles.
+static CVar* WdlTexturedCVar() {
+    static CVar* s_cvar = CVar::Register("wdlTextured", "Engine option: texture the WDL horizon terrain with the map's minimap tiles (0: the stock fog-coloured silhouette)", 0x1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    return s_cvar;
+}
+
+// Not in 12340 (horizonFog): one fog for the world and the textured horizon.
+static CVar* HorizonFogCVar() {
+    static CVar* s_cvar = CVar::Register("horizonFog", "Engine option: the world and the textured WDL horizon share one fog, the world's stretched out to the horizon's far plane, and the horizon is drawn lit and fogged by the terrain shaders (0: stock fog; the horizon keeps its own)", 0x1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    return s_cvar;
+}
+
+// Not in 12340 (horizonFog): the far fog and light, shared by every far pass. docs/FARFIELD_FOG.md.
+//
+// Stock fog ends at or before farclip, where the horizon begins, so a textured horizon could only
+// be fog-coloured (stock) or carry a fog of its own that does not meet the terrain's. Instead the
+// world's fog curve is stretched by horizonFarclipScale (as wxl-farfield's game_fog did for the
+// stock exe; DayNight::UpdateFog applies it), so the terrain is not fully fogged at its edge and a
+// far pass drawn with the same constants carries on from it to full fog at the horizon's far plane.
+float FarField::FogStretch() {
+    if (!WdlTexturedCVar()->m_intValue || !HorizonFogCVar()->m_intValue) {
+        return 1.0f;
+    }
+
+    return World::s_horizonFarClipScale > 1.0f ? World::s_horizonFarClipScale : 1.0f;
+}
+
+void FarField::TerrainConstants(CMapRenderChunk::SVertexShaderConstants& consts) {
+    // This frame's terrain constants (CWorldScene::RenderChunks -> InitializeVertexShaderConstants):
+    // world-view, fog (c12), sun direction / ambient / diffuse (c24..c26). The projection is the
+    // one bound now (CWorldScene::RenderHorizon's), and no point lights (SetVertexShader leaves the
+    // last chunk's behind).
+    consts = CMapRenderChunk::s_vertexShaderConsts;
+    consts.m_projection = g_theGxDevicePtr->m_projNative;
+
+    if (g_theGxDevicePtr->DeviceApi() == GxApi_OpenGl) {
+        consts.m_projection.c0 *= -1.0f;
+        consts.m_projection.c1 *= -1.0f;
+        consts.m_projection.c2 *= -1.0f;
+        consts.m_projection.c3 *= -1.0f;
+    }
+
+    memset(consts.m_pointLights, 0, sizeof(consts.m_pointLights));
+
+    for (auto& light : consts.m_pointLights) {
+        light.m_attenuation.x = 1.0f;
+    }
+}
+
+void FarField::BindFogColor() {
+    // Where the terrain pixel shaders read it, as CWorldScene::RenderChunks binds it.
+    DayNight::DNInfo* info = DayNight::GetInfo();
+
+    if (g_theGxDevicePtr->Caps().unk_0134) {
+        GxRsSet(GxRs_FogColor, *reinterpret_cast<int32_t*>(&info->m_fog.m_color));
+    } else {
+        C4Vector color(info->m_fog.m_color);
+        g_theGxDevicePtr->ShaderConstantsSet(GxSh_Pixel, 2, reinterpret_cast<const float*>(&color), 1);
+    }
+}
+
 // VERIFY: c20afbce manual
 // OFFSET: 0x007D5E70
 void CMap::RenderLowDetail(CMapAreaLow* area) {
@@ -293,17 +408,48 @@ void CMap::RenderLowDetail(CMapAreaLow* area) {
         return;
     }
 
-    static CVar* s_wdlTextured = CVar::Register("wdlTextured", "Engine option: texture the WDL horizon terrain with the map's minimap tiles (0: the stock fog-coloured silhouette)", 0x1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
-
     g_theGxDevicePtr->RsPush();
     GxRsSet(GxRs_Fog, 1);
     GxRsSet(GxRs_DepthTest, 3);
 
     DayNight::DNInfo* info = DayNight::GetInfo();
-    CGxTex* texture = s_wdlTextured->m_intValue ? WdlMinimapTexture(area) : nullptr;
+    CGxTex* texture = WdlTexturedCVar()->m_intValue ? WdlMinimapTexture(area) : nullptr;
     uint32_t tint = 0xFFFFFFFF;
 
-    if (texture) {
+    // Not in 12340 (horizonFog): with the world's fog stretched over it, the tile is drawn as one
+    // more terrain chunk -- the terrain vertex shader and one-layer pixel shader with this frame's
+    // terrain constants, so the same fog curve (rate included), sun and ambient -- textured with the
+    // minimap tile. Its texture coordinates come from the position, as a chunk's do.
+    CGxShader* vertexShader = CMap::vertexShader_Terrain[0];
+    CGxShader* pixelShader = CMap::pixelShader_Terrain1[0];
+    const bool shaded = texture && FarField::FogStretch() != 1.0f && CMap::enableTerrainShaderVertex && vertexShader && vertexShader->Valid() && pixelShader && pixelShader->Valid();
+
+    if (shaded) {
+        CMapRenderChunk::SVertexShaderConstants consts;
+        FarField::TerrainConstants(consts);
+
+        // The layer (c13 / c18) and alpha (c14 / c19) coordinates both span the tile: stage 1
+        // samples the minimap again, whose opaque alpha reads as "no shadow" (0.7 + 0.3 a).
+        const float scale = -1.0f / (16.0f * 33.333332f);
+        consts.m_position.x = area->m_topLeft.x;
+        consts.m_position.y = area->m_topLeft.y;
+        consts.m_position.z = 0.0f;
+        consts.m_position.w = 0.0f;
+
+        for (int32_t i = 0; i < 2; i++) {
+            consts.m_texOffset[i].x = consts.m_texOffset[i].y = consts.m_texOffset[i].z = consts.m_texOffset[i].w = 0.0f;
+            consts.m_texScale[i + 1].x = consts.m_texScale[i + 1].y = scale;
+            consts.m_texScale[i + 1].z = consts.m_texScale[i + 1].w = 0.0f;
+        }
+
+        GxRsSet(GxRs_VertexShader, vertexShader);
+        GxRsSet(GxRs_PixelShader, pixelShader);
+        g_theGxDevicePtr->ShaderConstantsSet(GxSh_Vertex, 0, reinterpret_cast<const float*>(&consts), sizeof(consts) / sizeof(C4Vector));
+        FarField::BindFogColor();
+
+        // Built as PN (see BuildLowDetailGridNormals): no tint can be 0, its alpha is 0xFF.
+        tint = 0;
+    } else if (texture) {
         // The near terrain's fog stretched over the horizon's range: the world's fog ends at or
         // before farclip, where the horizon begins, so unstretched it would hide the tile entirely.
         // Full fog at farclip x horizonFarclipScale, the horizon's far plane, so it meets the sky
@@ -311,7 +457,8 @@ void CMap::RenderLowDetail(CMapAreaLow* area) {
         // diffuse: the knob for night darkness).
         float scale = World::s_horizonFarClipScale > 1.0f ? World::s_horizonFarClipScale : 1.0f;
         GxRsSet(GxRs_FogStart, info->m_fog.m_start);
-        GxRsSet(GxRs_FogEnd, info->m_fog.m_end * scale);
+        // Not stretched twice when horizonFog has stretched the world's already (no terrain shaders).
+        GxRsSet(GxRs_FogEnd, FarField::FogStretch() != 1.0f ? info->m_fog.m_end : info->m_fog.m_end * scale);
         const CImVector& a = info->m_light1.m_ambient;
         const CImVector& d = info->m_light1.m_diffuse;
         uint32_t r = a.r + d.r * 3 / 5;
@@ -329,7 +476,7 @@ void CMap::RenderLowDetail(CMapAreaLow* area) {
     GxRsSet(GxRs_FogColor, *reinterpret_cast<int32_t*>(&color));
     GxRsSet(GxRs_Lighting, 0);
     GxRsSet(GxRs_Texture0, static_cast<void*>(texture));
-    GxRsSet(GxRs_Texture1, static_cast<void*>(nullptr));
+    GxRsSet(GxRs_Texture1, static_cast<void*>(shaded ? texture : nullptr));
     GxRsSet(GxRs_ColorOp0, 0);
     GxRsSet(GxRs_AlphaOp0, 0);
     g_theGxDevicePtr->m_xforms[GxXform_Tex0].Identity();
@@ -343,16 +490,16 @@ void CMap::RenderLowDetail(CMapAreaLow* area) {
 
         if (!buf->m_hasData || !buf->m_valid || area->m_builtTint != tint) {
             area->m_builtTint = tint;
-            CMap::BuildLowDetailGridVertices(area, buf);
+            BuildLowDetailGrid(area, buf, shaded);
         }
 
         area->m_block->m_lastUsedFrame = CWorld::frameCnt;
-        GxPrimVertexPtr(area->m_block->m_buf, GxVBF_PCT);
+        GxPrimVertexPtr(area->m_block->m_buf, shaded ? GxVBF_PN : GxVBF_PCT);
     } else {
         area->m_builtTint = tint;
         CGxBuf* buf = g_theGxDevicePtr->BufStream(GxPoolTarget_Vertex, sizeof(CGxVertexPCT), 545);
-        CMap::BuildLowDetailGridVertices(area, buf);
-        GxPrimVertexPtr(buf, GxVBF_PCT);
+        BuildLowDetailGrid(area, buf, shaded);
+        GxPrimVertexPtr(buf, shaded ? GxVBF_PN : GxVBF_PCT);
     }
 
     uint32_t count;

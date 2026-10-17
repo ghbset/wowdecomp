@@ -1558,6 +1558,12 @@ void CWorld::Update(C3Vector* camPos, C3Vector* camTarget, C3Vector* position) {
     DayNight::Update(CWorld::status.m_chunksChanged | CWorld::status.m_prepareAll, camPos);
     CWorld::farFog = DayNight::GetInfo()->m_fog.m_end;
 
+    // Not stock (horizonFog): the fog end may now reach past farclip; nothing past it is drawn
+    // anyway, so the fog culls keep 12340's bound (its fog end never exceeds farclip).
+    if (CWorld::farFog > World::s_farClip) {
+        CWorld::farFog = World::s_farClip;
+    }
+
     if (!g_theGxDevicePtr->MasterEnable(GxMasterEnable_Fog)) {
         CWorld::farFog = 100000.0f;
     }
