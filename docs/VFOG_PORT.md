@@ -56,7 +56,7 @@ The decisions:
   fit range (wxl-vfog 0.4/0.6.13).
 - **Under water: off**, with stock fog (coa `Underwater=0`). The under-water branch has no early composite.
 - **God rays** (vfog4): see section 2a. On by default (`vfogGodRays 1`, coa's "on" strength); coa ships `GodRays=0`.
-- **Water** (vfog5): see section 2b. On by default, as coa (`Water=1`).
+- **Water** (vfog5): see section 2b. On by default, as coa (`Water=1`). Ripples and wakes (vfog7): section 2b, ripples.
 - **Colour grading** (vfog6): see section 2c. Off by default, as coa (`ColorGrading=0`).
 - **Dither** (vfog6): `vfogDither 1` puts a +-0.5/255 triangular dither (interleaved gradient noise from the pixel
   position, ALU only, no fetch; vf_common `Dithered`) on what the march, temporal and composite store into 8-bit
@@ -65,7 +65,7 @@ The decisions:
   writes, i.e. after the conversion back to display space in LinearOverSceneCopy. coa's own dither was removed earlier
   as an fps regression that was **never isolated** (wxl-vfog/wxl-light composites, 2026-10-10), so it is a CVar:
   `vfogDither 0` skips it on a uniform branch (c79.x = 0), the old path.
-- **Not ported in v1:** water ripples/wakes (vw_ripple_step, water_ripples/contacts), the MSAA
+- **Not ported in v1:** the MSAA
   split/silhouette, the GPU density probe, the overlay, ForeverGlow, and wxl's fading-doodad early draw and TopUp.
   The fading-doodad draw is a v2 item if fading props pop; see wxl-vfog hooks.cpp DrawFadingModelsBeforeFog
   and /root/RE/render-path/doodad-fade-*.md.
@@ -176,9 +176,9 @@ read at level 0 as coa's foam maps. Measured ranges (waves 2): variance < 0.06, 
 **Registers / samplers** (vw_constants.hlsli = coa's): c0-c8 vf_common (c3.z = 65536, coa kWaterMaxViewDepth),
 c9-c67 coa ShadingConstants (light, sun, ambient, isotropic, sky x5, stock fog (always off: vfog pushes it out),
 absorption, scattering x3, foams x4, surface response, inverse tile sizes, wave control, scrolls, depth decode, mask
-tints x10, reflection fog 4 layers x 5 + range, ripples (zero)); the depth passes also read c99. Samplers: s0 scene
+tints x10, reflection fog 4 layers x 5 + range, ripples c65-c67); the depth passes also read c99. Samplers: s0 scene
 colour, s1 scene depth (R32F), s2 signed water depth (R32F), s3-s6 tile slopes, s7-s10 tile state, s11 packed wave
-foam masks (R/G/B = high/mid/low), s14 shore mask, s15 depth mask (Argb8888, full mip chains from waterdata.bin).
+foam masks (R/G/B = high/mid/low), s12 ripple map (Gr1616F, linear, clamp), s14 shore mask, s15 depth mask (Argb8888, full mip chains from waterdata.bin).
 Missing maps bind an 8x8 zero texture (coa m_flat).
 
 **Shaders**: VFogWaterDepth, VFogWaterMask (MASK 0/1 of VFogWaterDepth.hlsl), VFogWater1/2/3 = coa
@@ -190,10 +190,36 @@ mirror); no packed-RGBA8 depth fallback (needs R32F targets); no MSAA (DeviceCop
 classes are shaded one after another inside the liquid pass instead of all after it (same pixels, same inputs:
 every class reads the same pre-water copy, as coa); water is drawn after the other transparent liquids; the
 scene copy is taken before the first water draw rather than before the whole liquid pass (it includes slime);
-no ripples, wakes or client splash suppression (`WaterRipples`, `WaterClientSplashes`); no water GPU timer/summary log.
+no water GPU timer/summary log.
 
-**Left**: ripples and unit wakes (coa water_ripples/water_contacts/client_ripple_sprites, vw_ripple_step,
-`vfogWaterRipples`, splash suppression); MSAA.
+**Ripples and wakes** (vfog7; coa water_ripples.cpp, water_contacts.cpp, engine_actors.cpp, client_ripple_sprites.cpp,
+vw_ripple_step.hlsl; code `VolumetricFogWaterRipples.cpp`). Same model, constants and defaults as coa:
+- *Contacts*: once per frame with water drawn (`Begin`), the visible object list (`ObjectMgr::m_visibleObjects`, the
+  list coa walks) gives the units whose map entity found liquid crossing the body (`CMapStaticEntity::m_staticFlags`
+  0x20 and 0x100, `m_liquidHeight` the surface; the flags the client's own `CGUnit_C` ripple emitter reads): position
+  (the entity's when on a transport), `CMovement_C` collision radius/height, swimming flag 0x200000. The 32 nearest
+  within 48 yd of the camera target, deeper than 2x height excluded. coa's guard bytes and SEH reads are not needed.
+- *Tracker*: coa's verbatim (held footprints along the path, wake motion ramp, entry splash with re-arm and 2 s
+  interval, 0.5 s stale tracks, 30 s departed-entry memory).
+- *Simulation*: **GPU, as coa** (Gr1616F render targets exist on all three backends, so no CPU path): VFogRippleStep
+  ping-pongs two Gr1616F maps (r height, g previous height), 0.125 yd texels, 512^2 (256^2 at vfogWaterQuality 1)
+  centred on the camera target, 30 steps/s, at most 4 per frame (the rest dropped), up to 48 disturbances in c1-c96.
+  Stops after 450 quiet steps (15 s, maps kept), restarts after a > 1 s gap, a map change or a clock going back.
+  The shading interpolates current/previous by the step phase (c66.x), as coa.
+- *Client sprites* (coa WaterClientSplashes=0): coa holds the `waterRipples` console value at 0; natively
+  `CMap::CreateWaterRipple` skips new sprites while `VolumetricFog::WaterHidesClientRipples()` (vfogWater on,
+  vfogWaterRipples > 0, vfogWaterClientSplashes 0, ripples supported, modern water drawn within the last second, coa's
+  grace). Existing sprites expire as with coa, and `waterRipples` itself is never written.
+- *Cost*: nothing without water in view (it runs from the water pass); with water, one walk of the visible objects
+  (flag tests only); the GPU step (512^2, 5 taps + the used disturbances) only while a unit is in water or the ripples
+  are still settling, 30 per second, roughly 0.05 ms each on a mid GPU (estimate, not measured); two 1 MB render
+  targets, made on first contact, dropped when vfogWaterRipples is 0.
+- *Deviations*: the step reads TEXCOORD0 instead of VPOS; clearing is a step drawn with c97.x = 0 (the Gx clear depends
+  on the viewport per backend); the map is created linear and read by the step at texel centres only (coa point-samples
+  it there); the clock is FrameTime (coa QPC); no ripple stats/summary log. The output is a float target, so vfogDither
+  does not apply.
+
+**Left**: MSAA.
 
 ## 2c. Colour grading (coa grading_renderer.cpp, forever_look.cpp PrepareGrading, shaders/vp_grade.hlsl)
 
@@ -274,6 +300,7 @@ to `Shaders/Pixel/ps_3_0/*.bls` (D3D9) and `ps_4_0` (D3D11, shader-xlate), and V
 | VFogWaterDepth, VFogWaterMask | 1 each | vw_linear_depth.hlsl (section 2b) |
 | VFogGrade | 1 | vp_grade.hlsl (section 2c) |
 | VFogWater{1,2,3} | SSR_STEPS 0/16/32 | vw_water.hlsl + vw_*.hlsli (section 2b) |
+| VFogRippleStep | 1 | vw_ripple_step.hlsl (section 2b, ripples; c0-c97, s0) |
 
 Names are built as `VFogMarch2`, `VFogMarch2L`, `VFogMarch2N` and `VFogMarch2LN`: 12 march + 12 composite +
 2 = 26 shaders, plus the 3 god ray shaders. Unroll layer loops (`[unroll]` over the 4 layers), because vkd3d turns indexed constant
@@ -374,8 +401,10 @@ change `farLimit` to `horizonFar` in this one place.
 (1, 0..1, coa ColorGrading's strength when on).
 Water (coa CoAVolFog.ini Water* defaults and ranges): `vfogWater` (1), `vfogWaterQuality` (2, 1..3),
 `vfogWaterWaves` (1, 0..2), `vfogWaterWind` (2, 0.5..10), `vfogWaterFoam` (1, 0..2), `vfogWaterReflections` (1, 0..2),
-`vfogWaterSpecular` (1, 0..4), `vfogWaterClarity` (1, 0.25..4), `vfogWaterZoneColors` (0.5, 0..1), `vfogWaterDebug`
-(0; 1 normal, 2 foam, 3 transmittance, 4 reflection, 5 class, 6 ripples = flat grey).
+`vfogWaterSpecular` (1, 0..4), `vfogWaterClarity` (1, 0.25..4), `vfogWaterZoneColors` (0.5, 0..1), 
+`vfogWaterRipples` (0.5, 0..2; 0 = off: no simulation and no reading of the units; coa WaterRipples),
+`vfogWaterClientSplashes` (0 = the client's splash discs and wake trails hidden while the ripples run, 1 = kept; coa
+WaterClientSplashes), `vfogWaterDebug` (0; 1 normal, 2 foam, 3 transmittance, 4 reflection, 5 class, 6 ripples).
 The defaults are coa CoAVolFog.ini plus the user's wxl-vfog look: Ambient 1.75, ClassicExposure 0.5,
 LocalLightIntensity 2.5, StartOffset 10. FarFog is 1, not wxl's 0, because no far-field plugin owns far fog
 now. Dither: see section 1 (vfogDither; the old fps regression was never isolated, so it can be toggled). The remaining Config fields are constants in code

@@ -80,6 +80,21 @@ bool WaveCollect();
 const WaveMaps* WaveMapsOf(int tile);       // nullptr: not simulated yet with the current settings
 void WaveReset();                           // drops every map (settings or data changed)
 
+// ---- ripples and wakes (VolumetricFogWaterRipples.cpp) --------------------------------------------------------
+struct WorldViewport;
+struct RippleShading {
+    CGxTex* map;            // nullptr: no ripples this frame (bind the flat texture)
+    float window[4];        // c65: origin xy (yd), 1 / extent, 1 / texels
+    float shape[4];         // c66: step weight, gain (vfogWaterRipples), extent
+    float fade[4];          // c67: fade end, 1 / fade width, texel yards
+};
+// From the water pass's Begin (water in view): reads the units in water, runs the due 30 Hz steps into the ripple maps
+// (render targets; restores vp's target and state) and fills the shading constants.
+void RippleFrame(const FrameInputs& in, float strength, int quality, double seconds, const WorldViewport& vp, RippleShading& out);
+bool RipplesHideClientSprites(bool allowed);    // allowed = the CVars let the ripples replace the client's sprites
+void RippleRelease();                           // device restored, water textures dropped
+void RippleShutdown();
+
 // ---- hooks ----------------------------------------------------------------------------------------------------
 void RegisterWaterCVars();                  // from RegisterCVars
 // Liquid::CRenderer::Flush, transparent pass, after the sort: moves water to the end grouped by class (stable, so the

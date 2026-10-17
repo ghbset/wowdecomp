@@ -2,7 +2,7 @@
 // c0-c8 are vf_common's (c3.z = 65536, coa kWaterMaxViewDepth). Samplers as coa except: s2 holds the water view Z
 // signed (> 0 where this class drew the front surface, docs "mask scheme"), s3-s6 the tiles' filtered slopes (Gr1616F)
 // and s7-s10 per tile (sqrt variance, sqrt wide slope^2, foam, oxygen) in Argb8888, both CPU-simulated with mips.
-// No ripples (s12, c65-c67 stay zero).
+// s12 = the ripple map (Gr1616F, VFogRippleStep), c65-c67 its window (all zero while no ripples run).
 float4 cLight : register(c9);
 float4 cSunColour : register(c10);
 float4 cAmbient : register(c11);
@@ -47,6 +47,7 @@ sampler2D sFoamState1 : register(s8);
 sampler2D sFoamState2 : register(s9);
 sampler2D sFoamState3 : register(s10);
 sampler2D sWaveFoamMasks : register(s11);
+sampler2D sRipples : register(s12);
 sampler2D sShoreFoamMask : register(s14);
 sampler2D sDepthFoamMask : register(s15);
 

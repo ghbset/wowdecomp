@@ -45,6 +45,7 @@ constexpr int kWaterDepthStage = 2;
 constexpr int kFirstSurfaceStage = 3;
 constexpr int kFirstFoamStateStage = 7;
 constexpr int kWaveFoamMaskStage = 11;
+constexpr int kRippleStage = 12;
 constexpr int kShoreFoamMaskStage = 14;
 constexpr int kDepthFoamMaskStage = 15;
 constexpr int kLastStage = 15;
@@ -108,6 +109,8 @@ struct WaterConfig {
     float specular = 1.0f;      // vfogWaterSpecular 0..4
     float clarity = 1.0f;       // vfogWaterClarity 0.25..4
     float zoneColors = 0.5f;    // vfogWaterZoneColors 0..1
+    float ripples = 0.5f;       // vfogWaterRipples 0..2 (0 = off: no simulation, no reading of the units)
+    bool clientSplashes = false;    // vfogWaterClientSplashes (coa WaterClientSplashes)
     int debug = 0;              // vfogWaterDebug 0..6
 };
 
@@ -121,6 +124,8 @@ struct WaterCVars {
     CVar* specular;
     CVar* clarity;
     CVar* zoneColors;
+    CVar* ripples;
+    CVar* clientSplashes;
     CVar* debug;
 };
 
@@ -141,6 +146,8 @@ WaterConfig ReadWaterConfig() {
     c.specular = CVarFloat(s_cvars.specular, c.specular, 0.0f, 4.0f);
     c.clarity = CVarFloat(s_cvars.clarity, c.clarity, 0.25f, 4.0f);
     c.zoneColors = CVarFloat(s_cvars.zoneColors, c.zoneColors, 0.0f, 1.0f);
+    c.ripples = CVarFloat(s_cvars.ripples, c.ripples, 0.0f, 2.0f);
+    c.clientSplashes = s_cvars.clientSplashes && s_cvars.clientSplashes->m_intValue != 0;
     c.debug = std::clamp(s_cvars.debug ? s_cvars.debug->m_intValue : 0, 0, 6);
     return c;
 }
@@ -512,6 +519,7 @@ void DestroyTextures() {
         DestroyTex(m.tex);
     }
     DestroyTex(s_flat);
+    RippleRelease();
 }
 
 void __fastcall OnDeviceRestored() {
@@ -649,6 +657,7 @@ struct Pass {
     int nextMask;
     uint32_t drawnTiles;
     double seconds;
+    RippleShading ripples;
     ReflectionFogLayer reflectionFog[kFogLayers];
     Float4 reflectionFogRange;
 };
@@ -884,6 +893,7 @@ bool Begin() {
     if (WaveCollect()) {
         UploadWaves();
     }
+    RippleFrame(*s_pass.in, s_pass.water.ripples, s_pass.water.quality, s_pass.seconds, vp, s_pass.ripples);
     return true;
 }
 
@@ -904,6 +914,7 @@ void ShadeClass(WaterClass waterClass) {
     CGxDevice* device = g_theGxDevicePtr;
     static ShadingConstants s_constants;
     FillClassConstants(s_constants, *preset, waterClass);
+    std::memcpy(&s_constants.ripple[0], s_pass.ripples.window, sizeof(s_constants.ripple));
     static SavedPassState s_saved;
     BeginPasses(s_saved);
     SetPs(0, &s_pass.common[0][0], 9);
@@ -921,6 +932,7 @@ void ShadeClass(WaterClass waterClass) {
     Bind(kWaveFoamMaskStage, MaskTex(WaveMasks(*preset)));
     Bind(kShoreFoamMaskStage, MaskTex(SingleMask(preset->masks[kShoreFoamSlot])));
     Bind(kDepthFoamMaskStage, MaskTex(SingleMask(preset->masks[kDepthFoamSlot])));
+    Bind(kRippleStage, s_pass.ripples.map ? s_pass.ripples.map : FlatTex());
     // coa ShadingVariant: the quality's reflection march, or sky reflections only when reflections are off.
     const int variant = s_pass.water.reflections > 0.0f ? s_pass.water.quality - 1 : 0;
     GxRsSet(GxRs_BlendingMode, GxBlend_Alpha);
@@ -947,7 +959,9 @@ void RegisterWaterCVars() {
     s_cvars.specular = CVar::Register("vfogWaterSpecular", "Modern water sun and moon highlight, 0..4", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.clarity = CVar::Register("vfogWaterClarity", "Modern water clarity, 0.25..4 (larger is clearer)", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.zoneColors = CVar::Register("vfogWaterZoneColors", "How much the zone's own water colours tint the modern water, 0..1", 1, "0.5", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
-    s_cvars.debug = CVar::Register("vfogWaterDebug", "Modern water debug view: 0 off, 1 normal, 2 foam, 3 transmittance, 4 reflection, 5 class", 1, "0", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    s_cvars.ripples = CVar::Register("vfogWaterRipples", "Modern water ripples and wakes where units move through or jump into water, 0..2 (0 = off)", 1, "0.5", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    s_cvars.clientSplashes = CVar::Register("vfogWaterClientSplashes", "Keep the client's own splash discs and wake trails on top of the modern water's ripples (0 = hidden while the ripples run)", 1, "0", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    s_cvars.debug = CVar::Register("vfogWaterDebug", "Modern water debug view: 0 off, 1 normal, 2 foam, 3 transmittance, 4 reflection, 5 class, 6 ripples", 1, "0", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
 }
 
 bool WaterArm(Liquid::CInstance** instances, uint32_t count) {
@@ -1019,8 +1033,14 @@ void WaterFlushDone() {
     s_pass.armed = false;
 }
 
+bool WaterHidesClientRipples() {
+    const WaterConfig water = ReadWaterConfig();
+    return RipplesHideClientSprites(water.enable && water.ripples > 0.0f && !water.clientSplashes && !s_shaderMissing);
+}
+
 void WaterShutdown() {
     WaveReset();
+    RippleShutdown();
     if (g_theGxDevicePtr) {
         DestroyTextures();
         CGxShader** all = &s_shaders.depth;

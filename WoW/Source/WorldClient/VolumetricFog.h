@@ -199,6 +199,7 @@ void OnWorldDone();                         // end of CGWorldFrame::OnWorldRende
 void OnWorldRendered();                     // CGWorldFrame::RenderWorld, after OnWorldRender (glow done), before names
 bool GlareDrawn();                          // OnLiquidDone drew DayNight::RenderGlares under the fog: skip the stock call
 bool LiquidDepthWrite();                    // force liquid depth writes while Active()
+bool WaterHidesClientRipples();              // CMap::CreateWaterRipple: the modern water's ripples replace the client's sprites
 bool BatchFog(const float modelPos[3], float& start, float& end, float& density, float color[3]);
 
 }  // namespace VolumetricFog

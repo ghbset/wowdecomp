@@ -1,5 +1,5 @@
 // VFogWater: coa-vfog shaders/vw_surface.hlsli (@ 4e31ddf, GPLv3) with the moments rebuilt from the CPU wave textures
-// (SampleMoments), R32F depth copies and no ripples.
+// (SampleMoments) and R32F depth copies.
 static const float kPi = 3.14159265;
 static const float kShallowTileAmplitude = 800;
 static const float kMaxTanhArgument = 10;
@@ -120,10 +120,36 @@ float ShallowTileWeight(float inverseTileSize, float columnDepth)
     return saturate(lerp(shallowAmplitude, 1, Tanh(4 * kPi * columnDepth * inverseTileSize)));
 }
 
-// Ripples are not ported (docs "Water", left): no wakes, the coverage is zero.
+// coa's ripples: s12 = the Gr1616F ripple map (height, previous height) around the camera target, c65-c67 its window.
+float RippleHeight(float2 uv)
+{
+    float2 state = tex2Dlod(sRipples, float4(uv, 0, 0)).rg;
+    return lerp(state.g, state.r, RippleWeight());
+}
+
+float RippleCoverage(WaterPixel w, float2 uv)
+{
+    float2 fromCentre = abs(uv - 0.5) * RippleExtent();
+    float window = saturate((RippleFadeEnd() - max(fromCentre.x, fromCentre.y)) * RippleInverseFadeWidth());
+    float footprintTexels = max(length(w.footprintX), length(w.footprintY)) / RippleTexelYards();
+    return window * saturate(1 - (footprintTexels - kRippleFullDetailTexels) / kRippleDetailFadeTexels);
+}
+
 RippleSample SampleRipples(WaterPixel w)
 {
-    return (RippleSample)0;
+    RippleSample ripples = (RippleSample)0;
+    float2 uv = (w.position.xy - RippleOrigin()) * RippleInverseExtent();
+    ripples.coverage = RippleGain() > 0 ? RippleCoverage(w, uv) : 0;
+    [branch] if (ripples.coverage > 0)
+    {
+        float step = RippleTexelUv();
+        ripples.height = RippleHeight(uv);
+        float dx = RippleHeight(uv + float2(step, 0)) - ripples.height;
+        float dy = RippleHeight(uv + float2(0, step)) - ripples.height;
+        float2 gradient = float2(dx, dy) * rsqrt((1 + dx * dx) * (1 + dy * dy));
+        ripples.slope = gradient * kRippleSlopeScale * RippleGain() * ripples.coverage;
+    }
+    return ripples;
 }
 
 WaveState SampleWaves(WaterPixel w, float2 rippleSlope)

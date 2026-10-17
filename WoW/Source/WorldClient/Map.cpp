@@ -74,6 +74,7 @@
 #include "WoW/Source/WorldClient/MapObjGroup.h"
 #include "WoW/Source/WorldClient/MapRenderChunk.h"
 #include "WoW/Source/WorldClient/Types.h"
+#include "WoW/Source/WorldClient/VolumetricFog.h"
 #include "WoW/Source/WorldClient/WaterRipple.h"
 #include "WoW/Source/WorldClient/World.h"
 #include "WoW/Source/WorldClient/WorldView.h"
@@ -5958,7 +5959,9 @@ void CMap::Unload() {
 // VERIFY: 6b4c3b7f auto
 // OFFSET: 0x0079D460
 void CMap::CreateWaterRipple(const C3Vector& pos, float a2, float a3, float a4, float a5, float a6, int32_t a7, int32_t a8) {
-    if (CWorld::s_waterRipples && !World::s_waterLOD) {
+    // VFOG: no new splash discs or wake trails while the modern water's ripples replace them (coa WaterClientSplashes=0
+    // holds waterRipples at 0 for that; existing sprites expire as there).
+    if (CWorld::s_waterRipples && !World::s_waterLOD && !VolumetricFog::WaterHidesClientRipples()) {
         float alpha = 1.0f;
 
         if (a5 < 0.16666667f) {

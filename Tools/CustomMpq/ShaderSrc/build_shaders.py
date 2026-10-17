@@ -20,7 +20,7 @@ VFog (docs/VFOG_PORT.md section 5): VFogMarch{Q}[L][N] and VFogComposite{Q}[L][N
 16/24/32 as coa-vfog CMakeLists.txt), L = LOCAL_LIGHTS, N = VF_NOISE (density variation + authored noise),
 plus VFogTemporal and VFogHistoryDepth, and the god rays VFogRayMask, VFogRayBlur and VFogRayComposite.
 Grading (coa vp_grade): VFogGrade.
-Water (coa vw_*): VFogWaterDepth, VFogWaterMask and VFogWater{1,2,3} (SSR_STEPS 0/16/32).
+Water (coa vw_*): VFogWaterDepth, VFogWaterMask, VFogWater{1,2,3} (SSR_STEPS 0/16/32) and VFogRippleStep.
 """
 import argparse
 import concurrent.futures
@@ -56,10 +56,12 @@ SHADERS = {
     # modern water (coa vw_*, docs "Water"): linear depth copies, then one shading pass per water class
     'VFogWaterDepth': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0), 0, 'VFogWaterDepth', {'MASK': 0}),
     'VFogWaterMask': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 1), 0, 'VFogWaterDepth', {'MASK': 1}),
+    # water ripples and wakes (coa vw_ripple_step): one 30 Hz step of the Gr1616F height field
+    'VFogRippleStep': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0), 0, 'VFogRippleStep', {}),
 }
 # VFogWater{1,2,3}: coa ps_vw_shade_low/mid/high (SSR_STEPS 0/16/32, cmake/WaterShaders.cmake)
 for _v, _ssr in ((1, 0), (2, 16), (3, 32)):
-    SHADERS['VFogWater%d' % _v] = ('ps_3_0', TEXCOORD0, COLOR0, samplers(*range(0, 12), 14, 15), 0, 'VFogWater',
+    SHADERS['VFogWater%d' % _v] = ('ps_3_0', TEXCOORD0, COLOR0, samplers(*range(0, 13), 14, 15), 0, 'VFogWater',
                                    {'SSR_STEPS': _ssr})
 for _q, _steps in ((1, 16), (2, 24), (3, 32)):
     for _lights in (0, 1):
