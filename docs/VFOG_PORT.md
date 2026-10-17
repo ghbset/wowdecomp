@@ -36,6 +36,7 @@ that reads DNInfo fog (as the old FarField did) is covered automatically.
 | early composite | WorldFrame.cpp:1764, after `RenderLiquidPass()` in the **above-water** branch | `OnLiquidDone()` runs BuildFogParams then RenderFog | 0x4F9170 + TransparentFog |
 | late transparents | `CM2SceneRender::SetupLighting`, before `CShaderEffect::SetFogParams` | `BatchFog()` gives a fitted linear fog | 0x81FD15 |
 | particles | `CM2SceneRender::DrawParticle` | while `Active()`, emitters with blend <= 2 get fog flag 2 (wxl-vfog 0.6.12) | 0x8214E0 |
+| fading M2s | `OnLiquidDone()`, before the glare and the composite | `DrawFadingEarly()`: the pass-1 elements of models fading at their draw distance that write depth are taken out of `m_passElements[M2PASS_1]` (order kept, list compacted) and drawn with `CM2SceneRender::Draw(M2PASS_1, ...)` | wxl-vfog 0.6.0 DrawFadingModelsBeforeFog |
 | liquid depth | MaterialWater.cpp:149/228/308 | `GxRs_DepthWrite = stock \|\| LiquidDepthWrite()` | LiquidDepth |
 | world done | end of OnWorldRender (before `FFX::Finish`) | `OnWorldDone()` restores DNInfo fog, decides the grade | 0x4F9281 restore |
 | world rendered | `CGWorldFrame::RenderWorld`, after `OnWorldRender` (glow done), before `WorldTextRenderBatch` | `OnWorldRendered()` draws the grade | 0x4FB042 |
@@ -55,6 +56,18 @@ The decisions:
   get the fitted linear fog. The fit uses the screen-wide fit, or the per-model fit when the model is past the
   fit range (wxl-vfog 0.4/0.6.13).
 - **Under water: off**, with stock fog (coa `Underwater=0`). The under-water branch has no early composite.
+- **Fading doodads** (vfog8, `vfogFadeEarly 1`): coa has no such step. This is wxl-vfog 0.6.0's DrawFadingModelsBeforeFog,
+  to the RE spec in `/root/RE/render-path/doodad-fade-frame.md` 5b-5d and `doodad-fade-route.md`. A model with
+  `CM2Model::m_alpha < 0.99999` has its batches routed by the client from pass 0 to the blended pass 1, which draws after
+  the early composite. Before this change those batches got only the fitted fog, and their depth was missing from the
+  composite. Now every type-0 element in the pass-1 list whose base material (`m_materialIndex - m_materialLayer`)
+  has `m_blendMode <= 1`, and whose material lacks flag 0x10 (no depth write), is drawn in `OnLiquidDone` before the
+  composite. The ZFill clones are included. The composite then fogs these batches at their own depth, as it does
+  once the model is solid. The step works the same on every backend, because it only reorders stock draws.
+  Not ported: wxl-vfog 0.6.3's alpha cross-fade (a depth copy from behind the models, alpha in the stencil, then a
+  second composite weighted by that alpha), because Gx has no stencil states. As a result, the background seen through
+  a fading model takes the model's fog (5d). This shows most where the model stands against the sky in thick fog.
+  It only runs with `vfogTransparent 1`. With 0, one composite after the world covers the models anyway.
 - **God rays** (vfog4): see section 2a. On by default (`vfogGodRays 1`, coa's "on" strength); coa ships `GodRays=0`.
 - **Water** (vfog5): see section 2b. On by default, as coa (`Water=1`). Ripples and wakes (vfog7): section 2b, ripples.
 - **Colour grading** (vfog6): see section 2c. Off by default, as coa (`ColorGrading=0`).
@@ -395,7 +408,7 @@ change `farLimit` to `horizonFar` in this one place.
 
 `vfog` (1, master), `vfogQuality` (2), `vfogTemporal` (0.85), `vfogDensity` (1), `vfogHaze` (1),
 `vfogGroundFog` (0.6), `vfogFarFog` (1), `vfogAmbient` (1.75), `vfogData` (1), `vfogLocalLights` (1),
-`vfogTransparent` (1), `vfogStartOffset` (10), `vfogMaxDistance` (5000), `vfogNoise` (0.15), `vfogDebug` (0),
+`vfogTransparent` (1), `vfogFadeEarly` (1; 0 = fading M2s stay in pass 1 with the fitted fog), `vfogStartOffset` (10), `vfogMaxDistance` (5000), `vfogNoise` (0.15), `vfogDebug` (0),
 `vfogGodRays` (1 = on, the user's choice; coa GodRays, a 0..4 strength, 0 = off, coa ships 0),
 `vfogDither` (1; 0 = the undithered path), grading: `vfogGrade` (0 = off, coa ColorGrading=0), `vfogGradeStrength`
 (1, 0..1, coa ColorGrading's strength when on).

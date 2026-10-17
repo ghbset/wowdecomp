@@ -4,12 +4,17 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <vector>
 #include "Engine/Source/ConsoleBase/ConsoleVar.h"
 #include "Engine/Source/ConsoleBase/Types.h"
 #include "Engine/Source/FFX/FFX.h"
 #include "Engine/Source/Gx/CGxDevice/CGxDevice.h"
 #include "Engine/Source/Gx/Gx.h"
+#include "Engine/Source/Model2/CM2SceneRender.h"
+#include "Engine/Source/Model2/M2Data.h"
 #include "Engine/Source/Model2/M2Light.h"
+#include "Engine/Source/Model2/M2Model.h"
+#include "Engine/Source/Model2/M2Shared.h"
 #include "Engine/Source/Model2/M2Scene.h"
 #include "WoW/Source/UIUtil/Camera.h"
 #include "WoW/Source/Ui/WorldFrame.h"
@@ -68,6 +73,7 @@ struct CVars {
     CVar* grade;
     CVar* gradeStrength;
     CVar* dither;
+    CVar* fadeEarly;
 };
 
 // coa forever_look.cpp GradingFrame: decided at the end of the world, drawn after the glow.
@@ -131,6 +137,7 @@ Config ReadConfig() {
     cfg.dataMode = std::clamp(CVarInt(s_cvars.data, cfg.dataMode), 0, 1);
     cfg.localLights = CVarInt(s_cvars.localLights, 1) != 0;
     cfg.transparentFog = CVarInt(s_cvars.transparent, 1) != 0;
+    cfg.fadeEarly = CVarInt(s_cvars.fadeEarly, 1) != 0;
     cfg.startOffset = std::max(CVarFloat(s_cvars.startOffset, cfg.startOffset), 0.0f);
     cfg.maxDistance = std::max(CVarFloat(s_cvars.maxDistance, cfg.maxDistance), 100.0f);
     cfg.noiseAmount = std::clamp(CVarFloat(s_cvars.noise, cfg.noiseAmount), 0.0f, 1.0f);
@@ -467,6 +474,7 @@ void RegisterCVars() {
     s_cvars.data = CVar::Register("vfogData", "Volumetric fog: 0 = derived layers only, 1 = authored fog data where it covers", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.localLights = CVar::Register("vfogLocalLights", "Volumetric fog lit by nearby point lights", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.transparent = CVar::Register("vfogTransparent", "Volumetric fog: 1 = composite before transparents and fit the fog onto them, 0 = one composite after the whole world", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    s_cvars.fadeEarly = CVar::Register("vfogFadeEarly", "Volumetric fog: 1 = M2s fading at their draw distance are drawn before the early composite, so it fogs them at their own depth (default), 0 = stock pass 1 with the fitted fog", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.startOffset = CVar::Register("vfogStartOffset", "Volumetric fog start distance (yards)", 1, "10", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.maxDistance = CVar::Register("vfogMaxDistance", "Volumetric fog maximum march distance (yards)", 1, "5000", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.noise = CVar::Register("vfogNoise", "Volumetric fog density noise amount", 1, "0.15", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
@@ -577,6 +585,56 @@ void OnOpaqueDone() {
                     Finite(in.cameraRelativeView, 16) && Finite(in.camPos, 3) && std::isfinite(in.fogStart) && std::isfinite(in.fogEnd);
 }
 
+namespace {
+
+// wxl-vfog 0.6.0 DrawFadingModelsBeforeFog (RE /root/RE/render-path/doodad-fade-frame.md 5b, doodad-fade-route.md):
+// a model fading at its draw distance is routed by the client from pass 0 to the blended pass 1, which draws after
+// the early composite, so it missed the fog every solid model gets. Its depth-writing batches (type 0, base
+// material blend <= 1, material without the no-depth-write flag 0x10) are taken out of the pass-1 list in order
+// and drawn here as CM2Scene::Draw does, so the composite fogs them at their own depth.
+// ponytail: no alpha cross-fade (wxl-vfog 0.6.3 marks alpha in the stencil; Gx has no stencil states), so the
+// background seen through a fading model takes the model's fog (doodad-fade-frame.md 5d).
+bool FadingOpaqueElement(const M2Element& e) {
+    if (e.m_type != 0 || !e.m_model || !e.m_batch || !(e.m_model->m_alpha < 0.99999f)) {
+        return false;
+    }
+    const CM2Shared* shared = e.m_model->m_shared;
+    const M2Data* data = shared ? shared->m_data : nullptr;
+    const M2Batch* b = e.m_batch;
+    if (!data || b->m_materialIndex < b->m_materialLayer || b->m_materialIndex >= data->m_materials.m_count) {
+        return false;
+    }
+    return data->m_materials[b->m_materialIndex - b->m_materialLayer].m_blendMode <= 1 &&
+           !(data->m_materials[b->m_materialIndex].m_flags & 0x10);
+}
+
+void DrawFadingEarly() {
+    CM2Scene* scene = World::s_m2Scene;
+    if (!s_cfg.fadeEarly || !s_opaqueValid || !scene || !(scene->m_passMask & (1 << M2PASS_1))) {
+        return;
+    }
+    TSGrowableArray<uint32_t>& list = scene->m_passElements[M2PASS_1];
+    static std::vector<uint32_t> early;
+    early.clear();
+    uint32_t kept = 0;
+    for (uint32_t i = 0; i < list.m_count; ++i) {
+        const uint32_t index = list.m_data[i];
+        if (FadingOpaqueElement(scene->m_elements.m_data[index])) {
+            early.push_back(index);
+        } else {
+            list.m_data[kept++] = index;
+        }
+    }
+    if (early.empty()) {
+        return;
+    }
+    list.m_count = kept;   // compacted in place; the list is rebuilt next frame
+    CM2SceneRender render(scene);
+    render.Draw(M2PASS_1, scene->m_elements.m_data, early.data(), static_cast<uint32_t>(early.size()));
+}
+
+}  // namespace
+
 bool Composite() {
     if (!s_opaqueValid) {
         return false;
@@ -593,6 +651,7 @@ void OnLiquidDone() {
     }
 
     // coa DrawGlareBeforeTheFog: the sun and moon glare goes under the fog with the scene; the stock call is skipped.
+    DrawFadingEarly();
     if (s_opaqueValid) {
         DayNight::RenderGlares();
         s_glareDrawn = true;

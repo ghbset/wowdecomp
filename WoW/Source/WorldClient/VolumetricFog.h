@@ -34,6 +34,7 @@ struct Config {
     float groundFog = 0.6f;         // vfogGroundFog
     float farFog = 1.0f;            // vfogFarFog (distance layer; replaces stock linear fog)
     bool transparentFog = true;     // vfogTransparent: early composite + fitted fog for later batches
+    bool fadeEarly = true;          // vfogFadeEarly: fading M2s drawn before the early composite (wxl-vfog 0.6)
     int dataMode = 1;               // vfogData: 0 derived only, 1 Classic/Forever data where it covers
     int colorSpace = 1;             // 1 = linear-light scattering (gamma-decoded colours)
     int classicPhase = 0;
