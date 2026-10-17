@@ -104,6 +104,7 @@ namespace gxvk::vk::frame::detail
     struct PassSet
     {
         VkFormat     colour  = VK_FORMAT_UNDEFINED;
+        uint32_t     samples = 1;   ///< > 1: the MSAA scene's passes (resolve into the scene and its depth)
         VkRenderPass pass[4] = {};
     };
 
@@ -156,6 +157,10 @@ namespace gxvk::vk::frame::detail
         VkFence       imagesInFlight[kMaxImages] = {};
         uint64_t      imageSerial[kMaxImages]    = {};   ///< RENDERTHREAD: the serial imagesInFlight[i]'s slot had then
         texture::Image scene;                            ///< the offscreen colour image the present pass shows
+        uint32_t    wantSamples  = 1;                    ///< gxMultisample, as SetSamples() was given it
+        uint32_t    sceneSamples = 1;                    ///< what the scene's MSAA images below were made with
+        DepthBuffer msColour;                            ///< sceneSamples > 1: the scene's multisampled colour
+        DepthBuffer msDepth;                             ///< sceneSamples > 1: the scene's multisampled depth
 
         // --- targets ----------------------------------------------------------------------------------
         VkFormat    depthFormat = VK_FORMAT_UNDEFINED;
@@ -228,7 +233,9 @@ namespace gxvk::vk::frame::detail
 
     // Targets.cpp
     bool ChooseDepthFormat(const context::Handles& h);
-    const PassSet* PassesFor(VkFormat colour);
+    const PassSet* PassesFor(VkFormat colour, uint32_t samples = 1);
+    bool CreateMsImages(const context::Handles& h);
+    void DestroyMsImages();
     uint32_t FramebufferFor(const Target& t, VkFormat format, VkExtent2D extent);
     bool TargetView(const Target& t, const texture::Image*& image, VkFormat& format, VkExtent2D& extent);
     void DestroyTargets();

@@ -177,7 +177,7 @@ namespace gxvk::vk::pipelines
         s = State();
     }
 
-    bool Record(VkCommandBuffer cmd, VkRenderPass pass, uint32_t passGeneration, uint64_t serial, uint32_t slot, const Draw& draw)
+    bool Record(VkCommandBuffer cmd, VkRenderPass pass, uint32_t passGeneration, uint32_t samples, uint64_t serial, uint32_t slot, const Draw& draw)
     {
         if (!s.ready || !cmd || pass == VK_NULL_HANDLE)
         {
@@ -224,6 +224,7 @@ namespace gxvk::vk::pipelines
         std::memset(&k, 0, sizeof k);
         k.pass        = pass;
         k.passGen     = passGeneration;
+        k.samples     = samples > 1 ? samples : 1u;
         k.streamCount = draw.streamCount;
         for (uint32_t i = 0; i < draw.streamCount; ++i) k.stride[i] = draw.streams[i].stride;
         k.attribMask = draw.attribMask;

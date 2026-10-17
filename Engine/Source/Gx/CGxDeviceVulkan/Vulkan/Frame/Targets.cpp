@@ -97,21 +97,128 @@ namespace gxvk::vk::frame::detail
         return true;
     }
 
-    /// The four pass variants of a colour format, made on first use.
-    const PassSet* PassesFor(VkFormat colour)
+    /**
+     * MSAA (the scene only): a multisampled colour (0) and depth (1) that rest in their attachment
+     * layouts, CLEARed or LOADed and always STOREd (a pass is cut by every copy and target switch),
+     * resolved at the end of every pass instance -- the colour into the scene (2), the depth, sample 0,
+     * into the single-sample depth buffer of the scene's size (3) -- so every copy, read-back, vfog
+     * depth snapshot and the present pass read single-sample images as without MSAA.
+     */
+    static bool CreatePassMs(VkFormat colour, uint32_t samples, bool clearColour, bool clearDepth, VkRenderPass& out)
+    {
+        const VkSampleCountFlagBits n = static_cast<VkSampleCountFlagBits>(samples);
+        VkAttachmentDescription2 a[4] = {};
+        for (VkAttachmentDescription2& x : a)
+        {
+            x.sType          = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2;
+            x.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            x.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            x.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+        }
+        a[0].format        = colour;
+        a[0].samples       = n;
+        a[0].loadOp        = clearColour ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+        a[0].initialLayout = clearColour ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        a[0].finalLayout   = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        a[1].format        = s.depthFormat;
+        a[1].samples       = n;
+        a[1].loadOp        = clearDepth ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+        a[1].initialLayout = clearDepth ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        a[1].finalLayout   = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        a[2].format        = colour;
+        a[2].samples       = VK_SAMPLE_COUNT_1_BIT;
+        a[2].loadOp        = VK_ATTACHMENT_LOAD_OP_DONT_CARE;   // the resolve writes the whole render area
+        a[2].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        a[2].finalLayout   = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        a[3].format        = s.depthFormat;
+        a[3].samples       = VK_SAMPLE_COUNT_1_BIT;
+        a[3].loadOp        = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        a[3].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        a[3].finalLayout   = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+        const VkImageAspectFlags depthAspect = VK_IMAGE_ASPECT_DEPTH_BIT | (s.depthFormat == VK_FORMAT_D24_UNORM_S8_UINT ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
+        VkAttachmentReference2 ref[4] = {};
+        const VkImageLayout layouts[4] = { VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                                           VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
+        for (uint32_t i = 0; i < 4; ++i)
+        {
+            ref[i].sType      = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2;
+            ref[i].attachment = i;
+            ref[i].layout     = layouts[i];
+            ref[i].aspectMask = (i & 1) ? depthAspect : VK_IMAGE_ASPECT_COLOR_BIT;
+        }
+        // SAMPLE_ZERO for depth and stencil alike: required of every 1.2 device, and legal without
+        // independentResolve (the two modes are the same). Sample 0 is what D3D11's vfog copy reads.
+        VkSubpassDescriptionDepthStencilResolve resolve = {};
+        resolve.sType                          = VK_STRUCTURE_TYPE_SUBPASS_DESCRIPTION_DEPTH_STENCIL_RESOLVE;
+        resolve.depthResolveMode               = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;
+        resolve.stencilResolveMode             = depthAspect & VK_IMAGE_ASPECT_STENCIL_BIT ? VK_RESOLVE_MODE_SAMPLE_ZERO_BIT : VK_RESOLVE_MODE_NONE;
+        resolve.pDepthStencilResolveAttachment = &ref[3];
+        VkSubpassDescription2 sub = {};
+        sub.sType                   = VK_STRUCTURE_TYPE_SUBPASS_DESCRIPTION_2;
+        sub.pNext                   = &resolve;
+        sub.pipelineBindPoint       = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        sub.colorAttachmentCount    = 1;
+        sub.pColorAttachments       = &ref[0];
+        sub.pResolveAttachments     = &ref[2];
+        sub.pDepthStencilAttachment = &ref[1];
+
+        // The single-sample pass's dependencies; the resolves run in COLOR_ATTACHMENT_OUTPUT, which
+        // the outgoing one already waits on.
+        VkSubpassDependency2 dep[2] = {};
+        for (uint32_t i = 0; i < 2; ++i) dep[i].sType = VK_STRUCTURE_TYPE_SUBPASS_DEPENDENCY_2;
+        dep[0].srcSubpass    = VK_SUBPASS_EXTERNAL;
+        dep[0].dstSubpass    = 0;
+        dep[0].srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+                             | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
+        dep[0].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT
+                             | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+        dep[0].dstStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+        dep[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+                             | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        dep[1].srcSubpass    = 0;
+        dep[1].dstSubpass    = VK_SUBPASS_EXTERNAL;
+        dep[1].srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+        dep[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        dep[1].dstStageMask  = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
+        dep[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+
+        VkRenderPassCreateInfo2 info = {};
+        info.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO_2;
+        info.attachmentCount = 4;
+        info.pAttachments    = a;
+        info.subpassCount    = 1;
+        info.pSubpasses      = &sub;
+        info.dependencyCount = 2;
+        info.pDependencies   = dep;
+        const VkResult r = s.dapi->CreateRenderPass2(s.device, &info, nullptr, &out);
+        if (r != VK_SUCCESS)
+        {
+            out = VK_NULL_HANDLE;
+            Fail("vkCreateRenderPass2 (MSAA)", r);
+            return false;
+        }
+        return true;
+    }
+
+    /// The four pass variants of a colour format and sample count, made on first use.
+    const PassSet* PassesFor(VkFormat colour, uint32_t samples)
     {
         for (uint32_t i = 0; i < s.passCount; ++i)
-            if (s.passes[i].colour == colour) return &s.passes[i];
+            if (s.passes[i].colour == colour && s.passes[i].samples == samples) return &s.passes[i];
         if (s.passCount == kMaxPassFormats || s.depthFormat == VK_FORMAT_UNDEFINED)
         {
             Write(Warn, "vulkan: frame: no render pass for colour format %s (%u formats held)", FormatName(colour), s.passCount);
             return nullptr;
         }
         PassSet& set = s.passes[s.passCount];
-        set.colour = colour;
+        set.colour  = colour;
+        set.samples = samples;
         for (uint32_t v = 0; v < 4; ++v)
         {
-            if (!CreatePass(colour, (v & 1) != 0, (v & 2) != 0, set.pass[v]))
+            const bool ok = samples > 1 ? CreatePassMs(colour, samples, (v & 1) != 0, (v & 2) != 0, set.pass[v])
+                                        : CreatePass(colour, (v & 1) != 0, (v & 2) != 0, set.pass[v]);
+            if (!ok)
             {
                 for (uint32_t u = 0; u < v; ++u) s.dapi->DestroyRenderPass(s.device, set.pass[u], nullptr);
                 set = PassSet();
@@ -119,8 +226,109 @@ namespace gxvk::vk::frame::detail
             }
         }
         ++s.passCount;
-        Write(Debug, "vulkan: frame: render passes for colour %s over depth %s", FormatName(colour), FormatName(s.depthFormat));
+        Write(Debug, "vulkan: frame: render passes for colour %s over depth %s, %u sample(s)", FormatName(colour), FormatName(s.depthFormat), samples);
         return &set;
+    }
+
+    /// A device-local 2D image of one level and its view: a depth buffer (a depth format) or the MSAA
+    /// scene's colour. False, with nothing left behind, when it cannot be had.
+    static bool MakeImage(VkFormat format, VkExtent2D extent, uint32_t samples, VkImageUsageFlags usage, DepthBuffer& d)
+    {
+        const bool isDepth = format == s.depthFormat;
+        VkImageCreateInfo info = {};
+        info.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        info.imageType     = VK_IMAGE_TYPE_2D;
+        info.format        = format;
+        info.extent        = VkExtent3D{ extent.width, extent.height, 1 };
+        info.mipLevels     = 1;
+        info.arrayLayers   = 1;
+        info.samples       = static_cast<VkSampleCountFlagBits>(samples);
+        info.tiling        = VK_IMAGE_TILING_OPTIMAL;
+        info.usage         = usage;
+        info.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
+        info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        VkResult r = s.dapi->CreateImage(s.device, &info, nullptr, &d.image);
+        if (r != VK_SUCCESS)
+        {
+            Fail("vkCreateImage (depth / MSAA)", r);
+            return false;
+        }
+        VkMemoryRequirements req = {};
+        s.dapi->GetImageMemoryRequirements(s.device, d.image, &req);
+        if (!memory::Allocate(req, memory::Where::DeviceLocal, d.block))
+        {
+            Write(Error, "vulkan: frame: no device memory for a %ux%u x%u %s image", extent.width, extent.height, samples, FormatName(format));
+            s.dapi->DestroyImage(s.device, d.image, nullptr);
+            d.image = VK_NULL_HANDLE;
+            return false;
+        }
+        r = s.dapi->BindImageMemory(s.device, d.image, d.block.memory, d.block.offset);
+        if (r == VK_SUCCESS)
+        {
+            VkImageViewCreateInfo view = {};
+            view.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+            view.image                           = d.image;
+            view.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
+            view.format                          = format;
+            view.subresourceRange.aspectMask     = !isDepth ? VK_IMAGE_ASPECT_COLOR_BIT
+                                                 : VK_IMAGE_ASPECT_DEPTH_BIT | (format == VK_FORMAT_D24_UNORM_S8_UINT ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
+            view.subresourceRange.levelCount     = 1;
+            view.subresourceRange.layerCount     = 1;
+            r = s.dapi->CreateImageView(s.device, &view, nullptr, &d.view);
+        }
+        if (r != VK_SUCCESS)
+        {
+            Fail("vkBindImageMemory / vkCreateImageView (depth / MSAA)", r);
+            s.dapi->DestroyImage(s.device, d.image, nullptr);
+            memory::Free(d.block);
+            d = DepthBuffer();
+            return false;
+        }
+        return true;
+    }
+
+    /// The MSAA scene's colour and depth, at the scene's size and the wanted sample count clamped
+    /// to what the adapter can render (and to 1 without vkCreateRenderPass2, which the depth resolve
+    /// needs). Made with the scene; sceneSamples is 1 when there are none.
+    bool CreateMsImages(const context::Handles& h)
+    {
+        s.sceneSamples = 1;
+        if (s.wantSamples <= 1) return true;
+        VkPhysicalDeviceProperties props = {};
+        h.iapi->GetPhysicalDeviceProperties(h.physical, &props);
+        const VkSampleCountFlags ok = props.limits.framebufferColorSampleCounts & props.limits.framebufferDepthSampleCounts;
+        uint32_t n = 8;
+        while (n > s.wantSamples || (n > 1 && !(ok & n))) n >>= 1;
+        if (!s.dapi->CreateRenderPass2 || context::Caps().deviceVersion < VK_API_VERSION_1_2)
+        {
+            Write(Warn, "vulkan: frame: gxMultisample %u needs a Vulkan 1.2 device (depth resolve); the scene stays single-sampled", s.wantSamples);
+            return true;
+        }
+        if (n <= 1) return true;
+        const VkExtent2D extent = s.scene.extent;
+        if (!MakeImage(kSceneFormat, extent, n, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, s.msColour)) return true;
+        if (!MakeImage(s.depthFormat, extent, n, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, s.msDepth))
+        {
+            DestroyMsImages();
+            return true;
+        }
+        s.msColour.extent = s.msDepth.extent = extent;
+        s.sceneSamples = n;
+        Write(Info, "vulkan: frame: MSAA %ux (gxMultisample %u) on the %ux%u scene", n, s.wantSamples, extent.width, extent.height);
+        return true;
+    }
+
+    /// The MSAA images; the caller has made the device idle (they go with the scene).
+    void DestroyMsImages()
+    {
+        for (DepthBuffer* d : { &s.msColour, &s.msDepth })
+        {
+            if (d->view != VK_NULL_HANDLE) s.dapi->DestroyImageView(s.device, d->view, nullptr);
+            if (d->image != VK_NULL_HANDLE) s.dapi->DestroyImage(s.device, d->image, nullptr);
+            if (d->image != VK_NULL_HANDLE) memory::Free(d->block);
+            *d = DepthBuffer();
+        }
+        s.sceneSamples = 1;
     }
 
     static void DestroyDepth(DepthBuffer& d, bool retire)
@@ -174,54 +382,9 @@ namespace gxvk::vk::frame::detail
             DestroyDepth(s.depths[slot], true);
         }
 
-        VkImageCreateInfo info = {};
-        info.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-        info.imageType     = VK_IMAGE_TYPE_2D;
-        info.format        = s.depthFormat;
-        info.extent        = VkExtent3D{ extent.width, extent.height, 1 };
-        info.mipLevels     = 1;
-        info.arrayLayers   = 1;
-        info.samples       = VK_SAMPLE_COUNT_1_BIT;
-        info.tiling        = VK_IMAGE_TILING_OPTIMAL;
-        // TRANSFER_SRC: CopyDepthFromScene (VFOG) copies the scene's depth into a sampled image.
-        info.usage         = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-        info.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
-        info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         DepthBuffer d;
-        VkResult r = s.dapi->CreateImage(s.device, &info, nullptr, &d.image);
-        if (r != VK_SUCCESS)
-        {
-            Fail("vkCreateImage (depth)", r);
-            return UINT32_MAX;
-        }
-        VkMemoryRequirements req = {};
-        s.dapi->GetImageMemoryRequirements(s.device, d.image, &req);
-        if (!memory::Allocate(req, memory::Where::DeviceLocal, d.block))
-        {
-            Write(Error, "vulkan: frame: no device memory for a %ux%u depth buffer", extent.width, extent.height);
-            s.dapi->DestroyImage(s.device, d.image, nullptr);
-            return UINT32_MAX;
-        }
-        r = s.dapi->BindImageMemory(s.device, d.image, d.block.memory, d.block.offset);
-        if (r == VK_SUCCESS)
-        {
-            VkImageViewCreateInfo view = {};
-            view.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-            view.image                           = d.image;
-            view.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
-            view.format                          = s.depthFormat;
-            view.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_DEPTH_BIT | (s.depthFormat == VK_FORMAT_D24_UNORM_S8_UINT ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
-            view.subresourceRange.levelCount     = 1;
-            view.subresourceRange.layerCount     = 1;
-            r = s.dapi->CreateImageView(s.device, &view, nullptr, &d.view);
-        }
-        if (r != VK_SUCCESS)
-        {
-            Fail("vkBindImageMemory / vkCreateImageView (depth)", r);
-            s.dapi->DestroyImage(s.device, d.image, nullptr);
-            memory::Free(d.block);
-            return UINT32_MAX;
-        }
+        // TRANSFER_SRC: CopyDepthFromScene (VFOG) copies the scene's depth into a sampled image.
+        if (!MakeImage(s.depthFormat, extent, 1, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, d)) return UINT32_MAX;
         d.extent      = extent;
         d.initialised = false;
         d.lastUsed    = s.serial;
@@ -242,7 +405,8 @@ namespace gxvk::vk::frame::detail
 
         const uint32_t depth = DepthFor(extent);
         if (depth == UINT32_MAX) return UINT32_MAX;
-        const PassSet* passes = PassesFor(format);
+        const uint32_t samples = t.image ? 1u : s.sceneSamples;
+        const PassSet* passes = PassesFor(format, samples);
         if (!passes) return UINT32_MAX;
 
         uint32_t slot = s.fbCount;
@@ -277,11 +441,14 @@ namespace gxvk::vk::frame::detail
             Fail("vkCreateImageView (target)", r);
             return UINT32_MAX;
         }
-        const VkImageView attachments[2] = { fb.view, s.depths[depth].view };
+        // MSAA: the multisampled pair first, the resolve targets (the scene, its depth) after.
+        const VkImageView single[2] = { fb.view, s.depths[depth].view };
+        const VkImageView multi[4]  = { s.msColour.view, s.msDepth.view, fb.view, s.depths[depth].view };
+        const VkImageView* attachments = samples > 1 ? multi : single;
         VkFramebufferCreateInfo info = {};
         info.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
         info.renderPass      = passes->pass[0];
-        info.attachmentCount = 2;
+        info.attachmentCount = samples > 1 ? 4u : 2u;
         info.pAttachments    = attachments;
         info.width           = extent.width;
         info.height          = extent.height;

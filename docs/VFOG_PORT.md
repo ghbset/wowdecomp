@@ -288,8 +288,19 @@ The 32x1 RGBA32F point-light texture and the 1x25 probe are dropped. Lights go i
   `vkCmdCopyImage` of the DEPTH aspect into a sampled depth image of the same format with a depth-only
   view, transition back, then expose it as a CGxTex that `ITexResolve` can bind. Never sample the live depth,
   because `DepthFor()` shares one depth image per size.
-  Vulkan has no MSAA (every pipeline and attachment is VK_SAMPLE_COUNT_1, `gxMultisample` is ignored), and the
-  copy is in the frame's own depth format, so MSAA settings and D16/D32 need nothing there.
+  The copy is in the frame's own depth format, so D16/D32 need nothing there.
+  **MSAA (vfog11)**: `gxMultisample` 2/4/8 (clamped to `framebufferColorSampleCounts & framebufferDepthSampleCounts`)
+  gives the *scene* a multisampled colour and depth (`s.msColour`/`s.msDepth`, made and dropped with the scene, so every
+  format change and resize remakes them). Its passes are `vkCreateRenderPass2` passes that resolve at the end of every
+  pass instance: colour into the scene image, depth (`VK_RESOLVE_MODE_SAMPLE_ZERO_BIT`, core 1.2
+  depth_stencil_resolve) into the single-sample depth buffer of the scene's size. So `CopyDepthFromScene`,
+  `CopyFromScene` (water, the composite's scene copy, glow), the screenshot read-back and the present pass are
+  unchanged and read sample 0 / resolved colour, as D3D11's `blit_depth_ms_ps` and `IResolvedBackBuffer`. No shader
+  changed. Texture render targets stay single-sample; full-screen passes over the scene (vfog composite, glow
+  blend-back, UI) rasterise into the multisampled scene, every sample alike. Pipelines key on the pass's sample count
+  (`Key::samples`, `frame::PassSamples()`). Needs a Vulkan 1.2 device; below it the scene stays single-sampled (logged).
+  Occlusion queries in the scene count samples, as on D3D. Cost: 1920x1080 at 4x, 33 MB colour + 33 MB depth
+  (D24S8), 8x double; plus one full-screen colour+depth resolve per scene pass break.
 - **D3D11 (WP5, vfog9)**: single-sampled D24: `CopyResource(m_depthTexture -> a GxTex_D24X8 CGxTex)`, which gets an
   R24_UNORM_X8 SRV, point sampled. MSAA or D16/D32 (CopyResource cannot change the sample count or format):
   `IBlit` draws `m_depthSrv` into a `GxTex_R32F` render target with a Load shader (`blit_depth_ps`, or

@@ -182,11 +182,12 @@ namespace gxvk::vk::pipelines
      * @param VkCommandBuffer cmd : the frame's main command buffer, its pass open
      * @param VkRenderPass pass : the pass it is open on (the frame's RenderPass())
      * @param uint32 passGeneration : frame::PassGeneration(); a change discards every pipeline
+     * @param uint32 samples : frame::PassSamples(), the pass's sample count
      * @param uint64 serial : frame::Serial()
      * @param uint32 slot : frame::Slot(), which per-slot pools the frame uses
      * @return bool drawn : false when the draw could not be issued (logged once per reason)
      */
-    bool Record(VkCommandBuffer cmd, VkRenderPass pass, uint32_t passGeneration, uint64_t serial, uint32_t slot, const Draw& draw);
+    bool Record(VkCommandBuffer cmd, VkRenderPass pass, uint32_t passGeneration, uint32_t samples, uint64_t serial, uint32_t slot, const Draw& draw);
 
     struct Stats
     {

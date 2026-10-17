@@ -158,6 +158,14 @@ namespace gxvk::vk::frame
     /// no longer compatible.
     uint32_t PassGeneration();
 
+    /// The sample count of the current target's passes (the pipelines' rasterizationSamples): the
+    /// scene's MSAA count, 1 for every texture target.
+    uint32_t PassSamples();
+
+    /// gxMultisample (1/2/4/8). Takes effect when the scene image is next made -- every format
+    /// change rebuilds the swapchain, and with it the scene -- clamped to the adapter's counts.
+    void SetSamples(uint32_t samples);
+
     /// The extent of the current target.
     VkExtent2D Extent();
 

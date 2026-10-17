@@ -349,7 +349,7 @@ void CGxDeviceVulkan::Draw(CGxBatch* batch, int32_t count) {
         return;
     }
 
-    if (!pipelines::Record(cmd, frame::RenderPass(), frame::PassGeneration(), frame::Serial(), frame::Slot(), d)) {
+    if (!pipelines::Record(cmd, frame::RenderPass(), frame::PassGeneration(), frame::PassSamples(), frame::Serial(), frame::Slot(), d)) {
         return;
     }
 

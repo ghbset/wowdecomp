@@ -139,14 +139,17 @@ namespace gxvk::vk::frame::detail
         }
         const uint32_t fbi = FramebufferFor(s.target, format, extent);
         if (fbi == UINT32_MAX) return false;
-        const PassSet* passes = PassesFor(format);
+        const bool     msaa   = !s.target.image && s.sceneSamples > 1;
+        const PassSet* passes = PassesFor(format, msaa ? s.sceneSamples : 1u);
         if (!passes) return false;
         Framebuffer& fb    = s.fbs[fbi];
         DepthBuffer& depth = s.depths[fb.depth];
+        // MSAA: the multisampled pair is what the pass loads; the single-sample depth is only its resolve.
+        DepthBuffer& loaded = msaa ? s.msDepth : depth;
 
         const bool colourClear = s.clearColourPending || image->layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        const bool depthClear  = s.clearDepthPending || !depth.initialised;
-        VkClearValue clears[2] = {};
+        const bool depthClear  = s.clearDepthPending || !loaded.initialised;
+        VkClearValue clears[4] = {};
         for (uint32_t i = 0; i < 4; ++i) clears[0].color.float32[i] = s.clearColourPending ? s.clearColour[i] : 0.0f;
         clears[1].depthStencil.depth   = 1.0f;
         clears[1].depthStencil.stencil = 0;
@@ -156,15 +159,16 @@ namespace gxvk::vk::frame::detail
         begin.renderPass        = passes->pass[(colourClear ? 1u : 0u) | (depthClear ? 2u : 0u)];
         begin.framebuffer       = fb.fb;
         begin.renderArea.extent = extent;
-        begin.clearValueCount   = 2;
+        begin.clearValueCount   = msaa ? 4u : 2u;
         begin.pClearValues      = clears;
         s.dapi->CmdBeginRenderPass(s.slots[s.fi].cmd, &begin, VK_SUBPASS_CONTENTS_INLINE);
 
         // The pass leaves the colour image in its resting layout; recorded now, since nothing else
         // touches the image before the pass ends.
         const_cast<texture::Image*>(image)->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        depth.initialised = true;
-        depth.lastUsed    = s.serial;
+        depth.initialised  = true;
+        depth.lastUsed     = s.serial;
+        loaded.initialised = true;
         fb.lastUsed       = s.serial;
         s.passOpen           = true;
         s.passFb             = fbi;
@@ -406,11 +410,15 @@ namespace gxvk::vk::frame
         }
         else if (!TargetView(s.target, image, format, extent))
             return VK_NULL_HANDLE;
-        const PassSet* passes = PassesFor(format);
+        const PassSet* passes = PassesFor(format, PassSamples());
         return passes ? passes->pass[0] : VK_NULL_HANDLE;
     }
 
     uint32_t PassGeneration() { return s.passGen; }
+
+    uint32_t PassSamples() { return s.target.image ? 1u : s.sceneSamples; }
+
+    void SetSamples(uint32_t samples) { s.wantSamples = samples > 1 ? samples : 1u; }
 
     VkExtent2D Extent()
     {

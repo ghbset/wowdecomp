@@ -107,6 +107,7 @@ namespace gxvk::vk::loader
         PFN_vkCreateImageView      CreateImageView      = nullptr;
         PFN_vkDestroyImageView     DestroyImageView     = nullptr;
         PFN_vkCreateRenderPass     CreateRenderPass     = nullptr;
+        PFN_vkCreateRenderPass2    CreateRenderPass2    = nullptr;   ///< optional (1.2 core): the MSAA scene's depth resolve
         PFN_vkDestroyRenderPass    DestroyRenderPass    = nullptr;
         PFN_vkCreateFramebuffer    CreateFramebuffer    = nullptr;
         PFN_vkDestroyFramebuffer   DestroyFramebuffer   = nullptr;

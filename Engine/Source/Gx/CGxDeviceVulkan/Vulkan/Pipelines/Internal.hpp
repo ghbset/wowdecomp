@@ -120,6 +120,7 @@ namespace gxvk::vk::pipelines::detail
     {
         VkRenderPass pass;
         uint32_t     passGen;
+        uint32_t     samples;         ///< rasterizationSamples (the pass's: the MSAA scene's or 1)
         uint32_t     streamCount;
         uint32_t     stride[kMaxStreams];
         Attribute    attribs[kAttribCount];

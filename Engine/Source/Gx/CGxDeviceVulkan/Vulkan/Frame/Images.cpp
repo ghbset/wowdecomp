@@ -19,6 +19,7 @@ namespace gxvk::vk::frame::detail
         {
             DropFramebuffersOf(s.scene.handle, false);
             texture::DestroyIdle(s.scene);
+            DestroyMsImages();
         }
         for (uint32_t i = 0; i < kMaxImages; ++i)
         {
@@ -115,6 +116,7 @@ namespace gxvk::vk::frame::detail
             DropImageObjects();
             return false;
         }
+        CreateMsImages(h);   // MSAA (gxMultisample): single-sampled when they cannot be had
         if (!present::Rebuild(h.format, h.extent, s.views, count, s.scene.view) && !s.loggedNoPresent)
         {
             s.loggedNoPresent = true;

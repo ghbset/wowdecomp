@@ -235,6 +235,8 @@ namespace gxvk::vk::loader
         GXVK_DEVICE_PROC(CreateImageView);
         GXVK_DEVICE_PROC(DestroyImageView);
         GXVK_DEVICE_PROC(CreateRenderPass);
+        // Optional, not a decline: without it (a 1.0/1.1 device) the scene stays single-sampled.
+        out.CreateRenderPass2 = reinterpret_cast<PFN_vkCreateRenderPass2>(api.GetDeviceProcAddr(device, "vkCreateRenderPass2"));
         GXVK_DEVICE_PROC(DestroyRenderPass);
         GXVK_DEVICE_PROC(CreateFramebuffer);
         GXVK_DEVICE_PROC(DestroyFramebuffer);

@@ -188,6 +188,7 @@ int32_t CGxDeviceVulkan::ICreateVulkan(const CGxFormat& format) {
 
     // Before the swapchain is built: the format's vsync picks its present mode.
     context::SetVsync(format.m_vsync != 0);
+    frame::SetSamples(format.m_multisampleCount);   // MSAA: the scene made with the new swapchain picks it up
 
     this->m_vulkanPending = 0;
 
