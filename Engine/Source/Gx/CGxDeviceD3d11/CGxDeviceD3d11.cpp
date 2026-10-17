@@ -227,6 +227,8 @@ CGxDeviceD3d11::CGxDeviceD3d11() {
     this->m_zeroVertexBuf = nullptr;
     this->m_blitVs = nullptr;
     this->m_blitPs = nullptr;
+    this->m_blitDepthPs[0] = nullptr;
+    this->m_blitDepthPs[1] = nullptr;
     this->m_blitConstantBuffer = nullptr;
     this->m_backBufferSrv = nullptr;
     this->m_fanIndexBufferSize = 0;
@@ -1340,12 +1342,14 @@ void CGxDeviceD3d11::DeviceResolveDepthBuffer(CGxTex* texture) {
     }
 }
 
-// VFOG: snapshot of the back buffer's depth for the volumetric fog (CGxDevice.h contract). A GxTex_D24X8 render
-// target made through ITexCreate, so it has the R24_UNORM_X8 SRV; its filter is GxTex_Nearest and the sampler's
-// ComparisonFunc is NEVER, so it samples as plain point depth. It is a separate resource from m_depthTexture, so it
-// can be bound as an SRV while m_depthDsv stays the DSV (IBindRenderTargets only drops SRVs, IStateSyncTextures
-// rebinds it on the next draw). Resize/device recreate: ITexForceRecreation releases it (render-target flag), and
-// a size change makes a new one here. MSAA or a non-D24 depth format: nullptr.
+// VFOG: snapshot of the back buffer's depth for the volumetric fog (CGxDevice.h contract).
+// Single-sampled D24: CopyResource into a GxTex_D24X8 render target made through ITexCreate, so it has the
+// R24_UNORM_X8 SRV; its filter is GxTex_Nearest and the sampler's ComparisonFunc is NEVER (plain point depth).
+// MSAA or D16/D32: CopyResource cannot do it (sample count / format), so IBlit draws m_depthSrv into a GxTex_R32F
+// render target with a Load shader (MSAA: sample 0, coa-vfog's one-sample-per-pixel copy; needs 10_1 for the
+// multisampled SRV). Either is a separate resource from m_depthTexture, so it can be bound as an SRV while
+// m_depthDsv stays the DSV. Resize/device recreate: ITexForceRecreation releases it (render-target flag), and a
+// size or kind change makes a new one here.
 CGxTex* CGxDeviceD3d11::DeviceCopySceneDepth(bool* transient) {
     if (!this->m_context || !this->m_depthTexture) {
         return nullptr;
@@ -1354,11 +1358,31 @@ CGxTex* CGxDeviceD3d11::DeviceCopySceneDepth(bool* transient) {
     D3D11_TEXTURE2D_DESC desc;
     this->m_depthTexture->GetDesc(&desc);
 
-    if (desc.SampleDesc.Count > 1 || desc.Format != s_GxTexFmtToDxgiFmt[GxTex_D24X8]) {
-        return nullptr;
+    bool copy = desc.SampleDesc.Count <= 1 && desc.Format == s_GxTexFmtToDxgiFmt[GxTex_D24X8];
+    EGxTexFormat format = copy ? GxTex_D24X8 : GxTex_R32F;
+    ID3D11PixelShader* ps = nullptr;
+
+    if (!copy) {
+        uint32_t ms = desc.SampleDesc.Count > 1 ? 1 : 0;
+
+        if (!this->m_depthSrv || !this->m_caps.m_rttFormat[GxTex_R32F]) {
+            return nullptr;
+        }
+
+        if (!this->m_blitDepthPs[ms]) {
+            const FfBlob& blob = ms ? g_blitDepthMsPs : g_blitDepthPs;
+
+            if (FAILED(this->m_d3dDevice->CreatePixelShader(blob.data, blob.size, nullptr, &this->m_blitDepthPs[ms]))) {
+                this->m_blitDepthPs[ms] = nullptr;
+                D3d11LogOnce("CGxDeviceD3d11: VFOG depth copy shader failed (ms %u)", ms);
+                return nullptr;
+            }
+        }
+
+        ps = this->m_blitDepthPs[ms];
     }
 
-    if (this->m_sceneDepthCopy && (this->m_sceneDepthCopy->m_width != desc.Width || this->m_sceneDepthCopy->m_height != desc.Height)) {
+    if (this->m_sceneDepthCopy && (this->m_sceneDepthCopy->m_width != desc.Width || this->m_sceneDepthCopy->m_height != desc.Height || this->m_sceneDepthCopy->m_format != format)) {
         this->TexDestroy(this->m_sceneDepthCopy);
         this->m_sceneDepthCopy = nullptr;
     }
@@ -1366,7 +1390,7 @@ CGxTex* CGxDeviceD3d11::DeviceCopySceneDepth(bool* transient) {
     if (!this->m_sceneDepthCopy) {
         CGxTexFlags flags(GxTex_Nearest);
         flags.m_renderTarget = 1;
-        this->TexCreate(GxTex_2d, desc.Width, desc.Height, 0, GxTex_D24X8, GxTex_D24X8, flags, nullptr, nullptr, "VFogSceneDepth", this->m_sceneDepthCopy);
+        this->TexCreate(GxTex_2d, desc.Width, desc.Height, 0, format, format, flags, nullptr, nullptr, "VFogSceneDepth", this->m_sceneDepthCopy);
     }
 
     CGxTex* texture = this->m_sceneDepthCopy;
@@ -1381,7 +1405,11 @@ CGxTex* CGxDeviceD3d11::DeviceCopySceneDepth(bool* transient) {
         return nullptr;
     }
 
-    this->m_d3dContext->CopyResource(api->m_texture, this->m_depthTexture);
+    if (copy) {
+        this->m_d3dContext->CopyResource(api->m_texture, this->m_depthTexture);
+    } else if (!this->IBlit(this->m_depthSrv, desc.Width, desc.Height, nullptr, texture, 0, 0, nullptr, false, ps)) {
+        return nullptr;
+    }
 
     return texture;
 }
@@ -2130,6 +2158,8 @@ void CGxDeviceD3d11::IStateRelease() {
     SafeRelease(this->m_devConstantBuffer);
     SafeRelease(this->m_blitVs);
     SafeRelease(this->m_blitPs);
+    SafeRelease(this->m_blitDepthPs[0]);
+    SafeRelease(this->m_blitDepthPs[1]);
     SafeRelease(this->m_blitConstantBuffer);
 }
 
@@ -3792,7 +3822,7 @@ int32_t CGxDeviceD3d11::IBlitBackBuffer(CGxTex* dest, uint32_t level, uint32_t f
 
 // D3D9 StretchRect: one triangle into `dest` (level, face), sampling `source` over sourceRect (null = all of it).
 // Draws with its own state, then marks everything IStateSync caches as stale.
-int32_t CGxDeviceD3d11::IBlit(ID3D11ShaderResourceView* source, uint32_t sourceWidth, uint32_t sourceHeight, const CiRect* sourceRect, CGxTex* dest, uint32_t level, uint32_t face, const CiRect* destRect, bool linear) {
+int32_t CGxDeviceD3d11::IBlit(ID3D11ShaderResourceView* source, uint32_t sourceWidth, uint32_t sourceHeight, const CiRect* sourceRect, CGxTex* dest, uint32_t level, uint32_t face, const CiRect* destRect, bool linear, ID3D11PixelShader* ps) {
     TexApi* api = static_cast<TexApi*>(dest->m_apiSpecificData);
 
     if (!api || !source || !sourceWidth || !sourceHeight) {
@@ -3899,7 +3929,7 @@ int32_t CGxDeviceD3d11::IBlit(ID3D11ShaderResourceView* source, uint32_t sourceW
     this->m_d3dContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     this->m_d3dContext->VSSetShader(this->m_blitVs, nullptr, 0);
     this->m_d3dContext->VSSetConstantBuffers(2, 1, &this->m_blitConstantBuffer);
-    this->m_d3dContext->PSSetShader(this->m_blitPs, nullptr, 0);
+    this->m_d3dContext->PSSetShader(ps ? ps : this->m_blitPs, nullptr, 0);
     this->m_d3dContext->PSSetShaderResources(0, 1, &source);
     this->m_d3dContext->PSSetSamplers(0, 1, &sampler);
     this->m_d3dContext->Draw(3, 0);

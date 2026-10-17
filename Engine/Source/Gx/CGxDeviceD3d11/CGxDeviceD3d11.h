@@ -70,7 +70,7 @@ class CGxDeviceD3d11 : public CGxDevice {
     ID3D11DepthStencilView* m_rtDepthDsv[kRtDepthSlots];
     uint32_t m_rtDepthNext;     // slot replaced on the next miss (round robin)
     ID3D11Texture2D* m_resolveTexture;
-    CGxTex* m_sceneDepthCopy; // VFOG: DeviceCopySceneDepth's GxTex_D24X8 snapshot of m_depthTexture
+    CGxTex* m_sceneDepthCopy; // VFOG: DeviceCopySceneDepth's GxTex_D24X8 (or R32F) snapshot of m_depthTexture
     ID3D11Buffer* m_constantBuffers[2]; // [0] VS b0, [1] PS b0: app register files (s_shadowConstants)
     // What m_constantBuffers hold. Only the dirty range of s_shadowConstants is copied in, as D3D9 uploads only
     // [dirtyMin, dirtyMax]: registers outside it keep their last value instead of the FLT_MAX the frame clear writes.
@@ -83,6 +83,7 @@ class CGxDeviceD3d11 : public CGxDevice {
     // IBlit (TexStretch/TexCopy/DeviceCopyTex when a plain copy cannot do it): shaders and VS b2 made on first use.
     ID3D11VertexShader* m_blitVs;
     ID3D11PixelShader* m_blitPs;
+    ID3D11PixelShader* m_blitDepthPs[2]; // VFOG DeviceCopySceneDepth: [0] Texture2D, [1] Texture2DMS sample 0
     ID3D11Buffer* m_blitConstantBuffer;
     ID3D11ShaderResourceView* m_backBufferSrv; // of IResolvedBackBuffer()
     uint32_t m_fanIndexBufferSize;
@@ -228,7 +229,7 @@ class CGxDeviceD3d11 : public CGxDevice {
     void ITexUpload(CGxTex* texId);
     TexShadow* ITexShadow(CGxTex* texId, const TexApi* api, bool make);
     ID3D11Texture2D* IResolvedBackBuffer();
-    int32_t IBlit(ID3D11ShaderResourceView* source, uint32_t sourceWidth, uint32_t sourceHeight, const CiRect* sourceRect, CGxTex* dest, uint32_t level, uint32_t face, const CiRect* destRect, bool linear);
+    int32_t IBlit(ID3D11ShaderResourceView* source, uint32_t sourceWidth, uint32_t sourceHeight, const CiRect* sourceRect, CGxTex* dest, uint32_t level, uint32_t face, const CiRect* destRect, bool linear, ID3D11PixelShader* ps = nullptr);
     int32_t IBlitBackBuffer(CGxTex* dest, uint32_t level, uint32_t face, const CiRect* sourceRect, const CiRect* destRect, bool linear);
     void IXformSetViewport();
 };

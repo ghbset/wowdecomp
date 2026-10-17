@@ -248,6 +248,7 @@ class CGxDeviceD3d : public CGxDevice {
     // never in m_textures, so texture recreation leaves it alone.
     LPDIRECT3DTEXTURE9 m_sceneDepthTexture;
     LPDIRECT3DSURFACE9 m_sceneDepthUnbound = nullptr;  // the depth-stencil DeviceSceneDepthBound(false) took off
+    bool m_sceneDepthResz = false;  // MSAA: INTZ is not bound; DeviceCopySceneDepth fills it from the MSAA depth by RESZ
     CGxTex* m_sceneDepthTex;
 
     virtual void ITexMarkAsUpdated(CGxTex* texId);
@@ -376,6 +377,7 @@ class CGxDeviceD3d : public CGxDevice {
     void IStateSetD3DDefaults();
     void ICreateSceneDepth();
     void IReleaseSceneDepth();
+    bool IResolveSceneDepthResz();
     void IStateSync();
     void IStateSyncClipPlanes();
     void IStateSyncEnables();

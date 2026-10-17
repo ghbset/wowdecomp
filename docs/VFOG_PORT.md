@@ -78,8 +78,9 @@ The decisions:
   writes, i.e. after the conversion back to display space in LinearOverSceneCopy. coa's own dither was removed earlier
   as an fps regression that was **never isolated** (wxl-vfog/wxl-light composites, 2026-10-10), so it is a CVar:
   `vfogDither 0` skips it on a uniform branch (c79.x = 0), the old path.
-- **Not ported in v1:** the MSAA
-  split/silhouette, the GPU density probe, the overlay, ForeverGlow, and wxl's fading-doodad early draw and TopUp.
+- **MSAA** (vfog9): see section 3, scene depth per backend. Not ported: coa's sample split (silhouette mask and
+  per-side composite).
+- **Not ported in v1:** the GPU density probe, the overlay, ForeverGlow, and wxl's fading-doodad early draw and TopUp.
   The fading-doodad draw is a v2 item if fading props pop; see wxl-vfog hooks.cpp DrawFadingModelsBeforeFog
   and /root/RE/render-path/doodad-fade-*.md.
 
@@ -199,7 +200,8 @@ shade_low/mid/high (SSR_STEPS 0/16/32); variant = quality - 1, or 1 (sky only) w
 The Vulkan translator gained `texldd` (tex2Dgrad -> textureGrad).
 
 **Deviations from coa**: CPU waves (above); scene copies clamp instead of mirror addressing (the Gx API has no
-mirror); no packed-RGBA8 depth fallback (needs R32F targets); no MSAA (DeviceCopySceneDepth is no-MSAA, as the fog);
+mirror); no packed-RGBA8 depth fallback (needs R32F targets); MSAA water is shaded per pixel from one depth sample, not
+tagged and shaded per sample (no stencil, section 3);
 classes are shaded one after another inside the liquid pass instead of all after it (same pixels, same inputs:
 every class reads the same pre-water copy, as coa); water is drawn after the other transparent liquids; the
 scene copy is taken before the first water draw rather than before the whole liquid pass (it includes slime);
@@ -232,7 +234,7 @@ vw_ripple_step.hlsl; code `VolumetricFogWaterRipples.cpp`). Same model, constant
   it there); the clock is FrameTime (coa QPC); no ripple stats/summary log. The output is a float target, so vfogDither
   does not apply.
 
-**Left**: MSAA.
+**Left**: per-sample MSAA edges (section 3).
 
 ## 2c. Colour grading (coa grading_renderer.cpp, forever_look.cpp PrepareGrading, shaders/vp_grade.hlsl)
 
@@ -277,12 +279,30 @@ The 32x1 RGBA32F point-light texture and the 1x25 probe are dropped. Lights go i
   `vkCmdCopyImage` of the DEPTH aspect into a sampled depth image of the same format with a depth-only
   view, transition back, then expose it as a CGxTex that `ITexResolve` can bind. Never sample the live depth,
   because `DepthFor()` shares one depth image per size.
-- **D3D11 (WP5)**: `CopyResource(m_depthTexture -> a GxTex_D24X8 CGxTex)`. That texture already gets an
-  R24_UNORM_X8 SRV (CGxDeviceD3d11.cpp:3081, :3223-3242), with point sampling. No-MSAA only; return nullptr
-  under MSAA.
-- **D3D9 (WP5)**: an INTZ texture at back-buffer size bound as the world depth-stencil, as coa d3d9_wrap.cpp:959
-  and :1002-1022 do. Check INTZ with CheckDeviceFormat. No-MSAA only; return nullptr otherwise. ShadowCache's
-  own D24X8 targets must keep working. This covers both `CGxDeviceD3d` and `CGxDeviceD3d9Ex`.
+  Vulkan has no MSAA (every pipeline and attachment is VK_SAMPLE_COUNT_1, `gxMultisample` is ignored), and the
+  copy is in the frame's own depth format, so MSAA settings and D16/D32 need nothing there.
+- **D3D11 (WP5, vfog9)**: single-sampled D24: `CopyResource(m_depthTexture -> a GxTex_D24X8 CGxTex)`, which gets an
+  R24_UNORM_X8 SRV, point sampled. MSAA or D16/D32 (CopyResource cannot change the sample count or format):
+  `IBlit` draws `m_depthSrv` into a `GxTex_R32F` render target with a Load shader (`blit_depth_ps`, or
+  `blit_depth_ms_ps`, ps_4_1, `Texture2DMS` sample 0; /root/d3d11-port/ffshaders blit.hlsl, FfShaders.h). MSAA needs
+  feature level 10_1 for the multisampled SRV; below it, nullptr.
+- **D3D9 (WP5, vfog9)**: an INTZ texture at back-buffer size bound as the world depth-stencil, as coa d3d9_wrap.cpp:959
+  and :1002-1022 do. Check INTZ with CheckDeviceFormat. ShadowCache's own D24X8 targets must keep working. This covers
+  both `CGxDeviceD3d` and `CGxDeviceD3d9Ex`. MSAA (coa msaa_depth.cpp): the multisampled auto depth stays bound, INTZ
+  is only a copy target, and `DeviceCopySceneDepth` fills it by the driver's RESZ resolve (`IResolveSceneDepthResz`,
+  coa ResolveThroughResz: INTZ on stage 0, a dummy point, `D3DRS_POINTSIZE = 0x7FA05000`, every touched state read
+  back and restored). RESZ is checked at device create and each Reset (`CheckDeviceFormat(RENDERTARGET, SURFACE, 'RESZ')`): AMD,
+  Intel, DXVK. No RESZ: nullptr, stock fog.
+
+**MSAA, what is the same as coa and what is not.** As coa, the passes read one depth sample per pixel; the scene copies
+are resolves (D3D9 StretchRect, D3D11 IResolvedBackBuffer); the composite and the water draw over the multisampled
+back buffer. Deviations: (1) no sample split: coa marks the near and far samples of non-planar 3x3 depth neighbourhoods
+in the stencil with an oDepth pass and fogs each side at its own depth; Gx has no stencil states and the Vulkan
+translator no oDepth, so an edge pixel takes the fog of sample 0 (a thin halo of the wrong fog against the sky in thick
+fog). The same holds for the water, which coa tags and shades per sample. (2) No NVAPI (`NvAPI_D3D9_StretchRectEx`, coa's
+path on native Windows NVIDIA D3D9, where there is no RESZ): there D3D9 MSAA keeps the stock fog; D3D11 works. (3) No
+depth-copy self-test and no `Multisampling` setting: coa refuses MSAA unless its copy passes a test; here MSAA is never
+touched, and a failed or missing copy only leaves vfog off. No new CVars.
 
 ## 4. Depth decode (shader, vf_common)
 

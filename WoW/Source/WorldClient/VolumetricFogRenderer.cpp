@@ -1,7 +1,7 @@
 // VFOG WP6: GPU passes, a port of coa-vfog src/renderer.cpp (RenderPasses :1265-1525) onto the Gx API.
 // docs/VFOG_PORT.md sections 2-5 are the spec: pass list, targets, register and sampler contract.
 // God rays: coa DrawGodRayMask / DrawGodRaysOverScene (renderer.cpp:1189-1260), always drawn after the world.
-// Not ported (doc section 1): the MSAA split, the depth probe, logging.
+// Not ported (doc section 1): the MSAA sample split (one depth sample per pixel, doc section 3), the depth probe, logging.
 #include "WoW/Source/WorldClient/VolumetricFogModel.h"
 #include "WoW/Source/WorldClient/VolumetricFogWater.h"
 #include <algorithm>
