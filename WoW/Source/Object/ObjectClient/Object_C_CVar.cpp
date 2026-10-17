@@ -5,3 +5,4 @@
 CVar* CGObject_C::s_cvObjectSelectionCircle;
 CVar* CGObject_C::s_cvSelectionCircleStyle;
 CVar* CGObject_C::s_cvSelectionCircleReach;
+CVar* CGObject_C::s_cvSelectionCircleWater;

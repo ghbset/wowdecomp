@@ -23164,6 +23164,26 @@ static float SelectionCircleRadius(const CGUnit_C* unit) {
     return reach > 5.0f ? reach : 5.0f;
 }
 
+// SELCIRCLE: selectionCircleWater 1 puts the circle on the liquid surface when the unit is in liquid
+// (retail). Stock projects only onto ground within +-radius, so swimmers over deep water get none.
+// Mirrors stock's spell cursor, which projects onto liquid tris (0x20000) after the liquid pass.
+static uint32_t SelectionCircleTriFlags(const CGUnit_C* unit, C3Vector& position) {
+    if (!CGObject_C::s_cvSelectionCircleWater || !CGObject_C::s_cvSelectionCircleWater->m_intValue) {
+        return 0x200122;
+    }
+
+    C3Vector query = position;
+    int32_t liquidType;
+    float level;
+
+    if (!World::QueryLiquidStatus(&query, &liquidType, &level) || level < position.z || level > position.z + unit->GetStandHeight()) {
+        return 0x200122;
+    }
+
+    position.z = level;
+    return 0x20000;
+}
+
 // OFFSET: 0x00725980
 void CGUnit_C::RenderTargetSelection() const {
     if (!CGGameUI::m_visible) {
@@ -23171,6 +23191,7 @@ void CGUnit_C::RenderTargetSelection() const {
     }
 
     C3Vector position = const_cast<CGUnit_C*>(this)->GetModelPosition();
+    const uint32_t triFlags = SelectionCircleTriFlags(this, position);
     float radius = SelectionCircleRadius(this);
     CAaBox box;
     box.b.x = position.x - radius;
@@ -23191,7 +23212,7 @@ void CGUnit_C::RenderTargetSelection() const {
     int32_t states = CGObject_C::SetCircleRenderStates();
 
     if (states) {
-        ProjectTex::Render2d(box, color, &matrix, 0.5f, 0x200122, 1, 0.4f);
+        ProjectTex::Render2d(box, color, &matrix, 0.5f, triFlags, 1, 0.4f);
     }
 
     if (this->m_clientFlags & 0x10) {
@@ -23216,7 +23237,7 @@ void CGUnit_C::RenderTargetSelection() const {
             box.Expand(amount);
 
             if (states) {
-                ProjectTex::Render2d(box, color, &matrix, 0.5f, 0x200122, 1, 0.4f);
+                ProjectTex::Render2d(box, color, &matrix, 0.5f, triFlags, 1, 0.4f);
             }
         }
     }
@@ -23242,6 +23263,7 @@ void CGUnit_C::RenderPetTargetSelection() const {
     }
 
     C3Vector position = const_cast<CGUnit_C*>(this)->GetModelPosition();
+    const uint32_t triFlags = SelectionCircleTriFlags(this, position);
     float radius = SelectionCircleRadius(this);
     float t = elapsed * 0.001f;
     CImVector color;
@@ -23268,7 +23290,7 @@ void CGUnit_C::RenderPetTargetSelection() const {
     g_theGxDevicePtr->RsPush();
 
     if (CGObject_C::SetCircleRenderStates()) {
-        ProjectTex::Render2d(box, color, &matrix, 0.5f, 0x200122, 1, 0.4f);
+        ProjectTex::Render2d(box, color, &matrix, 0.5f, triFlags, 1, 0.4f);
     }
 
     g_theGxDevicePtr->RsPop();

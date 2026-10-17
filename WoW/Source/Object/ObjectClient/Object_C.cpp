@@ -1390,6 +1390,7 @@ void CGObject_C::Initialize() {
     // SELCIRCLE
     CGObject_C::s_cvSelectionCircleStyle = CVar::Register("selectionCircleStyle", "Target circle: 0 stock, 1 arrow, 2 arrow without fill, 3 ring, 4 ring without fill", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     CGObject_C::s_cvSelectionCircleReach = CVar::Register("selectionCircleReach", "Target circle size: 0 model size, 1 melee reach", 1, "0", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    CGObject_C::s_cvSelectionCircleWater = CVar::Register("selectionCircleWater", "Target circle on units in water: 0 stock (ground only), 1 on the water surface", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
 
     for (uint32_t i = 1; i < 5; i++) {
         if (CGObject_C::s_selectionStyleTextures[i]) {
