@@ -4956,6 +4956,9 @@ void CWorldScene::RenderHorizon() {
         }
     }
 
+    // Not in 12340 (farTrees): tree and bush cards past farZ - 50, after the WDL and before the sky.
+    FarField::RenderFoliage(true);
+
     uint32_t count = 0;
     CMapObjGroup** groups = static_cast<CMapObjGroup**>(alloca(256 * sizeof(CMapObjGroup*)));
     C44Matrix** matrices = static_cast<C44Matrix**>(alloca(256 * sizeof(C44Matrix*)));

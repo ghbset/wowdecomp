@@ -59,6 +59,20 @@ namespace FarField {
     bool RenderTerrain();
     // Drops the map's far-terrain buffers, bake and atlas (map load / unload).
     void Reset();
+    // A 4 x 4 block of rgb (0..255) as DXT1, always 4-colour mode, so it also serves as a DXT5 colour block.
+    void EncodeDxt1Block(const float (*px)[3], uint8_t* out);
+
+    // Not in 12340 (farTrees, farGrass): far trees and bushes (FarFoliage.cpp). docs/FARFIELD_FOG.md.
+    // The tile's tree and bush placements (MDDF), from the ADT the ground bake has just read.
+    void FoliageScanTile(uint32_t tile, const uint8_t* adt, uint32_t size);
+    // The cards: horizon false in the main scene (before RenderHorizon, normal projection, up to farclip),
+    // true inside RenderHorizon after the WDL (horizon projection and depth band, past farZ - 50).
+    void RenderFoliage(bool horizon);
+    void FoliageReset();
+    // farGrass: cut ground-effect grass by its size on screen; the distance where a tuft `height` yd tall
+    // falls under farGrassMinPixels with the projection and viewport bound now.
+    bool GrassSizeCull();
+    float GrassCutDistance(float height);
 }
 
 class CMapLowDetail {

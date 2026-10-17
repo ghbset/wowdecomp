@@ -210,7 +210,7 @@ addresses; see `/root/d3d11-port/notes/vulkan-plugin-parity.md`). When they come
 in-tree WorldPass, a fog/lighting composite must run after RenderHorizon and treat the
 horizon depth band as far geometry.
 
-## Adding a far pass (tree/grass billboards, WMOs on the WDL)
+## Adding a far pass (WMOs on the WDL; see Far foliage for one that is done)
 
 1. Draw inside `CWorldScene::RenderHorizon`, between the WDL pass and the WMO silhouettes, so it
    uses the horizon projection and depth band. Use one `RsPush`/`RsPop` for the whole pass and static
@@ -226,6 +226,83 @@ horizon depth band as far geometry.
    fully fogged and the pass would be invisible.
 5. Do not compute fog from `GxRs_FogStart/End`. That is the fixed-function fallback only (linear, no
    rate).
+
+## Far foliage (farTrees, farGrass)
+
+Not stock. CVars: `farTrees` (1), `farGrass` (1), `farGrassMinPixels` (4). `farTrees 0` draws nothing
+and bakes no pictures (placements are still collected, memory only); `farGrass 0` gives back 12340's grass
+exactly. The cards also need the far fog (`wdlTextured 1`, `horizonFog 1`), like every far pass.
+Line numbers are for the commit that adds the foliage (2026.10.17-farfoliage).
+
+A port of wxl-farfield's far foliage (`/root/wxl-farbush-wt/wxl-farfield/src/FarFoliage.cpp`) and of the
+half wxl-wraithhost bakes for it (`wraithhost-lite/src/host/terrain/FarLod.cpp` placements,
+`Impostor.cpp` pictures), all in `WoW/Source/WorldClient/FarFoliage.cpp`. wraithhost does not load in
+Wow32/Wow64, so both bakes run in the client, on the far ground's ADT reads.
+
+| Step | Where |
+|---|---|
+| The ground bake hands each ADT it has read to the foliage scan | `MapLowDetail.cpp:1210` (PumpBake) |
+| Scan: MMDX/MMID/MDDF; a model is a tree or a bush by wraithhost's name rules (`IsBushName`, the TREE/PALM/KALIDARBUSH list less STREET/LEAVES/STUMP/LOG/ROOT), header box read once; a placement counts if >= 6 yd (tree) or >= 1.5 yd (bush) tall as placed; one card per uniqueId; its stock size class from the yaw-turned box's largest side (`MapDoodadDef.cpp:85`); filed into its 8 x 8-tile block | `FarFoliage.cpp:1175` (FoliageScanTile) |
+| Pictures: the model's skin-00 mesh and textures rasterised on the CPU, orthographic, from 4 sides every 90 deg, bottom-aligned in a square of side max(height, 2 x reach), blend 0-2 batches at the game's own keys (224/255 blend 1, half blend 2), times the batch colour; 128 px down to 64, empty pixels filled from drawn neighbours, levels box-filtered with the coverage kept. A bush with no cut-out texture (coverage >= 0.95: a solid prop) is dropped | `FarFoliage.cpp:545` (RenderPicture) |
+| Atlas: one 4096 x 2048 DXT5, 64 px a view, 4 views a model in a row (512 models; past that a model goes without, as wraithhost's kImpMax). Levels 0-4 per view; 5-9 box-filtered from a kept copy of level 4. Alpha: 0 cut out, else 136..255 per-texel noise (`NoiseAlpha`, `:453`), so the distance fade dissolves a card. One model baked a frame (main pass), its rectangle uploaded | `:984` (PumpPictures), `:952` (StoreSmallLevels) |
+| Cards: per block, one quad per placement facing the camera, showing the view nearest the camera (view k = the model's +x turned k x 90 deg, yaw = MDDF rot.y + 180), side = frame x scale, bottom at z + picture bottom x scale; normal up leaning toward the camera; sorted by size class, chunks of 16384 cards (one shared 16-bit index buffer). Rebuilt when the camera has moved more than a quarter of the block's distance (min 150 yd), when a missing picture is baked, or when the device drops the buffer; at most 2 rebuilds a frame, nearest first | `:1080` (BuildBlock), `:1348` (RenderFoliage) |
+| Draw: main pass before RenderHorizon (normal projection, blocks nearer than farZ) and again inside RenderHorizon after the WDL (horizon projection and depth band, blocks reaching past farZ - 50); blocks front to back, one draw per chunk and size class, 4 constants a block | `CWorldSceneRender.cpp:206`, `World.cpp:4960` |
+
+**Shader and fog.** The cards use the stock **DetailDoodad** shaders (the ground-effect grass's,
+`CDetailDoodad::s_vertexShader[0]` / `s_pixelShader[0]`): world-space PNCT, sun light per vertex, and the
+same fog formula on the same `DNInfo::m_fog` as the terrain (vertex **c8** here, c12 for the terrain; fog
+colour pixel c2 or `GxRs_FogColor`), so a card fades into fog exactly like the far ground behind it. The
+constants are the grass's own for the frame (`CDetailDoodad::InitializeShaderConstants`,
+`FarFoliage.cpp:1462`, the grass's copy restored after), with c0-c3 = translate(block centre - camera) x
+view per block and c9 = the class fade. Nothing new in custom.MPQ: the shaders exist on D3D9, D3D11 (SM4
+pack) and Vulkan (translated) already.
+
+**Alpha test on every backend.** Blend `GxBlend_AlphaKey`, `GxRs_AlphaRef` 128, depth write on, culling
+off (`:1449`). D3D9 tests natively; D3D11 (`CGxDeviceD3d11.cpp:2292`) and Vulkan (`misc.x`,
+`CGxDeviceVulkanShader.cpp:14`) apply the same reference in the shader, as for the grass. Never blended:
+a fading card must write depth (memory feedback_sky_before_blended_far_passes), and the sky after it only
+fills far-depth pixels.
+
+**Hand-over (no pop).** The shader multiplies the texture's alpha by `saturate(viewZ * c9.x + c9.y)`.
+Per size class the card is whole at the place its model starts to fade, `CWorldScene::s_fadeDistMin[c]`
+(scaled by environmentDetail), less 24 yd (the stock cull goes by chunk distance), or `farZ - 35` if
+nearer (no doodad is drawn past farclip), times the cosine of the half horizontal FOV (the shader fades by
+view depth, the game by distance, so the screen edge is covered too). It comes in over one band before
+that (max(20 yd, 10%)) (`:1426`). The card is whole before the model starts to go, never a complement
+cross-fade (the wxl lesson); the price is a stretch where both are drawn.
+
+**Draws.** About one draw per visible block and class present (trees: classes 2-4, bushes 1-2) in each
+pass: typically 10-30 a frame, plus one 4-register constant upload a block, no buffer writes except a
+rebuild. No frustum culling (the GPU clips; a block is 4266 yd across).
+
+### Grass (farGrass)
+
+Stock ground effects (`CDetailDoodadInst::DrawBatches`, `DetailDoodad.cpp:821`): per batch (one texture of
+a chunk's ground effect), the tallest tuft as placed (model box height x the add's scale) gives the
+distance where it is `farGrassMinPixels` tall on screen: `height x proj.b1 x viewportHeightPx / 2 / minPx`
+(`FarFoliage.cpp:1528`), so distance, FOV and resolution all count. If that is nearer than
+`groundEffectDist`, the batch is skipped when its chunk lies wholly past it (chunk distance - 23.6 yd), else
+drawn with the stock fade (alpha over the last 15%) moved in to it (vertex c9, restored after). Taller tufts
+are drawn exactly as stock. Shader path only. No far grass cards are added (wxl-farfield has them; the
+request was less grass where it cannot be seen, not more).
+
+### Where future light and colour settings hook in (foliage)
+
+- Card brightness / tint: the vertex colour in `BuildBlock` (white now; the shader multiplies it in), or
+  the picture colours in `RenderPicture` (a far colour match like wxl's `gMatch` belongs there).
+- Card light: the normal in `BuildBlock`, and the sun the grass gets (`CDetailDoodad::InitializeShaderConstants`,
+  `DetailDoodad.cpp:224`), which follows `CM2Lighting` and the map light.
+- Fog: nothing of its own; it follows `DayNight::UpdateFog` and the stretch like every far pass.
+- Hand-over distances: `RenderFoliage` (`:1426`); the stock fade tables are `CWorldScene::ScaleFadeDist`.
+
+### Known limits (foliage)
+
+- No normal map: a card is lit per vertex (one normal), flatter than wxl's per-pixel light. No glow
+  picture (additive layers) and no second texture of two-texture batches (Crystalsong).
+- Views switch (nearest of 4) on a rebuild rather than turning smoothly; the pop is at far distance.
+- Pictures are baked on the main thread, one model a frame (a few ms each) for the first seconds on a map.
+- Tilted placements (MDDF rot.x/z) are drawn upright.
+- Fixed-function fallback (no DetailDoodad shaders): no cards.
 
 ## Where future light settings hook in
 
@@ -252,6 +329,7 @@ horizon depth band as far geometry.
 - `WoW/Source/WorldClient/World.cpp:4949`: RenderHorizon calls the pass.
 - `WoW/Source/WorldClient/DayNight.cpp:2123-2140`: the stretch.
 - `WoW/Source/WorldClient/World.cpp:1561`: farFog clamp.
+- `WoW/Source/WorldClient/FarFoliage.cpp`: far trees and bushes, the grass size rule (farTrees, farGrass).
 
 ## Known limits
 

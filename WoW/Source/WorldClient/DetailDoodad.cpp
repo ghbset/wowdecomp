@@ -27,6 +27,7 @@
 #include "WoW/Source/WorldClient/Map.h"
 #include "WoW/Source/WorldClient/MapChunk.h"
 #include "WoW/Source/WorldClient/MapLight.h"
+#include "WoW/Source/WorldClient/MapLowDetail.h"
 #include "WoW/Source/WorldClient/MapObjGroup.h"
 #include "WoW/Source/WorldClient/Types.h"
 #include "WoW/Source/WorldClient/World.h"
@@ -811,9 +812,52 @@ void CDetailDoodadInst::Free() {
 // OFFSET: 0x007B36B0
 void CDetailDoodadInst::DrawBatches() {
     for (uint32_t i = 0; i < 4; i++) {
-        if (this->m_batches[i].m_texture) {
-            this->m_batches[i].Draw();
+        CDetailDoodadInstBatch& batch = this->m_batches[i];
+
+        if (!batch.m_texture) {
+            continue;
         }
+
+        // Not in 12340 (farGrass): a batch whose tallest tuft would be under farGrassMinPixels on screen is cut
+        // where it gets that small, with the stock fade (alpha over the last 15%) moved in to there: skipped
+        // when its chunk lies wholly past it, else drawn with that fade (vertex c9). Taller tufts, or a cut past
+        // groundEffectDist, are drawn exactly as stock. Shader path only; docs/FARFIELD_FOG.md.
+        if (CDetailDoodad::s_bUseShaders && FarField::GrassSizeCull() && batch.m_adds.Count()) {
+            float height = 0.0f;
+
+            for (uint32_t k = 0; k < batch.m_adds.Count(); k++) {
+                const CDetailDoodadInstAdd& add = batch.m_adds[k];
+                CM2Model* model = CDetailDoodad::s_doodadList[add.m_doodadId]->m_model;
+
+                if (model && (model->m_fFlags & 1)) {
+                    const CAaBox& box = model->m_shared->m_data->m_bounds.m_extent;
+                    height = fmaxf(height, (box.t.z - box.b.z) * add.m_scale);
+                }
+            }
+
+            const float cut = FarField::GrassCutDistance(fmaxf(height, 0.05f));
+
+            if (height > 0.0f && cut < CWorld::detailDoodadDist) {
+                // 23.6 yd: half a chunk's diagonal.
+                if (this->m_chunk && this->m_chunk->m_distToCamera - 23.6f > cut) {
+                    continue;
+                }
+
+                const float fade = 1.0f / (cut * 0.15f);
+                C4Vector cutFade;
+                cutFade.x = -fade;
+                cutFade.y = cut * fade;
+                cutFade.z = 0.0f;
+                cutFade.w = 0.0f;
+                const uint32_t reg = offsetof(CDetailDoodad::SShaderConstants, m_fade) / sizeof(C4Vector);
+                g_theGxDevicePtr->ShaderConstantsSet(GxSh_Vertex, reg, &cutFade.x, 1);
+                batch.Draw();
+                g_theGxDevicePtr->ShaderConstantsSet(GxSh_Vertex, reg, &CDetailDoodad::s_shaderConstants.m_fade.x, 1);
+                continue;
+            }
+        }
+
+        batch.Draw();
     }
 }
 

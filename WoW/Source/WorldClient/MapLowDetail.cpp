@@ -1205,6 +1205,11 @@ void PumpBake() {
         s_far.ready.erase(s_far.ready.begin());
         static float s_img[64 * 64 * 3];
 
+        // Not in 12340 (farTrees): the same ADT's tree and bush placements (once a tile: its bake read).
+        if (read->bake) {
+            FarField::FoliageScanTile(read->tile, read->buf, read->size);
+        }
+
         if (!read->bake) {
         } else if (BakeTile(read->buf, read->size, s_img)) {
             StoreTile(read->tile, s_img);
@@ -1358,6 +1363,10 @@ void AtlasTexConstants(CMapRenderChunk::SVertexShaderConstants& consts) {
 
 }  // namespace
 
+void FarField::EncodeDxt1Block(const float (*px)[3], uint8_t* out) {
+    EncodeDxt1(px, out);
+}
+
 void FarField::Reset() {
     if (!g_theGxDevicePtr) {
         return;
@@ -1402,6 +1411,7 @@ void FarField::Reset() {
     delete[] s_far.chain;
     s_far.chain = nullptr;
     memset(s_far.tile, 0, sizeof(s_far.tile));
+    FarField::FoliageReset();
 }
 
 bool FarField::RenderTerrain() {

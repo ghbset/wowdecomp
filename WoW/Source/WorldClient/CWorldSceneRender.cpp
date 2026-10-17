@@ -1,4 +1,5 @@
 #include <cfloat>
+#include "WoW/Source/WorldClient/MapLowDetail.h"
 #include "CWorldSceneRender.h"
 #include "WoW/Source/WorldClient/Map.h"
 #include "WoW/Source/WorldClient/World.h"
@@ -201,6 +202,8 @@ void CWorldScene::Render(const C3Vector& cameraPos, float time) {
     CWorldScene::RenderMapObjDefGroups();
     // OCCLUSION: depth now holds terrain and WMO groups; test this frame's candidates against it.
     OcclusionCull::IssueQueries();
+    // Not in 12340 (farTrees): tree and bush cards up to farclip, alpha-tested with depth write, before the sky.
+    FarField::RenderFoliage(false);
     CWorldScene::RenderHorizon();
 
     if (CWorldScene::s_unk_ADF570.m_maxViewDepth >= 0.0f) {
