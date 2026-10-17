@@ -1,4 +1,5 @@
 #include "MapLowDetail.h"
+#include "FarTerrainLod.h"
 #include <cmath>
 #include <cctype>
 #include <cstring>
@@ -455,6 +456,8 @@ struct FarRead {
     uint32_t size;
     uint32_t tile;
     uint32_t gen;
+    bool bake;     // for the ground bake
+    bool heights;  // for the detailed levels (FarTerrainLod.cpp)
 };
 
 struct FarBlock {
@@ -1133,7 +1136,7 @@ void PumpBake() {
         float bestD = reach * reach;
 
         for (uint32_t i = 0; i < 4096; i++) {
-            if (s_far.tile[i] != Tile_None || !CMap::s_lowDetail.m_areas[i]) {
+            if ((s_far.tile[i] != Tile_None && !FarLod::WantsAdt(i)) || !CMap::s_lowDetail.m_areas[i]) {
                 continue;
             }
 
@@ -1155,12 +1158,28 @@ void PumpBake() {
         SStrPrintf(name, sizeof(name), "%s\\%s_%d_%d.adt", CMap::mapPath, CMap::mapName, best % 64, best / 64);
         SFileImpl* file = nullptr;
 
+        const bool bake = s_far.tile[best] == Tile_None;
+        const bool heights = FarLod::WantsAdt(best);
+
+        if (heights) {
+            FarLod::MarkReading(best);
+        }
+
         if (!SFileOpenFile(name, &file) || !file) {
-            s_far.tile[best] = Tile_Failed;
+            if (bake) {
+                s_far.tile[best] = Tile_Failed;
+            }
+
+            if (heights) {
+                FarLod::AdtRead(best, nullptr, 0);
+            }
+
             continue;
         }
 
         FarRead* read = new FarRead;
+        read->bake = bake;
+        read->heights = heights;
         read->size = SFileGetFileSize(file, nullptr);
         read->buf = new uint8_t[read->size ? read->size : 1];
         read->tile = static_cast<uint32_t>(best);
@@ -1171,7 +1190,10 @@ void PumpBake() {
         read->obj->m_size = read->size;
         read->obj->m_userArg = read;
         read->obj->m_userPostloadCallback = reinterpret_cast<void*>(&ReadDone);
-        s_far.tile[best] = Tile_Reading;
+        if (bake) {
+            s_far.tile[best] = Tile_Reading;
+        }
+
         s_far.inFlight++;
         AsyncFileReadObject(read->obj, 0);
     }
@@ -1183,10 +1205,15 @@ void PumpBake() {
         s_far.ready.erase(s_far.ready.begin());
         static float s_img[64 * 64 * 3];
 
-        if (BakeTile(read->buf, read->size, s_img)) {
+        if (!read->bake) {
+        } else if (BakeTile(read->buf, read->size, s_img)) {
             StoreTile(read->tile, s_img);
         } else {
             s_far.tile[read->tile] = Tile_Failed;
+        }
+
+        if (read->heights) {
+            FarLod::AdtRead(read->tile, read->buf, read->size);
         }
 
         delete[] read->buf;
@@ -1337,6 +1364,7 @@ void FarField::Reset() {
     }
 
     s_far.gen++;  // reads still in flight free themselves (ReadDone)
+    FarLod::Reset();
     s_far.inFlight = 0;
 
     for (FarRead* read : s_far.ready) {
@@ -1397,6 +1425,7 @@ bool FarField::RenderTerrain() {
     uint64_t textured[64] = {};
     uint64_t fogged[64] = {};
     CMapAreaLow* next;
+    FarLod::BeginFrame();
 
     for (CMapAreaLow* area = CWorldScene::sortTable.m_horizonChunkList.Head(); area; area = next) {
         next = CWorldScene::sortTable.m_horizonChunkList.Next(area);
@@ -1414,7 +1443,11 @@ bool FarField::RenderTerrain() {
         const uint32_t row = area->m_index.y;
         const uint32_t b = (row / 8) * 8 + col / 8;
         const uint64_t bit = 1ull << ((row % 8) * 8 + col % 8);
-        (s_far.tile[row * 64 + col] == Tile_Baked && s_far.atlas ? textured : fogged)[b] |= bit;
+        const bool baked = s_far.tile[row * 64 + col] == Tile_Baked && s_far.atlas;
+
+        if (!FarLod::Claim(row * 64 + col, baked)) {  // a detailed level draws it instead (FarTerrainLod.cpp)
+            (baked ? textured : fogged)[b] |= bit;
+        }
     }
 
     // Blocks front to back.
@@ -1438,10 +1471,6 @@ bool FarField::RenderTerrain() {
 
         order[i] = b;
         dist[i] = cx * cx + cy * cy;
-    }
-
-    if (!count) {
-        return true;
     }
 
     g_theGxDevicePtr->RsPush();
@@ -1490,9 +1519,12 @@ bool FarField::RenderTerrain() {
             GxRsSet(GxRs_Culling, 1);
             DrawRuns(b, masks[b], 1);
         }
+
+        FarLod::Draw(set);
     }
 
     g_theGxDevicePtr->RsPop();
+    FarLod::EndFrame();
     g_theGxDevicePtr->m_xforms[GxXform_Tex0].Identity();
     return true;
 }

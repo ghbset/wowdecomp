@@ -114,8 +114,65 @@ set once. Then:
 - Cost per frame: about 2 draws per visible block (one per run) plus a few for broken runs, 1 texture,
   1 constant upload (+1 register), no buffer writes. The per-tile path did 1-3 draws, an RsPush/Pop,
   a full constant upload, two texture binds and (past 24 tiles) a vertex rebuild per tile.
-- No LOD: the tile triangle count (1024) is not the cost, and a coarser index buffer past 2x farclip
-  would open T-junction cracks the sky shows through.
+- No coarser WDL LOD: the tile triangle count (1024) is not the cost, and a coarser index buffer past
+  2x farclip would open T-junction cracks the sky shows through. The finer levels near the view distance
+  are the next section's.
+
+## Detailed levels (farTerrainLod)
+
+CVars: `farTerrainLod` (1; 0 = WDL only, as before), `farTerrainLodPixels` (1.5, the largest height
+error allowed on screen, px), `farTerrainLodMemory` (64 MB for heights and level buffers),
+`farTerrainLodStats` (0; 1 prints tiles, levels, draws and MB to the console every 600 frames).
+Code: `WoW/Source/WorldClient/FarTerrainLod.{h,cpp}`, hooked into `MapLowDetail.cpp` at five places
+(grep `FarLod::`).
+
+The WDL grid is 33 yd, so a hill between its samples came out as a cone. Port of wxl-farfield's
+detailed level (`/root/wxl-farbush-wt/wxl-farfield/src/FarTerrain.cpp`, "detail: the baked level":
+65 x 65 heights a tile from wxl-wraithhost's `<map>.farlod`, 25 yd skirts, ADT holes left out, those
+tiles masked out of the WDL pass). wraithhost does not load in Wow32/Wow64, so the heights are read here
+from the same ADTs the ground bake reads, and there are three grid levels instead of one:
+
+| Level | Grid a tile | Spacing | Vertex buffer (with skirts) | Index buffer (shared unless holes) |
+|---|---|---|---|---|
+| 0 full | 129 x 129 (every ADT corner) | 4.17 yd | 412 KB | 203 KB |
+| 1 half | 65 x 65 (farfield's) | 8.3 yd | 108 KB | 52 KB |
+| 2 quarter | 33 x 33 | 16.7 yd | 29 KB | 14 KB |
+| 3 WDL | 17 x 17 + 16 x 16 | 33.3 yd | the batched pass above | |
+
+- **Heights** (`FarLod::AdtRead`, `FarTerrainLod.cpp:548`; `Extract` `:197`): MCVT outer vertices + MCNK
+  posZ, MCNR normals as the real terrain's vertices take them (x 1/127), MCNK holes. About 117 KB a tile
+  on the CPU, at most half of `farTerrainLodMemory`. `PumpBake` reads a tile's ADT once for the bake and
+  the heights together; a tile whose heights were dropped (it left the horizon, or the cap) is read again
+  for heights only (`FarLod::WantsAdt`, `:533`). Same queue, nearest first, one finished read a frame.
+- **Error** (`MeasureErrors`, `:261`): per tile and level, the largest height difference between that
+  level's surface and the real terrain at every MCVT vertex (outer and inner). Level 3 measures the WDL
+  mesh itself (12340's four-triangle fan), so a tile whose WDL is already right stays on the cheap batched
+  pass.
+- **Pick** (`FarLod::Claim`, `:616`, called per visible horizon tile from `RenderTerrain`): px per yard
+  = 0.5 x viewport height x projection y-scale / distance to the tile's nearest point (at least the
+  horizon near plane). The coarsest level with `err x px/yd <= farTerrainLodPixels` wins; level 3
+  means the tile stays in the WDL runs. Tiles the real terrain reaches into (nearest point within
+  farclip + 34 yd) always take level 0: those vertices and normals are the real terrain's own and its
+  chunk edges lie on level 0's quad edges, so there is no step where it stops (`:640`).
+- **Joins**: farfield's skirts. Every detailed tile's four edges hang down `max(25, 2 x WDL error)`
+  yd (`:456`), over the cracks to a neighbour at another level or on the WDL; their normals and atlas
+  colour are the edge's, so a crack shows ground, not sky. No stitched indices, so no shared-edge
+  bookkeeping between tiles.
+- **Holes**: levels 0 and 1 drop exactly the ADT's hole quads (a bit per 2 x 2 corners, as
+  `CMapChunk::CreateIndices`); level 2 drops a quad only when all four bits under it are holes
+  (`AllHoles`).
+- **Buffers and cache** (`Build`, `:416`): static PN vertex buffer per tile and level, built once and
+  refilled only when the device drops it; index buffers per level shared by every tile without holes.
+  Missing levels queue nearest first and at most 2 build a frame (`FarLod::EndFrame`, `:700`); until
+  then the nearest built level draws, else the WDL. Over the cap, levels idle 120 frames go, least
+  recently drawn first. Heights for tiles 2.5 tiles past the horizon's reach go every 60 frames.
+- **Draw** (`FarLod::Draw`, `:674`): inside the WDL pass's `RsPush`, after each set's WDL runs, with
+  the same shaders, constants, atlas and fog (set 1 fog-coloured for tiles not baked yet). One draw a
+  detailed tile, culling off, front to back.
+- **Cost**: the WDL pass did about 2 draws per visible 8 x 8 block. Each detailed tile adds one draw
+  (and can split a WDL run, about +1). With farclip 1000 and horizonFarclipScale 4, expect roughly 10-20
+  level-0 tiles round the view distance, a few dozen at levels 1-2 where hills need them, the rest on
+  the WDL: 30-60 extra draws, 15-30 MB. `farTerrainLodStats 1` prints the real numbers.
 
 ## The ground colour (no minimap)
 
@@ -176,6 +233,8 @@ horizon depth band as far geometry.
   (`DayNight.cpp:2120`), after the stretch. Every consumer reads `DNInfo::m_fog`.
 - **Sun, ambient or diffuse for terrain and every far pass:** `CMapRenderChunk::InitializeVertexShaderConstants`
   (`MapRenderChunk.cpp:1961`, sun at `:2003`). The far passes copy these values.
+- **Detailed levels** use the same constants and atlas as the WDL pass, so every light or fog change above
+  reaches them with no code of their own. Only their geometry (`FarTerrainLod.cpp`) is separate.
 - **Far-only adjustments** (e.g. a horizon tint, or a fog bias for far geometry):
   `FarField::TerrainConstants` / `FarField::BindFogColor` (`MapLowDetail.cpp:383`, `:405`). This is
   the one place every far pass reads from. A far colour correction belongs in `BakeTile` (baked) or
@@ -189,6 +248,7 @@ horizon depth band as far geometry.
   batched pass `:432-1500`; per-tile RenderLowDetail `:1502` (shader path, the FF textured path and
   the stock silhouette remain as fallbacks).
 - `WoW/Source/WorldClient/MapLowDetail.h:47`: `namespace FarField`.
+- `WoW/Source/WorldClient/FarTerrainLod.{h,cpp}`: the detailed levels (`namespace FarLod`).
 - `WoW/Source/WorldClient/World.cpp:4949`: RenderHorizon calls the pass.
 - `WoW/Source/WorldClient/DayNight.cpp:2123-2140`: the stretch.
 - `WoW/Source/WorldClient/World.cpp:1561`: farFog clamp.
@@ -200,8 +260,12 @@ horizon depth band as far geometry.
   (about 250 tiles at farclip 1000) fills in over a few seconds after login or a teleport, nearest first.
 - Water is a flat colour on the WDL's (bed) heights; nothing lifts lakes to their surface or draws a
   far sea.
-- WDL heights are 33 yd apart, so the shape is coarse compared with the ADT terrain in the 50 yd
-  overlap. Normals at a tile's edge are one-sided.
+- WDL heights are 33 yd apart; `farTerrainLod` replaces them wherever the error would show. Past
+  that, and for tiles not read yet, normals at a WDL tile's edge are still one-sided.
+- Detailed levels: a WDL tile next to a detailed one has no skirt, so where the WDL edge stands
+  higher and farther, the crack shows the WDL's underside (culling is off, so it is ground-coloured).
+  Level 2 keeps holes smaller than 2 x 2 bits closed. No geomorphing: a tile changing level pops by
+  under `farTerrainLodPixels`.
 - The horizon WMO silhouettes are still fog-coloured (stock). With the stretched fog they read as
   flat shapes until "WMOs on the WDL" replaces them.
 - Without terrain vertex shaders, the WDL falls back to the fixed-function textured path: linear fog
