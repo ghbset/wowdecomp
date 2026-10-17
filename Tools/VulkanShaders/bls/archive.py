@@ -25,8 +25,35 @@ VS_FALLBACK = ['vs_3_0', 'vs_2_0', 'vs_1_1']
 PS_FALLBACK = ['ps_3_0', 'ps_2_0', 'ps_1_4', 'ps_1_1']
 
 
+CUSTOM = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'CustomMpq', 'Shaders')
+
+
+class Folder(object):
+    """Tools/CustomMpq/Shaders (our own shaders, ShaderSrc/build_shaders.py) as one more archive, last
+    in the order as Data/custom.MPQ is first in the client's search: same find/read_file as mq.MPQ."""
+
+    def __init__(self, root):
+        self.files = {}
+        for base, _, names in os.walk(root):
+            for n in names:
+                p = os.path.join(base, n)
+                self.files[('Shaders' + BS + os.path.relpath(p, root).replace(os.sep, BS)).lower()] = p
+        self.listfile = '\r\n'.join('Shaders' + BS + os.path.relpath(p, root).replace(os.sep, BS)
+                                     for p in self.files.values()).encode('ascii')
+
+    def find(self, name):
+        return True if name == '(listfile)' or name.lower() in self.files else None
+
+    def read_file(self, name):
+        if name == '(listfile)':
+            return self.listfile, None
+        with open(self.files[name.lower()], 'rb') as f:
+            return f.read(), None
+
+
 def archives(datadir):
-    """Every archive of the load order present in the client's Data folder, opened."""
+    """Every archive of the load order present in the client's Data folder, opened, then our own
+    shaders (Folder)."""
     if not datadir or not os.path.isfile(os.path.join(datadir, 'common.MPQ')):
         sys.exit("no client archives: %r holds no common.MPQ" % datadir)
     out = []
@@ -40,6 +67,8 @@ def archives(datadir):
                 out.append((n, mq.MPQ(p)))
             except OSError as e:
                 sys.stderr.write('!! %s unreadable, skipped: %s\n' % (n, e))
+    if os.path.isdir(CUSTOM):
+        out.append(('CustomMpq/Shaders', Folder(CUSTOM)))
     return out
 
 

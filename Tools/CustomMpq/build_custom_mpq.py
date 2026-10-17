@@ -14,6 +14,11 @@ Contents:
                           (--d3d11-mpq to take another archive).
   Textures\\...           every file in Tools/CustomMpq/Textures beside this script (the
                           selection-circle styles from wxl-aoeindicators, selectionCircleStyle).
+  Shaders\\...            our own shaders, Tools/CustomMpq/Shaders (ps_3_0 for D3D9, ps_4_0 for D3D11),
+                          built from ShaderSrc/*.hlsl by ShaderSrc/build_shaders.py (VFog*: volumetric
+                          fog, docs/VFOG_PORT.md). Tools/VulkanShaders translates the ps_3_0 ones with the client's.
+  VFog\\...               every file in Tools/CustomMpq/VFog (fogdata.bin: the Classic/Forever fog layers,
+                          coa-vfog data/fogdata.bin, read by VolumetricFogData.cpp).
 Cache/vkpipelines.bin is a runtime cache and stays loose.
 
 Needs StormLib (libstorm.so, Debian package libstorm9). Python 3.8+, standard library only.
@@ -149,14 +154,19 @@ def main(argv):
     files.update(sm4)
     textures = folder_files('Textures', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Textures'))
     files.update(textures)
+    ours = folder_files('Shaders', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Shaders'))
+    files.update(ours)
+    vfog = folder_files('VFog', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'VFog'))
+    files.update(vfog)
 
     write_mpq(lib, a.out, files)
     back = mpq_files(lib, a.out)
     bad = [n for n in files if back.get(n) != files[n]]
     if bad:
         sys.exit('verify failed for %d file(s), first %s' % (len(bad), bad[0]))
-    print('%s: %d file(s) (%d Vulkan, %d D3D11, %d textures), %d bytes, verified' %
-          (a.out, len(back), len(files) - len(sm4) - len(textures), len(sm4), len(textures), os.path.getsize(a.out)))
+    print('%s: %d file(s) (%d Vulkan, %d D3D11, %d textures, %d own shaders, %d vfog data), %d bytes, verified' %
+          (a.out, len(back), len(files) - len(sm4) - len(textures) - len(ours) - len(vfog), len(sm4), len(textures),
+           len(ours), len(vfog), os.path.getsize(a.out)))
     return 0
 
 
