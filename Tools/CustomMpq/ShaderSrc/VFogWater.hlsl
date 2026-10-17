@@ -91,5 +91,5 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
     [branch] if (StockFogApplies())
         encoded = lerp(StockFogColour(), encoded, StockFogVisibility(w.waterZ));
     encoded = lerp(refraction.copied, encoded, saturate(kShoreFadePerYard * refraction.pathDepth));
-    return float4(encoded, 1);
+    return Dithered(float4(encoded, 1), pixel, float2(17, 229), cDither.y);
 }

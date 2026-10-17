@@ -71,13 +71,22 @@ The decisions:
 - **God rays** (vfog4): see section 2a. On by default (`vfogGodRays 1`, coa's "on" strength); coa ships `GodRays=0`.
 - **Water** (vfog5): see section 2b. On by default, as coa (`Water=1`). Ripples and wakes (vfog7): section 2b, ripples.
 - **Colour grading** (vfog6): see section 2c. Off by default, as coa (`ColorGrading=0`).
-- **Dither** (vfog6): `vfogDither 1` puts a +-0.5/255 triangular dither (interleaved gradient noise from the pixel
-  position, ALU only, no fetch; vf_common `Dithered`) on what the march, temporal and composite store into 8-bit
-  targets and on the grade, against fog banding. Each pass has its own offset; the frame index animates it so the
+- **Half-float fog targets** (vfog10): the march, history[2] and rays[2] are `GxTex_Abgr16161616F` (D3D9/9Ex
+  D3DFMT_A16B16G16R16F where CheckDeviceFormat passes RENDERTARGET | QUERY_FILTER, D3D11 R16G16B16A16_FLOAT, Vulkan
+  R16G16B16A16_SFLOAT where it is a sampled colour attachment; `CGxCaps::m_rttAbgr16161616F`, in the spare slot at
+  0x114 because wxl pins the caps and device layout), else Argb8888; a failed half-float create drops to 8 bit
+  for the session. The 8-bit low-res fog banded once it was upsampled bilinearly. `vfogHdrTargets 0` forces 8 bit.
+  The march and temporal outputs are saturated (`DitheredStore`), so float storage keeps the 0..1 range the 8-bit
+  store clamped to. History depth (16-bit viewZ packed in two bytes) and the scene copy (of the 8-bit back buffer)
+  stay Argb8888. Extra memory: 4 bytes per low-res texel x 3 plus 4 per ray texel x 2, about 7 MB at 1080p quality 2.
+- **Dither** (vfog6, strength since vfog10): `vfogDither` 0 = off, 1 = +-1/255 triangular dither (interleaved
+  gradient noise from the pixel position, ALU only, no fetch; vf_common `DitheredBy`), 2 = +-2/255. c79.x is the
+  strength on the 8-bit outputs (composite, grade, water onto the back buffer), c79.z on the march and temporal stores:
+  the strength with 8-bit targets, 0 with half-float ones. Against fog banding. Each pass has its own offset; the frame index animates it so the
   temporal blend averages it instead of accumulating a fixed bias (h = c + d/(1-w)). The composite dithers the colour it
   writes, i.e. after the conversion back to display space in LinearOverSceneCopy. coa's own dither was removed earlier
   as an fps regression that was **never isolated** (wxl-vfog/wxl-light composites, 2026-10-10), so it is a CVar:
-  `vfogDither 0` skips it on a uniform branch (c79.x = 0), the old path.
+  `vfogDither 0` skips it on a uniform branch (c79.x = c79.z = 0), the old path.
 - **MSAA** (vfog9): see section 3, scene depth per backend. Not ported: coa's sample split (silhouette mask and
   per-side composite).
 - **Not ported in v1:** the GPU density probe, the overlay, ForeverGlow, and wxl's fading-doodad early draw and TopUp.
@@ -262,10 +271,10 @@ viewport size change or device restore.
 
 | Target | Size | Format | Notes |
 |---|---|---|---|
-| march | low | `GxTex_Argb8888` | coa's own fallback from A16B16G16R16F. Add an RGBA16F EGxTexFormat only if banding shows |
-| rays[2] | viewport / 4 | `GxTex_Argb8888`, bilinear | god rays (section 2a), created on first use |
+| march | low | `GxTex_Abgr16161616F` (vfogHdrTargets, caps), else `GxTex_Argb8888` | as coa (A16B16G16R16F, Argb8888 fallback) |
+| rays[2] | viewport / 4 | as march, bilinear | god rays (section 2a), created on first use |
 | scene copy | world viewport | `GxTex_Argb8888`, bilinear | pre-fog copy (s3, ray mask), reused for the post-world ray composite |
-| history[2] | low | `GxTex_Argb8888` | ping-pong |
+| history[2] | low | as march | ping-pong |
 | historyDepth[2] | low | `GxTex_Argb8888` | packed 16-bit viewZ + depth class (vf_history_depth) |
 | scene depth | full | backend-owned | `DeviceCopySceneDepth()` |
 | noise atlases | 272x136, 528x528 | `GxTex_Argb8888`, wrap | static, from WP1 |
@@ -356,7 +365,7 @@ Pixel registers are the same as coa (vf_common.hlsli, vf_integrate.hlsli, etc.) 
 | c36-c47 | 3 noisy layers x 4 |
 | c53 | local-light control |
 | c78 | density variation |
-| **c79** | **new**: vfogDither (x on, y frame); every VFog fog pass and VFogGrade |
+| **c79** | **new**: vfogDither (x strength on 8-bit outputs, y frame, z strength on the fog stores); every VFog fog pass, VFogGrade, VFogWater |
 | c96-c98 | composite, godray colour (w = 0, dither removed), sun |
 | **c99** | **new**: horizon band (minZ, maxZ, near, far) |
 | **c100-c131** | **new**: 8 local lights x 4 (pos view + cutoff, colour, attenuation c/l/q, spare). Replaces sampler s8 |
@@ -430,7 +439,7 @@ change `farLimit` to `horizonFar` in this one place.
 `vfogGroundFog` (0.6), `vfogFarFog` (1), `vfogAmbient` (1.75), `vfogData` (1), `vfogLocalLights` (1),
 `vfogTransparent` (1), `vfogFadeEarly` (1; 0 = fading M2s stay in pass 1 with the fitted fog), `vfogStartOffset` (10), `vfogMaxDistance` (5000), `vfogNoise` (0.15), `vfogDebug` (0),
 `vfogGodRays` (1 = on, the user's choice; coa GodRays, a 0..4 strength, 0 = off, coa ships 0),
-`vfogDither` (1; 0 = the undithered path), grading: `vfogGrade` (0 = off, coa ColorGrading=0), `vfogGradeStrength`
+`vfogDither` (1 = +-1/255, 2 = +-2/255, 0 = the undithered path), `vfogHdrTargets` (1; 0 = 8-bit fog targets), grading: `vfogGrade` (0 = off, coa ColorGrading=0), `vfogGradeStrength`
 (1, 0..1, coa ColorGrading's strength when on).
 Water (coa CoAVolFog.ini Water* defaults and ranges): `vfogWater` (1), `vfogWaterQuality` (2, 1..3),
 `vfogWaterWaves` (1, 0..2), `vfogWaterWind` (2, 0.5..10), `vfogWaterFoam` (1, 0..2), `vfogWaterReflections` (1, 0..2),

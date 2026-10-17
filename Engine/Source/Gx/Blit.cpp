@@ -237,10 +237,10 @@ static void Blit_Dxt35_Dxt35(const C2iVector& size, const void* in, uint32_t inS
 // OFFSET: 0x006AC130
 uint32_t CalcRowStride(BlitFormat format, uint32_t width, uint32_t height) {
     // STATIC: 0x00AD9038
-    static const uint32_t BYTES_PER_BLOCK[BlitFormats_Last] = { 0, 4, 4, 2, 2, 2, 8, 16, 16, 2, 4, 4, 4 };
+    static const uint32_t BYTES_PER_BLOCK[BlitFormats_Last] = { 0, 4, 4, 2, 2, 2, 8, 16, 16, 2, 4, 4, 4, 8 };
 
     // STATIC: 0x00AD906C
-    static const uint32_t PIXELS_PER_BLOCK_SHIFT[BlitFormats_Last] = { 0, 0, 0, 0, 0, 0, 2, 2, 2, 0, 0, 0, 0 };
+    static const uint32_t PIXELS_PER_BLOCK_SHIFT[BlitFormats_Last] = { 0, 0, 0, 0, 0, 0, 2, 2, 2, 0, 0, 0, 0, 0 };
 
     if (format >= BlitFormat_Dxt1 && format <= BlitFormat_Dxt5) {
         if (width == 6 * height) {

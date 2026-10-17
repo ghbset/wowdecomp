@@ -76,6 +76,7 @@ struct Targets {
     CGxTex* rays[2];            // world viewport / kRayScale, bilinear: [1] mask -> [0] blur -> [1] blur
     uint32_t rayWidth;
     uint32_t rayHeight;
+    EGxTexFormat colourFormat;  // march, history and rays: Abgr16161616F (vfogHdrTargets) or Argb8888
 };
 
 // coa GodRayFrame: drawn by RenderGodRays at the end of the world.
@@ -161,22 +162,32 @@ void __fastcall OnDeviceRestored() {
     s_depthUnsupported = false;     // MSAA may have changed with the reset
 }
 
-CGxTex* CreateTarget(uint32_t width, uint32_t height, EGxTexFilter filter = GxTex_Nearest) {
+CGxTex* CreateTarget(uint32_t width, uint32_t height, EGxTexFilter filter = GxTex_Nearest, EGxTexFormat format = GxTex_Argb8888) {
     CGxTex* tex = nullptr;
     CGxTexFlags flags(filter, 0, 0, 0, 0, 1, 1, 0, 0, 0);
-    g_theGxDevicePtr->TexCreate(GxTex_2d, width, height, 0, GxTex_Argb8888, GxTex_Argb8888, flags, nullptr, GxTexNullUserFunc, "VFogTarget", tex);
+    g_theGxDevicePtr->TexCreate(GxTex_2d, width, height, 0, format, format, flags, nullptr, GxTexNullUserFunc, "VFogTarget", tex);
     return tex;
 }
 
-bool EnsureTargets(uint32_t width, uint32_t height) {
-    if (s_targets.march && s_targets.width == width && s_targets.height == height) {
+// Fog colour storage: RGBA half float where the device renders and filters it (vfogHdrTargets 1), else 8 bit,
+// which bands once the low-res fog is upsampled bilinearly. The history depth packs 16 bits into two 8-bit
+// channels and the scene copy is a copy of the 8-bit back buffer, so both stay Argb8888.
+bool s_hdrCreateFailed = false;     // a half-float create failed although the caps offered it: 8 bit from then on
+
+EGxTexFormat FogColourFormat(const Config& cfg) {
+    return cfg.hdrTargets && !s_hdrCreateFailed && g_theGxDevicePtr->Caps().m_rttAbgr16161616F ? GxTex_Abgr16161616F : GxTex_Argb8888;
+}
+
+bool EnsureTargets(uint32_t width, uint32_t height, EGxTexFormat format) {
+    if (s_targets.march && s_targets.width == width && s_targets.height == height && s_targets.colourFormat == format) {
         return true;
     }
 
     DestroyTargets();
-    s_targets.march = CreateTarget(width, height);
+    s_targets.colourFormat = format;
+    s_targets.march = CreateTarget(width, height, GxTex_Nearest, format);
     for (int i = 0; i < 2; i++) {
-        s_targets.history[i] = CreateTarget(width, height);
+        s_targets.history[i] = CreateTarget(width, height, GxTex_Nearest, format);
         s_targets.historyDepth[i] = CreateTarget(width, height);
     }
 
@@ -191,14 +202,16 @@ bool EnsureTargets(uint32_t width, uint32_t height) {
 }
 
 // coa renderer.cpp:1176 god ray targets, world viewport / 4 (coa :1276), bilinear and clamped.
+// Same colour format as the fog targets (EnsureTargets runs first and sets it); a format change recreates them.
 bool EnsureRayTargets(uint32_t width, uint32_t height) {
-    if (s_targets.rays[0] && s_targets.rays[1] && s_targets.rayWidth == width && s_targets.rayHeight == height) {
+    const EGxTexFormat format = s_targets.colourFormat;
+    if (s_targets.rays[0] && s_targets.rays[1] && s_targets.rayWidth == width && s_targets.rayHeight == height && s_targets.rays[0]->m_format == format) {
         return true;
     }
     DestroyTex(s_targets.rays[0]);
     DestroyTex(s_targets.rays[1]);
-    s_targets.rays[0] = CreateTarget(width, height, GxTex_Linear);
-    s_targets.rays[1] = CreateTarget(width, height, GxTex_Linear);
+    s_targets.rays[0] = CreateTarget(width, height, GxTex_Linear, format);
+    s_targets.rays[1] = CreateTarget(width, height, GxTex_Linear, format);
     if (!s_targets.rays[0] || !s_targets.rays[1]) {
         DestroyTex(s_targets.rays[0]);
         DestroyTex(s_targets.rays[1]);
@@ -537,8 +550,15 @@ bool RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg,
         return false;
     }
 
-    if (!EnsureTargets(lowW, lowH)) {
-        return false;
+    const EGxTexFormat colourFormat = FogColourFormat(cfg);
+    if (!EnsureTargets(lowW, lowH, colourFormat)) {
+        if (colourFormat == GxTex_Argb8888) {
+            return false;
+        }
+        s_hdrCreateFailed = true;
+        if (!EnsureTargets(lowW, lowH, GxTex_Argb8888)) {
+            return false;
+        }
     }
 
     // Scene depth after the liquid pass (doc section 2 step 1).
@@ -662,7 +682,11 @@ bool RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg,
 
     SetPs(0, &common[0][0], 9);
     SetPs(kHorizonBandRegister, in.horizonBand, 1);
-    const float dither[4] = { cfg.dither ? 1.0f : 0.0f, static_cast<float>(frame % 1024u), 0.0f, 0.0f };
+    // c79: x = vfogDither strength on the 8-bit outputs (composite, back buffer), z = on the fog stores, which
+    // only the 8-bit targets need (half float has 11 bits of mantissa). y = frame.
+    const float ditherStrength = static_cast<float>(cfg.dither);
+    const bool floatStores = s_targets.march->m_format == GxTex_Abgr16161616F;
+    const float dither[4] = { ditherStrength, static_cast<float>(frame % 1024u), floatStores ? 0.0f : ditherStrength, 0.0f };
     SetPs(kDitherRegister, dither, 1);
 
     // ---- march (coa :1369-1430) ----------------------------------------------------------------------
@@ -859,7 +883,7 @@ void RenderGodRays() {
 }
 
 // coa GradingRenderer::GradeTarget / DrawGraded: copy the world viewport, then draw the graded copy over it.
-bool RenderGrade(const float* curve32, float strength, bool dither, uint32_t frame, const WorldViewport& world) {
+bool RenderGrade(const float* curve32, float strength, int dither, uint32_t frame, const WorldViewport& world) {
     CGxDevice* device = g_theGxDevicePtr;
     if (!device || world.w < 1.0f || world.h < 1.0f || !Shader(s_shaders.grade, "VFogGrade")) {
         return false;
@@ -879,7 +903,7 @@ bool RenderGrade(const float* curve32, float strength, bool dither, uint32_t fra
     const float viewport[4] = { world.x, world.y, world.w, world.h };
     float grade[1 + kGradingCurveEntries / 4][4] = { { strength, 0.0f, 0.0f, 0.0f } };
     std::memcpy(grade[1], curve32, kGradingCurveEntries * sizeof(float));
-    const float ditherOn[4] = { dither ? 1.0f : 0.0f, static_cast<float>(frame % 1024u), 0.0f, 0.0f };
+    const float ditherOn[4] = { static_cast<float>(dither), static_cast<float>(frame % 1024u), 0.0f, 0.0f };
     SetPs(0, viewport, 1);
     SetPs(kGradeRegister, &grade[0][0], 1 + kGradingCurveEntries / 4);
     SetPs(kDitherRegister, ditherOn, 1);

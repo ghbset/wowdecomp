@@ -73,6 +73,7 @@ struct CVars {
     CVar* grade;
     CVar* gradeStrength;
     CVar* dither;
+    CVar* hdrTargets;
     CVar* fadeEarly;
 };
 
@@ -145,7 +146,8 @@ Config ReadConfig() {
     cfg.godRays = std::clamp(CVarFloat(s_cvars.godRays, cfg.godRays), 0.0f, 4.0f);   // coa config.cpp:75
     cfg.grade = CVarInt(s_cvars.grade, 0) != 0;
     cfg.gradeStrength = std::clamp(CVarFloat(s_cvars.gradeStrength, cfg.gradeStrength), 0.0f, 1.0f);   // coa config.cpp:52
-    cfg.dither = CVarInt(s_cvars.dither, 1) != 0;
+    cfg.dither = std::clamp(CVarInt(s_cvars.dither, 1), 0, 2);
+    cfg.hdrTargets = CVarInt(s_cvars.hdrTargets, 1) != 0;
     return cfg;
 }
 
@@ -481,7 +483,8 @@ void RegisterCVars() {
     s_cvars.debug = CVar::Register("vfogDebug", "Volumetric fog debug view (0..3)", 1, "0", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.grade = CVar::Register("vfogGrade", "Volumetric fog colour grading: the modern client's colour curve for the lights around the camera, over the 3D view after the glow (not names or the UI): 1 = on, 0 = off (default, as coa)", 1, "0", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.gradeStrength = CVar::Register("vfogGradeStrength", "Volumetric fog colour grading strength while vfogGrade is on, 0..1 (coa ColorGrading)", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
-    s_cvars.dither = CVar::Register("vfogDither", "Volumetric fog: 1 = dither the 8-bit fog targets and the grade against banding (default), 0 = off", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    s_cvars.dither = CVar::Register("vfogDither", "Volumetric fog dither against banding on the 8-bit outputs (composite, grade, water, and the fog targets when 8 bit): 0 = off, 1 = +-1/255 triangular (default), 2 = twice that", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    s_cvars.hdrTargets = CVar::Register("vfogHdrTargets", "Volumetric fog: 1 = half-float fog and god ray targets where the device has them (default), 0 = 8 bit (bands)", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.godRays = CVar::Register("vfogGodRays", "Volumetric fog god rays from the bright sky around the sun: 0 = off, 1 = on (default), up to 4 = strength", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
 
     RegisterWaterCVars();

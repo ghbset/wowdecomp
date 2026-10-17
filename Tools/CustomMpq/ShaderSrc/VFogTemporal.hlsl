@@ -163,5 +163,5 @@ float4 Filtered(float2 lowResTexel)
 float4 main(float2 targetUv : TEXCOORD0) : COLOR0
 {
     float2 lowResTexel = LowResTexelFromUv(targetUv);
-    return Dithered(Filtered(lowResTexel), lowResTexel, float2(103, 157), FrameIndex());
+    return DitheredStore(Filtered(lowResTexel), lowResTexel, float2(103, 157), FrameIndex());
 }

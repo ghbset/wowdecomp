@@ -41,7 +41,7 @@ void CGxDeviceVulkan::ISetCaps(const CGxFormat& format) {
     // Texture formats 1-12 all offered, as D3D offers them on this class of adapter.
     this->m_caps.m_texFmt[0] = 0;
 
-    for (uint32_t i = 1; i < GxTexFormats_Last; i++) {
+    for (uint32_t i = 1; i < GxTexCapsFormats; i++) {
         this->m_caps.m_texFmt[i] = 1;
     }
 
@@ -75,7 +75,7 @@ void CGxDeviceVulkan::ISetCaps(const CGxFormat& format) {
     // R5G6B5, Gr1616F R16G16_SFLOAT, R32F R32_SFLOAT. D24X8 is not offered: every colour target gets
     // the frame's own depth buffer, and a depth texture cannot be sampled here, so the shadow cache
     // takes its R32F colour-target path (its PCF path wants the D24X8 texture).
-    for (uint32_t i = 0; i < GxTexFormats_Last; i++) {
+    for (uint32_t i = 0; i < GxTexCapsFormats; i++) {
         this->m_caps.m_rttFormat[i] = 0;
     }
 
@@ -84,11 +84,13 @@ void CGxDeviceVulkan::ISetCaps(const CGxFormat& format) {
         this->m_caps.m_rttFormat[GxTex_Rgb565] = RenderableColour(*h, VK_FORMAT_R5G6B5_UNORM_PACK16);
         this->m_caps.m_rttFormat[GxTex_Gr1616F] = RenderableColour(*h, VK_FORMAT_R16G16_SFLOAT);
         this->m_caps.m_rttFormat[GxTex_R32F] = RenderableColour(*h, VK_FORMAT_R32_SFLOAT);
+        this->m_caps.m_rttAbgr16161616F = RenderableColour(*h, VK_FORMAT_R16G16B16A16_SFLOAT);
     } else {
         this->m_caps.m_rttFormat[GxTex_Argb8888] = 1;
         this->m_caps.m_rttFormat[GxTex_Rgb565] = 1;
         this->m_caps.m_rttFormat[GxTex_Gr1616F] = 1;
         this->m_caps.m_rttFormat[GxTex_R32F] = 1;
+        this->m_caps.m_rttAbgr16161616F = 1;
     }
 
     this->m_caps.m_rttFormat[GxTex_D24X8] = 0;
@@ -153,11 +155,10 @@ void CGxDeviceVulkan::ISetCaps(const CGxFormat& format) {
     this->m_caps.m_blendFactor = 1;
     this->m_caps.m_stereoAvailable = 0;
     this->m_caps.m_shaderAlphaRef = 1;
-    this->m_caps.unused_0114[0] = 0;
-    this->m_caps.unused_0114[1] = 0;
-    this->m_caps.unused_0114[2] = 0;
-    this->m_caps.unused_0114[3] = 0;
-    this->m_caps.unused_0114[4] = 0;
+    this->m_caps.unused_0118[0] = 0;
+    this->m_caps.unused_0118[1] = 0;
+    this->m_caps.unused_0118[2] = 0;
+    this->m_caps.unused_0118[3] = 0;
     this->m_caps.unk_0134 = this->m_caps.m_shaderTargets[GxSh_Pixel] != 4;
     this->m_caps.unk_0138 = this->m_caps.m_shaderTargets[GxSh_Pixel] != 4;
 

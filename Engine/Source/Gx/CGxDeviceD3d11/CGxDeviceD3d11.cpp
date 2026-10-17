@@ -57,16 +57,16 @@ const DXGI_FORMAT CGxDeviceD3d11::s_GxTexFmtToDxgiFmt[GxTexFormats_Last] = {
     DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_B4G4R4A4_UNORM,
     DXGI_FORMAT_B5G5R5A1_UNORM, DXGI_FORMAT_B5G6R5_UNORM, DXGI_FORMAT_BC1_UNORM, DXGI_FORMAT_BC2_UNORM,
     DXGI_FORMAT_BC3_UNORM, DXGI_FORMAT_R8G8_SNORM, DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R32_FLOAT,
-    DXGI_FORMAT_R24G8_TYPELESS
+    DXGI_FORMAT_R24G8_TYPELESS, DXGI_FORMAT_R16G16B16A16_FLOAT
 };
 
 // Constant like 4.3.4's (0x00BD67E8 is read-only there): a failed create falls back for that one texture only.
 // 16-bit formats widen to Argb8888 (B8G8R8A8) like 4.3.4 widens them to 8888: native B5G6R5/B5G5R5A1 are optional
 // and cannot always take GENERATE_MIPS, and stock Blit has no 1555/565 -> 8888. ConvertTexels16To8888 expands them.
-const EGxTexFormat CGxDeviceD3d11::s_GxTexFormatToUse[GxTexFormats_Last] = { GxTex_Unknown, GxTex_Abgr8888, GxTex_Argb8888, GxTex_Argb8888, GxTex_Argb8888, GxTex_Argb8888, GxTex_Dxt1, GxTex_Dxt3, GxTex_Dxt5, GxTex_Uv88, GxTex_Gr1616F, GxTex_R32F, GxTex_D24X8 };
+const EGxTexFormat CGxDeviceD3d11::s_GxTexFormatToUse[GxTexFormats_Last] = { GxTex_Unknown, GxTex_Abgr8888, GxTex_Argb8888, GxTex_Argb8888, GxTex_Argb8888, GxTex_Argb8888, GxTex_Dxt1, GxTex_Dxt3, GxTex_Dxt5, GxTex_Uv88, GxTex_Gr1616F, GxTex_R32F, GxTex_D24X8, GxTex_Abgr16161616F };
 
 // Unreached for 16-bit formats now that s_GxTexFormatToUse widens them.
-const EGxTexFormat CGxDeviceD3d11::s_tolerableTexFmtMapping[GxTexFormats_Last] = { GxTex_Unknown, GxTex_Abgr8888, GxTex_Abgr8888, GxTex_Abgr8888, GxTex_Argb1555, GxTex_Rgb565, GxTex_Dxt1, GxTex_Dxt3, GxTex_Dxt5, GxTex_Uv88, GxTex_Gr1616F, GxTex_R32F, GxTex_D24X8 };
+const EGxTexFormat CGxDeviceD3d11::s_tolerableTexFmtMapping[GxTexFormats_Last] = { GxTex_Unknown, GxTex_Abgr8888, GxTex_Abgr8888, GxTex_Abgr8888, GxTex_Argb1555, GxTex_Rgb565, GxTex_Dxt1, GxTex_Dxt3, GxTex_Dxt5, GxTex_Uv88, GxTex_Gr1616F, GxTex_R32F, GxTex_D24X8, GxTex_Abgr16161616F };
 
 // Triangle fans have no D3D11 topology: Draw() rewrites them as lists.
 const D3D11_PRIMITIVE_TOPOLOGY CGxDeviceD3d11::s_primitiveConversion[GxPrims_Last] = {
@@ -1042,7 +1042,7 @@ void CGxDeviceD3d11::ISetCaps(const CGxFormat& format) {
         this->m_caps.m_shaderTargets[GxSh_Vertex] = format.m_fixedFunction[GxSh_Vertex];
     }
 
-    for (uint32_t i = 0; i < GxTexFormats_Last; i++) {
+    for (uint32_t i = 0; i < GxTexCapsFormats; i++) {
         UINT support = 0;
         this->m_caps.m_texFmt[i] = i && SUCCEEDED(this->m_d3dDevice->CheckFormatSupport(s_GxTexFmtToDxgiFmt[i], &support)) && (support & D3D11_FORMAT_SUPPORT_TEXTURE2D);
     }
@@ -1055,6 +1055,11 @@ void CGxDeviceD3d11::ISetCaps(const CGxFormat& format) {
         UINT support = 0;
         this->m_caps.m_rttFormat[s_rttFormats[i]] = SUCCEEDED(this->m_d3dDevice->CheckFormatSupport(s_GxTexFmtToDxgiFmt[s_rttFormats[i]], &support)) && (support & D3D11_FORMAT_SUPPORT_RENDER_TARGET);
     }
+
+    // VFOG: R16G16B16A16_FLOAT, a render target the fog samples bilinearly.
+    UINT halfSupport = 0;
+    const UINT halfNeed = D3D11_FORMAT_SUPPORT_RENDER_TARGET | D3D11_FORMAT_SUPPORT_SHADER_SAMPLE;
+    this->m_caps.m_rttAbgr16161616F = SUCCEEDED(this->m_d3dDevice->CheckFormatSupport(s_GxTexFmtToDxgiFmt[GxTex_Abgr16161616F], &halfSupport)) && (halfSupport & halfNeed) == halfNeed;
 
     this->m_caps.m_rttFormat[GxTex_D24X8] = 1;
 
@@ -1075,8 +1080,8 @@ void CGxDeviceD3d11::ISetCaps(const CGxFormat& format) {
     this->m_caps.m_blendFactor = 1;
     this->m_caps.m_shaderAlphaRef = 1;
 
-    for (uint32_t i = 0; i < 5; i++) {
-        this->m_caps.unused_0114[i] = 0;
+    for (uint32_t i = 0; i < 4; i++) {
+        this->m_caps.unused_0118[i] = 0;
     }
 
     this->m_caps.unk_0134 = this->m_caps.m_shaderTargets[GxSh_Pixel] != 4;

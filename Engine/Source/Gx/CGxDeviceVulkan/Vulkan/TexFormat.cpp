@@ -64,6 +64,9 @@ namespace
 
         // 12 D24X8: depth in bits 23..0: X8_D24_UNORM_PACK32. Only ever rendered into, never uploaded.
         { VK_FORMAT_X8_D24_UNORM_PACK32, 1, 1, 4, false, false, false, "D24X8" },
+
+        // 13 Abgr16161616F: D3DFMT_A16B16G16R16F, halves R, G, B, A in memory: R16G16B16A16_SFLOAT. VFog targets.
+        { VK_FORMAT_R16G16B16A16_SFLOAT, 1, 1, 8, false, false, true, "Abgr16161616F" },
     };
 
     constexpr uint32_t kRows = static_cast<uint32_t>(sizeof kTable / sizeof kTable[0]);
@@ -84,6 +87,7 @@ namespace
     static_assert(SameName(kTable[GxTex_Dxt5].name, "Dxt5"), "row 8");
     static_assert(SameName(kTable[GxTex_Uv88].name, "Uv88"), "row 9");
     static_assert(SameName(kTable[GxTex_D24X8].name, "D24X8"), "row 12");
+    static_assert(SameName(kTable[GxTex_Abgr16161616F].name, "Abgr16161616F"), "row 13");
     static_assert(kTable[GxTex_Dxt1].blockBytes == 8 && kTable[GxTex_Dxt3].blockBytes == 16 && kTable[GxTex_Dxt5].blockBytes == 16, "DXT block sizes");
     static_assert(!kTable[GxTex_Unknown].uploadable && !kTable[GxTex_D24X8].uploadable, "Unknown and D24X8 are never uploaded");
 

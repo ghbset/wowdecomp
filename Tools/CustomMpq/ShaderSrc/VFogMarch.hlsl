@@ -6,6 +6,6 @@
 float4 main(float2 targetUv : TEXCOORD0) : COLOR0
 {
     float2 lowResTexel = LowResTexelFromUv(targetUv);
-    return Dithered(IntegrateFogAtPixel(LowResTexelToFullPixel(lowResTexel), StepJitter(lowResTexel)), lowResTexel,
-                    float2(0, 0), FrameIndex());
+    return DitheredStore(IntegrateFogAtPixel(LowResTexelToFullPixel(lowResTexel), StepJitter(lowResTexel)), lowResTexel,
+                         float2(0, 0), FrameIndex());
 }

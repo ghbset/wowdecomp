@@ -59,7 +59,8 @@ struct Config {
     float godRays = 1.0f;           // vfogGodRays: coa GodRays, 0 = off, 0..4 strength (default 1)
     bool grade = false;             // vfogGrade: coa ColorGrading > 0 (coa ships 0 = off)
     float gradeStrength = 1.0f;     // vfogGradeStrength: coa ColorGrading's 0..1 strength when on
-    bool dither = true;             // vfogDither: +-0.5/255 dither on the 8-bit fog stores and the grade
+    int dither = 1;                 // vfogDither: 0 off, 1 = +-1/255 triangular on the 8-bit outputs, 2 = twice that
+    bool hdrTargets = true;         // vfogHdrTargets: half-float fog targets where the device has them, 0 = 8 bit
 };
 
 // ---- per-frame engine inputs (coa-vfog src/engine.h FrameInputs, read natively) ----------------

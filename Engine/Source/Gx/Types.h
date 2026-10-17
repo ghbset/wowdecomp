@@ -53,8 +53,13 @@ enum EGxTexFormat {
     GxTex_Gr1616F = 10,
     GxTex_R32F = 11,
     GxTex_D24X8 = 12,
-    GxTexFormats_Last = 13,
+    GxTex_Abgr16161616F = 13,  // VFOG: RGBA half float (render target + texture), CGxCaps::m_rttAbgr16161616F says if the device has it
+    GxTexFormats_Last = 14,
 };
+
+// CGxCaps keeps the 3.3.5a layout (wxl reads fields at fixed offsets): its per-format arrays cover the first 13
+// formats only, and the formats appended after them get caps fields of their own (CGxCaps::m_rttAbgr16161616F).
+constexpr uint32_t GxTexCapsFormats = 13;
 
 enum EGxVertexBufferFormat {
     GxVBF_P = 0,
@@ -175,7 +180,8 @@ enum BlitFormat {
     BlitFormat_Gr1616F = 10,
     BlitFormat_R32F = 11,
     BlitFormat_D24X8 = 12,
-    BlitFormats_Last = 13,
+    BlitFormat_Abgr16161616F = 13,
+    BlitFormats_Last = 14,
 };
 
 class CGxBatch {
@@ -204,11 +210,11 @@ class CGxCaps {
     /* 0018 */ int32_t unk_0018;
     /* 001C */ uint32_t m_maxIndex;
     /* 0020 */ int32_t m_generateMipMaps;
-    /* 0024 */ int32_t m_texFmt [13];
+    /* 0024 */ int32_t m_texFmt [GxTexCapsFormats];
     /* 0058 */ int32_t m_texTarget [4];
     /* 0068 */ uint32_t m_texNonPow2;
     /* 006C */ uint32_t m_texMaxSize [4];
-    /* 007C */ int32_t m_rttFormat [13];
+    /* 007C */ int32_t m_rttFormat [GxTexCapsFormats];
     /* 00B0 */ uint32_t unk_00B0;
     /* 00B4 */ int32_t m_shaderTargets [6];
     /* 00CC */ uint32_t m_shaderConstants [6];
@@ -224,7 +230,8 @@ class CGxCaps {
     /* 0108 */ float m_pointScaleMax;
     /* 010C */ int32_t m_pointSprite;
     /* 0110 */ uint32_t m_blendFactor;
-    /* 0114 */ uint32_t unused_0114 [5];
+    /* 0114 */ int32_t m_rttAbgr16161616F;   // VFOG: GxTex_Abgr16161616F renders (and filters), the m_rttFormat of format 13
+    /* 0118 */ uint32_t unused_0118 [4];
     /* 0128 */ int32_t m_oglRtAlpha;
     /* 012C */ int32_t m_stereoAvailable;
     /* 0130 */ int32_t m_shaderAlphaRef;

@@ -15,7 +15,7 @@ float4 cDepthToViewZ : register(c3);
 row_major float4x4 cViewToWorld : register(c4);
 float4 cLowResTarget : register(c8);
 float4 cHorizonBand : register(c99);    // depth minZ, maxZ (0.998046875, 0.9990234375), near yd, far yd
-float4 cDither : register(c79);         // x > 0: vfogDither on; y = frame index (mod 1024) for the grade pass
+float4 cDither : register(c79);         // x = vfogDither strength on 8-bit outputs, y = frame (mod 1024), z = on the fog stores
 
 
 float2 ViewportOrigin()
@@ -191,16 +191,30 @@ float InterleavedGradientNoise(float2 pixel)
 }
 
 // vfogDither (ALU only, no texture fetch).
-// +-0.5/255 triangular dither (the difference of two IGN values) on an 8-bit store. `offset` decorrelates the
-// passes; the frame term animates it so the temporal blend averages it out instead of accumulating a fixed bias.
-float4 Dithered(float4 colour, float2 position, float2 offset, float frame)
+// Triangular dither (the difference of two IGN values), +-strength/255: 1 is the standard amplitude for an 8-bit
+// store, 2 twice that. `offset` decorrelates the passes; the frame term animates it so the temporal blend averages
+// it out instead of accumulating a fixed bias.
+float4 DitheredBy(float strength, float4 colour, float2 position, float2 offset, float frame)
 {
-    [branch] if (cDither.x > 0)
+    [branch] if (strength > 0)
     {
         float2 p = position + offset + frame * 5.588238;
-        colour.rgb += (InterleavedGradientNoise(p) - InterleavedGradientNoise(p + float2(37.0, 61.0))) * (0.5 / 255);
+        colour.rgb += (InterleavedGradientNoise(p) - InterleavedGradientNoise(p + float2(37.0, 61.0))) * (strength / 255);
     }
     return colour;
+}
+
+// The 8-bit outputs: composite, grade and water onto the back buffer.
+float4 Dithered(float4 colour, float2 position, float2 offset, float frame)
+{
+    return DitheredBy(cDither.x, colour, position, offset, frame);
+}
+
+// The low-res fog stores (march, temporal). cDither.z = 0 on half-float targets, which need no dither. The
+// saturate keeps the 0..1 range an 8-bit store clamps to, so both storages feed the composite the same values.
+float4 DitheredStore(float4 colour, float2 position, float2 offset, float frame)
+{
+    return saturate(DitheredBy(cDither.z, colour, position, offset, frame));
 }
 
 // tex2Dlod at level 0 for uv in 0..1. The lod operand is saturate(uv - 2) = 0 rather than a literal 0: fxc

@@ -39,6 +39,7 @@ namespace {
 // ---- constants (coa water_renderer.cpp, water_classify.h, water_types.h, water_data.cpp) -----------------------
 constexpr uint32_t kShadingFirstRegister = 9;
 constexpr uint32_t kHorizonBandRegister = 99;
+constexpr uint32_t kDitherRegister = 79;            // vf_common cDither
 constexpr int kSceneColourStage = 0;
 constexpr int kSceneDepthStage = 1;
 constexpr int kWaterDepthStage = 2;
@@ -919,6 +920,9 @@ void ShadeClass(WaterClass waterClass) {
     BeginPasses(s_saved);
     SetPs(0, &s_pass.common[0][0], 9);
     SetPs(kShadingFirstRegister, &s_constants.light.x, sizeof(ShadingConstants) / 16);
+    // vf_common cDither: the water writes the 8-bit back buffer; frame from the clock (no frame counter here).
+    const float dither[4] = { static_cast<float>(s_pass.cfg->dither), static_cast<float>(static_cast<uint32_t>(s_pass.seconds * 60.0) % 1024u), 0.0f, 0.0f };
+    SetPs(kDitherRegister, dither, 1);
     Bind(kSceneColourStage, s_targets.sceneColour);
     Bind(kSceneDepthStage, s_targets.sceneDepth);
     Bind(kWaterDepthStage, waterDepth);
