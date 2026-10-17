@@ -783,7 +783,7 @@ void CBarrier::SetViewerPos(const C3Vector& position) {
 // VERIFY: b95e4db0 auto
 // OFFSET: 0x0077F9D0
 void CWorldScene::RenderParticulate() {
-    if ((CWorld::enables & 0x2000000) && s_liquidTypeId) {
+    if ((CWorld::enables & Enable_Particulates) && s_liquidTypeId) {
         CWorld::particulate->Render();
     }
 }
@@ -1370,9 +1370,9 @@ void CWorld::LoadMap(const char* mapName, C3Vector* position, int32_t zoneID, in
     CWorld::gbChunkRectOld = CWorld::gbChunkRect;
     CMap::Load(mapName, zoneID);
 
-    int32_t shaders = Enable_Doodads;
+    int32_t shaders = 1;
 
-    if (!(CWorld::enables2 & Enable_Doodads) || !(CWorld::enables & Enable_PixelShaders)) {
+    if (!(CWorld::enables2 & Enable_VertexShader) || !(CWorld::enables & Enable_PixelShaders)) {
         shaders = 0;
     }
 
@@ -1566,7 +1566,7 @@ void CWorld::Update(C3Vector* camPos, C3Vector* camTarget, C3Vector* position) {
 
     CWorld::status.m_prepareAll = 0;
 
-    if ((CWorld::enables & 0x2000000) && s_liquidTypeId) {
+    if ((CWorld::enables & Enable_Particulates) && s_liquidTypeId) {
         CWorld::particulate->Update();
     }
 
@@ -1673,11 +1673,11 @@ void CWorld::Initialize() {
     CWorld::s_elapsedTicks = 0;
 
     if (g_theGxDevicePtr->Caps().m_shaderTargets[4] > 0) {
-        CWorld::enables |= 0x10000000;
+        CWorld::enables |= Enable_PixelShaders;
     }
 
     if (g_theGxDevicePtr->Caps().m_shaderTargets[0] > 0) {
-        CWorld::enables2 |= 0x1;
+        CWorld::enables2 |= Enable_VertexShader;
     }
 
     CWorld::m_M2PassMask |= 0x7;
@@ -1706,7 +1706,7 @@ void CWorld::Initialize() {
     World::groundEffectDistValueSqr = CWorld::detailDoodadDist * CWorld::detailDoodadDist;
     CWorld::shadowMipLevel = CWorldParam::cvar_shadowLevel->m_intValue;
 
-    CShaderEffect::InitShaderSystem(M2GetCacheFlags() & 0x8, CWorld::enables2 & 0x2);
+    CShaderEffect::InitShaderSystem(M2GetCacheFlags() & 0x8, CWorld::enables2 & Enable_HwPcf);
     CShaderEffectManager::AddEffectFile("MapObj.wfx");
     CShaderEffectManager::AddEffectFile("MapObjU.wfx");
     CShaderEffectManager::AddEffectFile("Model2.wfx");
@@ -1832,7 +1832,7 @@ void CWorldScene::FrustumXform(C44Matrix& mat) {
 // VERIFY: ad5c1827 auto
 // OFFSET: 0x0078FB20
 int32_t CWorldScene::FrustumCull(CAaBox* box) {
-    return CWorldScene::frustumStack[CWorldScene::frustumIndex].Cull(*box) == 0;
+    return CWorldScene::frustumStack[CWorldScene::frustumIndex].Cull(*box) == WorldCull_outside;
 }
 
 // VERIFY: 7ebc59b0 auto
@@ -1907,7 +1907,7 @@ void CWorldScene::UpdateViewerLiquid() {
     int32_t leftLiquid = 0;
 
     if (liquidType) {
-        if (liquidType != static_cast<int32_t>(s_liquidTypeId) && (CWorld::enables & 0x2000000)) {
+        if (liquidType != static_cast<int32_t>(s_liquidTypeId) && (CWorld::enables & Enable_Particulates)) {
             const LiquidTypeRec* rec = g_liquidTypeDB.GetRecord(liquidType);
             bool particles = (rec->m_flags & 8) != 0;
             CWorld::particulate->m_enabled = particles;
@@ -2035,7 +2035,7 @@ int32_t CWorldScene::FrustumCull(const C3Vector& center, float radius) {
     sphere.c = center;
     sphere.r = radius;
 
-    return CWorldScene::frustumStack[CWorldScene::frustumIndex].Cull(sphere) == 0;
+    return CWorldScene::frustumStack[CWorldScene::frustumIndex].Cull(sphere) == WorldCull_outside;
 }
 
 // VERIFY: e94a022f auto
@@ -3681,7 +3681,7 @@ void CWorldScene::RenderChunksSinglePass() {
 
                 renderChunk->m_renderChunkLink.Unlink();
 
-                if (CWorld::enables & 0x40000000) {
+                if (CWorld::enables & Enable_ShowNormals) {
                     singlePassList.LinkToTail(renderChunk);
                 } else {
                     CMap::s_mapRenderChunkUpdateList.LinkToTail(renderChunk);
@@ -4392,7 +4392,7 @@ void CWorldScene::CullModelSplitBody(CM2Model* model, uint32_t boneId, int32_t s
         model->m_fFlags &= ~0x2000;
     } else {
         CAaBox box = model->GetSplitBodyBoundingBox(boneId);
-        uint32_t culled = CWorldScene::frustumStack[CWorldScene::frustumIndex].Cull(box) == 0;
+        uint32_t culled = CWorldScene::frustumStack[CWorldScene::frustumIndex].Cull(box) == WorldCull_outside;
         model->m_fFlags ^= (model->m_fFlags ^ (culled << 13)) & 0x2000;
     }
 
@@ -4708,7 +4708,7 @@ int32_t World::QueryAreaIdAtPosition(const C3Vector* position, int32_t* areaId) 
     CMapObjDef* mapObjDef = nullptr;
     CMapObjDefGroup* mapObjDefGroup = nullptr;
 
-    if ((CWorld::enables & 0x100) && CMap::VectorIntersect(&start, &end, 0x10, 1280, &objectDistance, nullptr, nullptr, &mapObjDef, &mapObjDefGroup)) {
+    if ((CWorld::enables & Enable_MapObjs) && CMap::VectorIntersect(&start, &end, 0x10, 1280, &objectDistance, nullptr, nullptr, &mapObjDef, &mapObjDefGroup)) {
         hitObject = true;
     }
 
@@ -4913,7 +4913,7 @@ void CWorldScene::RenderBarriers(float elapsedSec) {
 // OFFSET: 0x007911D0
 void CWorldScene::CullModelRecursive(CM2Model* model) {
     CAaBox box = model->GetCurrentBoundingBox();
-    model->m_fFlags = (model->m_fFlags & ~0x2000u) | ((CWorldScene::frustumStack[CWorldScene::frustumIndex].Cull(box) == 0) << 13);
+    model->m_fFlags = (model->m_fFlags & ~0x2000u) | ((CWorldScene::frustumStack[CWorldScene::frustumIndex].Cull(box) == WorldCull_outside) << 13);
 
     for (CM2Model* attached = model->m_attachList; attached; attached = attached->m_attachNext) {
         CWorldScene::CullModelRecursive(attached);

@@ -84,7 +84,7 @@ int32_t RTAlphaSupported() {
     }
 
     int32_t supported = 0;
-    GxSceneClear(3, CImVector());
+    GxSceneClear(GxBufferBit_Color | GxBufferBit_Depth, CImVector());
 
     CiRect rect;
     rect.minY = 0;
@@ -723,7 +723,7 @@ void RenderPortraitTexture(CSimpleTexture* texture, CGUnit_C* unit) {
         GxXformSetViewport(viewport.minX, viewport.maxX, viewport.minY, viewport.maxY, 0.0f, 1.0f);
     }
 
-    GxSceneClear(3, CImVector());
+    GxSceneClear(GxBufferBit_Color | GxBufferBit_Depth, CImVector());
     model->IsDrawable(1, 1);
     model->SetAnimating(1);
 
@@ -784,7 +784,7 @@ void RenderPortraitTexture(CSimpleTexture* texture, CGUnit_C* unit) {
         black.g = 0;
         black.r = 0;
         black.a = 0xFF;
-        GxSceneClear(2, black);
+        GxSceneClear(GxBufferBit_Depth, black);
     } else if (g_theGxDevicePtr->DeviceApi() != GxApi_D3d10 && g_theGxDevicePtr->DeviceApi() != GxApi_D3d11) {
         CiRect rect;
         rect.minY = 0;
@@ -799,7 +799,7 @@ void RenderPortraitTexture(CSimpleTexture* texture, CGUnit_C* unit) {
         }
 
         GxTexUpdate(gxTex, rect, 1);
-        GxSceneClear(3, CImVector());
+        GxSceneClear(GxBufferBit_Color | GxBufferBit_Depth, CImVector());
     }
 
     GxXformSetProjection(savedProjection);
