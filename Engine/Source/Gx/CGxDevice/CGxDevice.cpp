@@ -115,6 +115,11 @@ void CGxDevice::DeviceResolveDepthBuffer(CGxTex* texture) {
 void CGxDevice::DeviceCopyTex(CGxTex* source, uint32_t sourcePlane, CGxTex* dest, uint32_t destPlane) {
 }
 
+// VFOG: not in 12340; backends with a readable depth override it.
+CGxTex* CGxDevice::DeviceCopySceneDepth() {
+    return nullptr;
+}
+
 void CGxDevice::LogCrashInfo(char* buffer, uint32_t size) {
 }
 

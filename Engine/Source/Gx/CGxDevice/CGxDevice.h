@@ -242,6 +242,12 @@ class CGxDevice {
     virtual void DeviceUnk81(uint32_t a, uint32_t b) = 0;
     virtual void DeviceUnk82() = 0;
     virtual void DeviceUnk83(uint32_t a, uint32_t b) = 0;
+    // VFOG: not in 12340 (appended after the stock vtable, so stock-host never calls it). Copies the
+    // current scene depth-stencil (back-buffer size) into a backend-owned texture and returns it,
+    // bindable through GxRs_TextureN, .r = window-space depth 0..1 (viewport z bands included).
+    // Valid until the next call; draw with depth test and write off while it is bound.
+    // nullptr = unsupported (the volumetric fog then stays off). docs/VFOG_PORT.md.
+    virtual CGxTex* DeviceCopySceneDepth();
 
     static HSLOG m_log;
     static C2iVector s_clientAdjust;
