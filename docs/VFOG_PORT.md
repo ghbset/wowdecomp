@@ -64,9 +64,18 @@ The decisions:
   has `m_blendMode <= 1`, and whose material lacks flag 0x10 (no depth write), is drawn in `OnLiquidDone` before the
   composite. The ZFill clones are included. The composite then fogs these batches at their own depth, as it does
   once the model is solid. The step works the same on every backend, because it only reorders stock draws.
-  Not ported: wxl-vfog 0.6.3's alpha cross-fade (a depth copy from behind the models, alpha in the stencil, then a
-  second composite weighted by that alpha), because Gx has no stencil states. As a result, the background seen through
-  a fading model takes the model's fog (5d). This shows most where the model stands against the sky in thick fog.
+  **Alpha cross-fade** (`vfogFadeStencil 1`, wxl-vfog 0.6.3 KeepDepthBehind / MarkLateDepth / DrawOverMarked): before
+  the early batches draw, the scene depth is copied into an R32F target the size of the depth texture (**VFogDepthCopy**,
+  `KeepDepthBehindFading`) and the stencil is cleared; the batches then draw with stencil ALWAYS / REPLACE,
+  ref = `M2Element::m_alpha` * 255 (one `CM2SceneRender::Draw` per run of equal alpha). RenderFog copies the depth again
+  (with the models) and marches, filters and composites from the depth *behind* them; then, over a scene copy taken
+  before the composite, the composite at the live depth goes over the marked pixels by their alpha in seven steps
+  (stencil EQUAL `step << 5` under read mask 0xE0, `GxBlend_ConstantAlpha` with the Unk84 blend factor (2 step + 1) / 16,
+  1 at step 7; step 0 left as is). So a model takes none of its own fog at first sight and all of it once solid.
+  Off (the old path: the background seen through a fading model takes the model's fog, 5d) with no stencil bits, MSAA
+  (wxl: the sample split would clear the marks), no blend-factor cap, no R32F target, the world drawn into a target, or
+  the CVar 0. Cost when fading models are in view: two full-size R32F depth copies, a scene copy, seven stencil-tested
+  composite quads.
   It only runs with `vfogTransparent 1`. With 0, one composite after the world covers the models anyway.
 - **God rays** (vfog4): see section 2a. On by default (`vfogGodRays 1`, coa's "on" strength); coa ships `GodRays=0`.
 - **Water** (vfog5): see section 2b. On by default, as coa (`Water=1`). Ripples and wakes (vfog7): section 2b, ripples.
@@ -87,11 +96,8 @@ The decisions:
   writes, i.e. after the conversion back to display space in LinearOverSceneCopy. coa's own dither was removed earlier
   as an fps regression that was **never isolated** (wxl-vfog/wxl-light composites, 2026-10-10), so it is a CVar:
   `vfogDither 0` skips it on a uniform branch (c79.x = c79.z = 0), the old path.
-- **MSAA** (vfog9): see section 3, scene depth per backend. Not ported: coa's sample split (silhouette mask and
-  per-side composite).
-- **Not ported in v1:** the GPU density probe, the overlay, ForeverGlow, and wxl's fading-doodad early draw and TopUp.
-  The fading-doodad draw is a v2 item if fading props pop; see wxl-vfog hooks.cpp DrawFadingModelsBeforeFog
-  and /root/RE/render-path/doodad-fade-*.md.
+- **MSAA** (vfog9): see section 3, scene depth per backend; coa's sample split (`vfogMsaaSplit`, D3D only): section 3, MSAA.
+- **Not ported:** the GPU density probe, the overlay, ForeverGlow, and wxl's TopUp.
 
 ## 2. Passes (RenderFog, WP6)
 
@@ -167,8 +173,17 @@ its water is skipped with the camera in liquid), so the underwater view keeps th
 interior, sound bank 1 = ocean, type 9 = river, else lake. A class waterdata.bin has no preset for stays stock.
 Magma (material 2) and slime (3) are never classified, so they keep the client's look.
 
+**Stencil scheme (`vfogWaterStencil 1`, default, coa).** In `Liquid::CRenderer::Flush` (transparent pass; coa hooks the
+same pass only): `WaterArm` sorts as in step 1 below; `Begin` (first water draw) takes the scene colour and depth copies
+(step 2), clears the stencil (`GxBufferBit_Stencil`), pushes the render states and sets stencil ALWAYS / REPLACE
+(fail and zfail KEEP); before each class's draws the ref is the class index (1..4), so the front surface's class wins
+where the depth test passes. `WaterFlushDone` pops the states, takes one depth copy of the finished water
+(VFogWaterDepth into the first mask target: positive view Z everywhere, so the shader's sign test always passes) and
+shades every drawn class with stencil EQUAL its index (coa ShadeClasses). Cost: 1 colour copy + 2 depth copies + one
+shading pass per class. Used when the scene depth has stencil bits; else, or with the CVar 0, the mask scheme:
+
 **Mask scheme (no stencil).** coa tags each class into the stencil during the client's draws and shades after the
-pass. Here, in `Liquid::CRenderer::Flush` (transparent pass; coa hooks the same pass only):
+pass. Here:
 1. `WaterArm`: after the stock qsort, a stable sort moves the water to the end grouped by class (lake, river,
    ocean, interior). The stock comparator orders by material first, so cross-material order was already arbitrary;
    inside a class the stock order holds.
@@ -209,8 +224,8 @@ shade_low/mid/high (SSR_STEPS 0/16/32); variant = quality - 1, or 1 (sky only) w
 The Vulkan translator gained `texldd` (tex2Dgrad -> textureGrad).
 
 **Deviations from coa**: CPU waves (above); scene copies clamp instead of mirror addressing (the Gx API has no
-mirror); no packed-RGBA8 depth fallback (needs R32F targets); MSAA water is shaded per pixel from one depth sample, not
-tagged and shaded per sample (no stencil, section 3);
+mirror); no packed-RGBA8 depth fallback (needs R32F targets); MSAA water is shaded from one depth sample per pixel (with the
+stencil scheme the class tags and the shading test are per sample, as coa; with the mask scheme the mask is per pixel);
 classes are shaded one after another inside the liquid pass instead of all after it (same pixels, same inputs:
 every class reads the same pre-water copy, as coa); water is drawn after the other transparent liquids; the
 scene copy is taken before the first water draw rather than before the whole liquid pass (it includes slime);
@@ -243,7 +258,6 @@ vw_ripple_step.hlsl; code `VolumetricFogWaterRipples.cpp`). Same model, constant
   it there); the clock is FrameTime (coa QPC); no ripple stats/summary log. The output is a float target, so vfogDither
   does not apply.
 
-**Left**: per-sample MSAA edges (section 3).
 
 ## 2c. Colour grading (coa grading_renderer.cpp, forever_look.cpp PrepareGrading, shaders/vp_grade.hlsl)
 
@@ -316,13 +330,31 @@ The 32x1 RGBA32F point-light texture and the 1x25 probe are dropped. Lights go i
 
 **MSAA, what is the same as coa and what is not.** As coa, the passes read one depth sample per pixel; the scene copies
 are resolves (D3D9 StretchRect, D3D11 IResolvedBackBuffer); the composite and the water draw over the multisampled
-back buffer. Deviations: (1) no sample split: coa marks the near and far samples of non-planar 3x3 depth neighbourhoods
-in the stencil with an oDepth pass and fogs each side at its own depth; Gx has no stencil states and the Vulkan
-translator no oDepth, so an edge pixel takes the fog of sample 0 (a thin halo of the wrong fog against the sky in thick
-fog). The same holds for the water, which coa tags and shades per sample. (2) No NVAPI (`NvAPI_D3D9_StretchRectEx`, coa's
+back buffer. **Sample split** (`vfogMsaaSplit 1`, coa DrawCompositeBySampleDepth / MarkSilhouetteSamples, vf_sample_split): with a
+multisampled depth the composite is drawn in four quads, the live multisampled depth-stencil bound throughout (on D3D9
+MSAA INTZ is only the RESZ copy target, so nothing sampled is bound): (1) stencil cleared, **VFogSilhouette** with
+depth test LESS, colour off, stencil ALWAYS ref 1, pass INVERT, zfail REPLACE: its oDepth is the middle depth of a
+silhouette's 3x3 neighbourhood (of the single-sample copy; non-planar or two depth classes), so per sample the far
+samples become 0xFF and the near ones 1, everything else stays 0 (clipped); (2) the plain composite, everywhere when it
+overwrites (over the scene copy) else on stencil 0; (3)/(4) **VFogCompositeSplit{Q}[L][N]** on stencil 1 / 0xFF, side in
+c80 (coa c99, the horizon band here), fogging each side at its own depth (own depth, nearest or farthest). Choice for
+oDepth: it is used as coa does, D3D9/D3D11 only. The Vulkan translator refuses VFogSilhouette ("refused x1: oDepth"),
+so `Shader()` fails there and the split is never armed: Vulkan (MSAA since vfog11) keeps sample 0's fog
+until the translator emits `gl_FragDepth`. Also off with no stencil bits, the world drawn into a target, or the CVar 0.
+Deviations: (1) the water is shaded from one depth sample per pixel (its class tags are per sample, section 2b). (2) No NVAPI (`NvAPI_D3D9_StretchRectEx`, coa's
 path on native Windows NVIDIA D3D9, where there is no RESZ): there D3D9 MSAA keeps the stock fog; D3D11 works. (3) No
 depth-copy self-test and no `Multisampling` setting: coa refuses MSAA unless its copy passes a test; here MSAA is never
-touched, and a failed or missing copy only leaves vfog off. No new CVars.
+touched, and a failed or missing copy only leaves vfog off.
+
+### Stencil (Gx, commit ab0969f)
+
+`GxRs_StencilTest/Func/Ref/ReadMask/WriteMask/Fail/ZFail/Pass` (EGxStencilCmp / EGxStencilOp = the D3D values, front
+and back alike; defaults off, ALWAYS, 0, 0xFF, 0xFF, KEEP), `GxBufferBit_Stencil` in `GxSceneClear` (to 0; D3D11/Vulkan
+the whole surface, D3D9 the viewport), `m_caps.m_stencilBits` (8 or 0). Implemented on Vulkan (pipeline key; D24S8 or
+D32S8 depth), D3D11 and D3D9/9Ex. vfog's helpers: `StencilAvailable()`, `SetStencil(...)` (VolumetricFogWater.h);
+`BeginPasses` turns the test off. Users: water tags (2b), fading-model alpha (1), MSAA sample split (above); each
+clears the stencil itself, they never overlap in a frame (water in the liquid pass, then fading, then the composite;
+fading is off with MSAA).
 
 ## 4. Depth decode (shader, vf_common)
 
@@ -405,7 +437,8 @@ match this exactly.
 
 What it needs: per-record pixel-constant rows `pconst` (stock records stay at 16, so their SPIR-V does not
 change; ours need 132), `rep/endrep`, `loop/endloop` if vkd3d emits them, `break/breakc`, `texldl`, and any
-other opcode the VFog shaders use. No vPos, oDepth or volume samplers are needed, by design.
+other opcode the VFog shaders use. No vPos or volume samplers are needed, by design; oDepth only by
+VFogSilhouette (MSAA split, D3D only), which the translator refuses on purpose (section 3).
 
 ## 6. Data and custom.MPQ
 
@@ -448,7 +481,9 @@ change `farLimit` to `horizonFar` in this one place.
 
 `vfog` (1, master), `vfogQuality` (2), `vfogTemporal` (0.85), `vfogDensity` (1), `vfogHaze` (1),
 `vfogGroundFog` (0.6), `vfogFarFog` (1), `vfogAmbient` (1.75), `vfogData` (1), `vfogLocalLights` (1),
-`vfogTransparent` (1), `vfogFadeEarly` (1; 0 = fading M2s stay in pass 1 with the fitted fog), `vfogStartOffset` (10), `vfogMaxDistance` (5000), `vfogNoise` (0.15), `vfogDebug` (0),
+`vfogTransparent` (1), `vfogFadeEarly` (1; 0 = fading M2s stay in pass 1 with the fitted fog), `vfogFadeStencil` (1, wxl-vfog
+0.6.3 alpha cross-fade; 0 = they take their own fog at any alpha), `vfogMsaaSplit` (1, coa sample split with MSAA; 0 =
+sample 0's fog), `vfogStartOffset` (10), `vfogMaxDistance` (5000), `vfogNoise` (0.15), `vfogDebug` (0),
 `vfogGodRays` (1 = on, the user's choice; coa GodRays, a 0..4 strength, 0 = off, coa ships 0),
 `vfogDither` (1 = +-1/255, 2 = +-2/255, 0 = the undithered path), `vfogHdrTargets` (1; 0 = 8-bit fog targets), grading: `vfogGrade` (0 = off, coa ColorGrading=0), `vfogGradeStrength`
 (1, 0..1, coa ColorGrading's strength when on).
@@ -456,7 +491,8 @@ Water (coa CoAVolFog.ini Water* defaults and ranges): `vfogWater` (1), `vfogWate
 `vfogWaterWaves` (1, 0..2), `vfogWaterWind` (2, 0.5..10), `vfogWaterFoam` (1, 0..2), `vfogWaterReflections` (1, 0..2),
 `vfogWaterSpecular` (1, 0..4), `vfogWaterClarity` (1, 0.25..4), `vfogWaterZoneColors` (0.5, 0..1), 
 `vfogWaterRipples` (0.5, 0..2; 0 = off: no simulation and no reading of the units; coa WaterRipples),
-`vfogWaterClientSplashes` (0 = the client's splash discs and wake trails hidden while the ripples run, 1 = kept; coa
+`vfogWaterStencil` (1 = coa's stencil class tags, 0 = the depth-difference mask; either way the mask without
+stencil bits), `vfogWaterClientSplashes` (0 = the client's splash discs and wake trails hidden while the ripples run, 1 = kept; coa
 WaterClientSplashes), `vfogWaterDebug` (0; 1 normal, 2 foam, 3 transmittance, 4 reflection, 5 class, 6 ripples).
 The defaults are coa CoAVolFog.ini plus the user's wxl-vfog look: Ambient 1.75, ClassicExposure 0.5,
 LocalLightIntensity 2.5, StartOffset 10. FarFog is 1, not wxl's 0, because no far-field plugin owns far fog
