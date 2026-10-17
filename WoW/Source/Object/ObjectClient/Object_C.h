@@ -75,7 +75,6 @@ class CGObject_C : public CGObject, public TSHashObject<CGObject_C, CHashKeyGUID
     // the unit's facing, optional melee-reach size), native. selectionCircleStyle 0 = stock.
     static CVar* s_cvSelectionCircleStyle;
     static CVar* s_cvSelectionCircleReach;
-    static CVar* s_cvSelectionCircleWater;
     static CTexture* s_selectionStyleTextures[5];
 
     static void Initialize();
