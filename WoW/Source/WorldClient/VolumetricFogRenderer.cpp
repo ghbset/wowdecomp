@@ -1,6 +1,7 @@
 // VFOG WP6: GPU passes, a port of coa-vfog src/renderer.cpp (RenderPasses :1265-1525) onto the Gx API.
 // docs/VFOG_PORT.md sections 2-5 are the spec: pass list, targets, register and sampler contract.
-// Not ported (doc section 1): god rays, the scene-copy blends, the MSAA split, the depth probe, logging.
+// God rays: coa DrawGodRayMask / DrawGodRaysOverScene (renderer.cpp:1189-1260), always drawn after the world.
+// Not ported (doc section 1): the MSAA split, the depth probe, logging.
 #include "WoW/Source/WorldClient/VolumetricFogModel.h"
 #include <algorithm>
 #include <cmath>
@@ -38,6 +39,13 @@ constexpr float kHistoryMinForwardDot = 0.70710678f;
 constexpr double kMaxNoiseStepSeconds = 0.25;       // coa renderer.cpp:67
 constexpr float kNearQuarterTurn = 1.57f;           // wxl-vfog ec1c66b
 constexpr uint32_t kMinTargetSize = 8;              // GxTexCreate's minimum
+constexpr uint32_t kRayScale = 4;                   // coa renderer.cpp:68-83, 244
+constexpr float kRayFalloff = 8.0f;
+constexpr float kRayThreshold = 0.12f;
+constexpr float kRayStep = 0.075f;
+constexpr float kRayDecay = 0.9f;
+constexpr int kRayTaps = 8;
+constexpr float kMinGodRayStrength = 0.005f;
 
 enum Blend { Blend_GammaFixedFunction = 0, Blend_LinearOverSceneCopy = 1, Blend_LinearFixedFunction = 2 };     // coa FogBlend
 
@@ -46,6 +54,9 @@ struct Shaders {
     CGxShader* composite[3][2][2];
     CGxShader* temporal;
     CGxShader* historyDepth;
+    CGxShader* rayMask;
+    CGxShader* rayBlur;
+    CGxShader* rayComposite;
 };
 
 struct Targets {
@@ -57,6 +68,17 @@ struct Targets {
     CGxTex* sceneCopy;          // full world viewport, coa LinearOverSceneCopy (s3)
     uint32_t sceneCopyWidth;
     uint32_t sceneCopyHeight;
+    CGxTex* rays[2];            // world viewport / kRayScale, bilinear: [1] mask -> [0] blur -> [1] blur
+    uint32_t rayWidth;
+    uint32_t rayHeight;
+};
+
+// coa GodRayFrame: drawn by RenderGodRays at the end of the world.
+struct GodRays {
+    bool pending;
+    float strength;
+    float colour[3];
+    float glow;
 };
 
 struct History {
@@ -84,6 +106,7 @@ bool s_callbackAdded;
 bool s_depthUnsupported;        // DeviceCopySceneDepth gave nullptr; cleared on device restore
 bool s_shaderMissing;           // a needed VFog shader is not in the MPQ
 bool s_overSceneCopy;           // the last composite blended in linear light over a scene copy
+GodRays s_godRays;
 
 CGxShader* Shader(CGxShader*& slot, const char* name) {
     if (!slot) {
@@ -115,6 +138,11 @@ void DestroyTargets() {
     DestroyTex(s_targets.sceneCopy);
     s_targets.sceneCopyWidth = 0;
     s_targets.sceneCopyHeight = 0;
+    DestroyTex(s_targets.rays[0]);
+    DestroyTex(s_targets.rays[1]);
+    s_targets.rayWidth = 0;
+    s_targets.rayHeight = 0;
+    s_godRays.pending = false;
 
     s_targets.width = 0;
     s_targets.height = 0;
@@ -128,9 +156,9 @@ void __fastcall OnDeviceRestored() {
     s_depthUnsupported = false;     // MSAA may have changed with the reset
 }
 
-CGxTex* CreateTarget(uint32_t width, uint32_t height) {
+CGxTex* CreateTarget(uint32_t width, uint32_t height, EGxTexFilter filter = GxTex_Nearest) {
     CGxTex* tex = nullptr;
-    CGxTexFlags flags(GxTex_Nearest, 0, 0, 0, 0, 1, 1, 0, 0, 0);
+    CGxTexFlags flags(filter, 0, 0, 0, 0, 1, 1, 0, 0, 0);
     g_theGxDevicePtr->TexCreate(GxTex_2d, width, height, 0, GxTex_Argb8888, GxTex_Argb8888, flags, nullptr, GxTexNullUserFunc, "VFogTarget", tex);
     return tex;
 }
@@ -157,12 +185,33 @@ bool EnsureTargets(uint32_t width, uint32_t height) {
     return true;
 }
 
+// coa renderer.cpp:1176 god ray targets, world viewport / 4 (coa :1276), bilinear and clamped.
+bool EnsureRayTargets(uint32_t width, uint32_t height) {
+    if (s_targets.rays[0] && s_targets.rays[1] && s_targets.rayWidth == width && s_targets.rayHeight == height) {
+        return true;
+    }
+    DestroyTex(s_targets.rays[0]);
+    DestroyTex(s_targets.rays[1]);
+    s_targets.rays[0] = CreateTarget(width, height, GxTex_Linear);
+    s_targets.rays[1] = CreateTarget(width, height, GxTex_Linear);
+    if (!s_targets.rays[0] || !s_targets.rays[1]) {
+        DestroyTex(s_targets.rays[0]);
+        DestroyTex(s_targets.rays[1]);
+        return false;
+    }
+    s_targets.rayWidth = width;
+    s_targets.rayHeight = height;
+    return true;
+}
+
 // coa renderer.cpp:1446 LinearOverSceneCopy: the world viewport of the back buffer, before the fog. Every backend's
 // TexCopy reads the back buffer (D3D9 StretchRect, D3D11 resolved back buffer, Vulkan frame::CopyFromScene).
+// Bilinear: the god ray mask samples it at quarter-res texel centres (coa's linear StretchRect); every other read
+// is at a texel centre, where bilinear is the texel.
 CGxTex* CopySceneBeforeFog(uint32_t x, uint32_t y, uint32_t width, uint32_t height) {
     if (!s_targets.sceneCopy || s_targets.sceneCopyWidth != width || s_targets.sceneCopyHeight != height) {
         DestroyTex(s_targets.sceneCopy);
-        s_targets.sceneCopy = CreateTarget(width, height);
+        s_targets.sceneCopy = CreateTarget(width, height, GxTex_Linear);
         if (!s_targets.sceneCopy) {
             return nullptr;
         }
@@ -339,6 +388,83 @@ void DrawQuad(uint32_t width, uint32_t height, float minX = 0.0f, float maxX = 1
     g_theGxDevicePtr->Draw(&s_batch, 1);
 }
 
+// World viewport in pixels of the current target, D3D-style top-left origin (coa D3DVIEWPORT9), from the
+// live Gx viewport: the same formula every backend uses for the back buffer (CGxDeviceD3d::IXformSetViewport).
+struct WorldViewport {
+    CGxTex* target;     // nullptr = the back buffer
+    float minX, maxX, minY, maxY, minZ, maxZ;
+    float x, y, w, h;
+};
+
+WorldViewport LiveWorldViewport() {
+    WorldViewport vp = {};
+    CGxDevice* device = g_theGxDevicePtr;
+    device->DeviceGetRenderTarget(GxBuffers_Color, vp.target);
+    const CRect window = device->DeviceCurWindow();
+    GxXformViewport(vp.minX, vp.maxX, vp.minY, vp.maxY, vp.minZ, vp.maxZ);
+    float screenW = window.maxX - window.minX;
+    float screenH = window.maxY - window.minY;
+    vp.x = std::floor(vp.minX * screenW + 0.5f);
+    vp.y = vp.target ? std::floor(vp.minY * screenH + 0.5f) : std::floor((1.0f - vp.maxY) * screenH + 0.5f);
+    vp.w = std::floor(vp.maxX * screenW - vp.x + 0.5f);
+    vp.h = vp.target ? std::floor((vp.maxY - vp.minY) * screenH + 0.5f) : std::floor((1.0f - vp.minY) * screenH - vp.y + 0.5f);
+    return vp;
+}
+
+// Full-screen pass state; EndPasses undoes all of it.
+struct SavedPassState {
+    float constants[kSavedPixelRegisters * 4];
+    C44Matrix projection;
+    C44Matrix view;
+};
+
+void BeginPasses(SavedPassState& saved) {
+    CGxDevice* device = g_theGxDevicePtr;
+    std::memcpy(saved.constants, CGxDevice::s_shadowConstants[0].constants, sizeof(saved.constants));     // [0] = pixel
+    GxXformProjection(saved.projection);
+    GxXformView(saved.view);
+    C44Matrix identity;
+    GxXformSetView(identity);
+    GxXformPush(GxXform_World);
+    device->m_xforms[GxXform_World].Identity();
+
+    device->RsPush();
+    GxRsSet(GxRs_VertexShader, static_cast<void*>(nullptr));
+    GxRsSet(GxRs_Culling, 0);
+    GxRsSet(GxRs_Lighting, 0);
+    GxRsSet(GxRs_DepthTest, 0);
+    GxRsSet(GxRs_DepthWrite, 0);
+    GxRsSet(GxRs_Fog, 0);
+    GxRsSet(GxRs_ClipPlaneMask, 0);
+    GxRsSet(GxRs_BlendingMode, GxBlend_Opaque);
+    GxRsSet(GxRs_ColorWrite, 15);
+    GxRsSet(GxRs_ScissorTest, 0);
+}
+
+void EndPasses(const SavedPassState& saved, const WorldViewport& vp) {
+    for (int stage = 0; stage <= 4; stage++) {
+        Bind(stage, nullptr);
+    }
+    g_theGxDevicePtr->RsPop();
+    GxXformPop(GxXform_World);
+    GxXformSetView(saved.view);
+    GxXformSetProjection(saved.projection);
+    GxXformSetViewport(vp.minX, vp.maxX, vp.minY, vp.maxY, vp.minZ, vp.maxZ);
+    SetPs(0, saved.constants, kSavedPixelRegisters);
+}
+
+// Scissored to the world viewport of the back buffer, RGB only.
+void ScissorToWorld(const WorldViewport& vp) {
+    CRect world;
+    world.minX = vp.minX;
+    world.maxX = vp.maxX;
+    world.minY = vp.minY;
+    world.maxY = vp.maxY;
+    g_theGxDevicePtr->SetScissor(world);
+    GxRsSet(GxRs_ScissorTest, 1);
+    GxRsSet(GxRs_ColorWrite, 7);
+}
+
 void DrawToTarget(CGxTex* target, CGxShader* shader) {
     GxRenderTargetSet(GxBuffers_Color, target, 0);
     g_theGxDevicePtr->RsSet(GxRs_PixelShader, shader);
@@ -371,19 +497,11 @@ bool RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg,
         return false;
     }
 
-    // World viewport in pixels of the current target, D3D-style top-left origin (coa D3DVIEWPORT9), from the
-    // live Gx viewport: the same formula every backend uses for the back buffer (CGxDeviceD3d::IXformSetViewport).
-    CGxTex* prevTarget = nullptr;
-    device->DeviceGetRenderTarget(GxBuffers_Color, prevTarget);
-    const CRect window = device->DeviceCurWindow();
-    float vpMinX, vpMaxX, vpMinY, vpMaxY, vpMinZ, vpMaxZ;
-    GxXformViewport(vpMinX, vpMaxX, vpMinY, vpMaxY, vpMinZ, vpMaxZ);
-    float screenW = window.maxX - window.minX;
-    float screenH = window.maxY - window.minY;
-    float vpX = std::floor(vpMinX * screenW + 0.5f);
-    float vpY = prevTarget ? std::floor(vpMinY * screenH + 0.5f) : std::floor((1.0f - vpMaxY) * screenH + 0.5f);
-    float vpW = std::floor(vpMaxX * screenW - vpX + 0.5f);
-    float vpH = prevTarget ? std::floor((vpMaxY - vpMinY) * screenH + 0.5f) : std::floor((1.0f - vpMinY) * screenH - vpY + 0.5f);
+    s_godRays.pending = false;
+    const WorldViewport vp = LiveWorldViewport();
+    CGxTex* prevTarget = vp.target;
+    const float vpX = vp.x, vpY = vp.y, vpW = vp.w, vpH = vp.h;
+    const float vpMinX = vp.minX, vpMaxX = vp.maxX, vpMinY = vp.minY, vpMaxY = vp.maxY;
 
     uint32_t scale = cfg.quality == 1 ? 4u : 2u;
     uint32_t lowW = (static_cast<uint32_t>(vpW) + scale - 1) / scale;
@@ -520,38 +638,28 @@ bool RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg,
     float march[4] = { temporal ? 1.0f : 0.0f, fog.maxDistance, fog.horizonStart, fog.farClip };
     float localControl[4] = { static_cast<float>(lightCount), marchLightLimit, cfg.localLightPhase, 0.0f };
 
-    // Sun position for c98 (coa :1338-1347); the marker and god rays are not drawn.
+    // Sun position for c98 and the god rays (coa :1338-1347); the marker is not drawn.
     float sunPx[2] = {};
+    float sunScreenFade = 0.0f;
     if (toLightInView[2] > 0.05f) {
         float ndcX = toLightInView[0] / toLightInView[2] * proj[0] + proj[8];
         float ndcY = toLightInView[1] / toLightInView[2] * proj[5] + proj[9];
         sunPx[0] = vpX + (ndcX * 0.5f + 0.5f) * vpW;
         sunPx[1] = vpY + (0.5f - ndcY * 0.5f) * vpH;
+        sunScreenFade = std::clamp(1.6f - std::max(std::fabs(ndcX), std::fabs(ndcY)), 0.0f, 1.0f);
     }
 
-    // ---- state: everything below is undone at the end --------------------------------------------
-    float savedConstants[kSavedPixelRegisters * 4];
-    std::memcpy(savedConstants, CGxDevice::s_shadowConstants[0].constants, sizeof(savedConstants));     // [0] = pixel
-    C44Matrix savedProjection;
-    C44Matrix savedView;
-    GxXformProjection(savedProjection);
-    GxXformView(savedView);
-    C44Matrix identity;
-    GxXformSetView(identity);
-    GxXformPush(GxXform_World);
-    device->m_xforms[GxXform_World].Identity();
+    // coa :1344. The rays need the back buffer (scene copies) and their three shaders; without them the fog still draws.
+    const float rayStrength = cfg.godRays * fog.lightVisibility * sunScreenFade;
+    const uint32_t rayW = std::max(kMinTargetSize, static_cast<uint32_t>(vpW) / kRayScale);
+    const uint32_t rayH = std::max(kMinTargetSize, static_cast<uint32_t>(vpH) / kRayScale);
+    const bool rays = rayStrength > kMinGodRayStrength && !prevTarget && Shader(s_shaders.rayMask, "VFogRayMask")
+        && Shader(s_shaders.rayBlur, "VFogRayBlur") && Shader(s_shaders.rayComposite, "VFogRayComposite")
+        && EnsureRayTargets(rayW, rayH);
 
-    device->RsPush();
-    GxRsSet(GxRs_VertexShader, static_cast<void*>(nullptr));
-    GxRsSet(GxRs_Culling, 0);
-    GxRsSet(GxRs_Lighting, 0);
-    GxRsSet(GxRs_DepthTest, 0);
-    GxRsSet(GxRs_DepthWrite, 0);
-    GxRsSet(GxRs_Fog, 0);
-    GxRsSet(GxRs_ClipPlaneMask, 0);
-    GxRsSet(GxRs_BlendingMode, GxBlend_Opaque);
-    GxRsSet(GxRs_ColorWrite, 15);
-    GxRsSet(GxRs_ScissorTest, 0);
+    // ---- state: everything below is undone at the end --------------------------------------------
+    static SavedPassState s_saved;     // 2 KB of constants, off the stack
+    BeginPasses(s_saved);
 
     SetPs(0, &common[0][0], 9);
     SetPs(kHorizonBandRegister, in.horizonBand, 1);
@@ -617,18 +725,13 @@ bool RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg,
 
     // ---- composite onto the scene target (coa :1450-1499), premultiplied as straight alpha ----------
     GxRenderTargetSet(GxBuffers_Color, prevTarget, 0);
-    CRect world;
-    world.minX = vpMinX;
-    world.maxX = vpMaxX;
-    world.minY = vpMinY;
-    world.maxY = vpMaxY;
-    device->SetScissor(world);
-    GxRsSet(GxRs_ScissorTest, 1);
-    GxRsSet(GxRs_ColorWrite, 7);    // RGB
+    ScissorToWorld(vp);
 
     // coa's default for ColorSpace=1: blend in linear light over a copy of the scene, drawn opaque; the
     // fixed-function alpha blend is the fallback when the copy fails (or the world is not on the back buffer).
-    CGxTex* sceneCopy = fog.linear && !prevTarget ? CopySceneBeforeFog(static_cast<uint32_t>(vpX), static_cast<uint32_t>(vpY), static_cast<uint32_t>(vpW), static_cast<uint32_t>(vpH)) : nullptr;
+    // The god ray mask reads the same copy (coa CopySceneForGodRays :1440, taken whenever rays draw).
+    CGxTex* copy = (fog.linear || rays) && !prevTarget ? CopySceneBeforeFog(static_cast<uint32_t>(vpX), static_cast<uint32_t>(vpY), static_cast<uint32_t>(vpW), static_cast<uint32_t>(vpH)) : nullptr;
+    CGxTex* sceneCopy = fog.linear ? copy : nullptr;
     s_overSceneCopy = sceneCopy != nullptr;
     GxRsSet(GxRs_BlendingMode, sceneCopy ? GxBlend_Opaque : GxBlend_Alpha);
     const Blend blend = sceneCopy ? Blend_LinearOverSceneCopy : fog.linear ? Blend_LinearFixedFunction : Blend_GammaFixedFunction;
@@ -656,17 +759,53 @@ bool RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg,
     DrawQuad(static_cast<uint32_t>(vpW), static_cast<uint32_t>(vpH), vpMinX, vpMaxX, vpMinY, vpMaxY);
     device->DeviceSceneDepthBound(true);
 
+    // ---- god ray mask + radial blur (coa DrawGodRayMask :1200-1232) ----------------------------------
+    // coa draws these at the end of the world in its early mode (RenderGodRaysAfterWorld), from the scene copy it
+    // took here: the same inputs, so drawing them now gives the same rays. RenderGodRays composites them.
+    if (rays && copy) {
+        GxRsSet(GxRs_ScissorTest, 0);
+        GxRsSet(GxRs_ColorWrite, 15);
+        GxRsSet(GxRs_BlendingMode, GxBlend_Opaque);
+        const float mask[2][4] = {
+            { toLightInView[0], toLightInView[1], toLightInView[2], kRayFalloff },
+            { 0.0f, kRayThreshold, 1.0f / rayW, 1.0f / rayH },
+        };
+        SetPs(9, &mask[0][0], 2);
+        for (int stage = 1; stage <= 4; stage++) {
+            Bind(stage, nullptr);
+        }
+        Bind(0, depth);
+        Bind(1, copy);
+        device->DeviceSceneDepthBound(false);
+        DrawToTarget(s_targets.rays[1], s_shaders.rayMask);
+        device->DeviceSceneDepthBound(true);
+        Bind(1, nullptr);
+
+        float norm = 0.0f;
+        for (int k = 0; k < kRayTaps; k++) {
+            norm += std::pow(kRayDecay, static_cast<float>(k));
+        }
+        float step = kRayStep;
+        for (int pass = 0; pass < 2; pass++) {
+            const float blur[2][4] = {
+                { (sunPx[0] - vpX) / vpW, (sunPx[1] - vpY) / vpH, step, 1.0f / norm },
+                { static_cast<float>(rayW), static_cast<float>(rayH), 1.0f / rayW, 1.0f / rayH },
+            };
+            SetPs(9, &blur[0][0], 2);
+            Bind(0, s_targets.rays[pass == 0 ? 1 : 0]);
+            DrawToTarget(s_targets.rays[pass == 0 ? 0 : 1], s_shaders.rayBlur);
+            step /= kRayTaps;
+        }
+        GxRenderTargetSet(GxBuffers_Color, prevTarget, 0);
+
+        s_godRays.pending = true;
+        s_godRays.strength = rayStrength;
+        std::memcpy(s_godRays.colour, fog.rayColor, sizeof(s_godRays.colour));
+        s_godRays.glow = cfg.glowCompensation ? in.clientGlowAmount : 0.0f;
+    }
+
     // ---- restore ------------------------------------------------------------------------------------
-    Bind(0, nullptr);
-    Bind(1, nullptr);
-    Bind(3, nullptr);
-    Bind(4, nullptr);
-    device->RsPop();
-    GxXformPop(GxXform_World);
-    GxXformSetView(savedView);
-    GxXformSetProjection(savedProjection);
-    GxXformSetViewport(vpMinX, vpMaxX, vpMinY, vpMaxY, vpMinZ, vpMaxZ);
-    SetPs(0, savedConstants, kSavedPixelRegisters);
+    EndPasses(s_saved, vp);
 
     // coa :1510-1522
     std::memcpy(s_history.worldToView, worldToView, sizeof(worldToView));
@@ -681,6 +820,41 @@ bool RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg,
     s_history.seconds = seconds;
     s_history.valid = temporal;
     return true;
+}
+
+// coa DrawGodRaysOverScene :1234-1260: the blurred rays over a copy of the finished world, drawn opaque.
+void RenderGodRays() {
+    CGxDevice* device = g_theGxDevicePtr;
+    if (!s_godRays.pending || !device) {
+        return;
+    }
+    s_godRays.pending = false;
+
+    const WorldViewport vp = LiveWorldViewport();
+    if (vp.target || vp.w < 1.0f || vp.h < 1.0f) {
+        return;
+    }
+    CGxTex* scene = CopySceneBeforeFog(static_cast<uint32_t>(vp.x), static_cast<uint32_t>(vp.y), static_cast<uint32_t>(vp.w), static_cast<uint32_t>(vp.h));
+    if (!scene) {
+        return;     // coa "no scene copy for the god rays"
+    }
+
+    static SavedPassState s_saved;
+    BeginPasses(s_saved);
+    ScissorToWorld(vp);
+    const float viewport[4] = { vp.x, vp.y, vp.w, vp.h };
+    const float composite[3][4] = {
+        { 0.0f, s_godRays.strength, 0.0f, 0.0f },
+        { s_godRays.colour[0], s_godRays.colour[1], s_godRays.colour[2], 0.0f },
+        { 0.0f, 0.0f, 0.0f, s_godRays.glow },
+    };
+    SetPs(0, viewport, 1);
+    SetPs(kCompositeRegister, &composite[0][0], 3);
+    Bind(2, s_targets.rays[1]);
+    Bind(3, scene);
+    device->RsSet(GxRs_PixelShader, s_shaders.rayComposite);
+    DrawQuad(static_cast<uint32_t>(vp.w), static_cast<uint32_t>(vp.h), vp.minX, vp.maxX, vp.minY, vp.maxY);
+    EndPasses(s_saved, vp);
 }
 
 bool CompositeOverSceneCopy() {
@@ -707,6 +881,7 @@ void RendererShutdown() {
 
     s_shaders = Shaders {};
     s_history = History {};
+    s_godRays = GodRays {};
     s_noiseSeconds = -1.0;
     s_callbackAdded = false;
     s_depthUnsupported = false;

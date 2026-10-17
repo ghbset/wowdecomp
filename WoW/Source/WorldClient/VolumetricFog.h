@@ -55,6 +55,7 @@ struct Config {
     float startOffset = 10.0f;      // vfogStartOffset (wxl-vfog 0.6.11)
     float temporal = 0.85f;         // vfogTemporal (0 = off, no jitter)
     int debugView = 0;              // vfogDebug 0..3
+    float godRays = 0.0f;           // vfogGodRays: coa GodRays, 0 = off, 0..4 strength
 };
 
 // ---- per-frame engine inputs (coa-vfog src/engine.h FrameInputs, read natively) ----------------
@@ -181,6 +182,7 @@ bool RendererReady();                       // shaders loaded and the device giv
 bool RenderFog(const FogParams& fog, const FrameInputs& in, const Config& cfg, uint32_t frame, double seconds);
 void InvalidateHistory();
 bool CompositeOverSceneCopy();              // last RenderFog blended over a scene copy (coa LinearOverSceneCopy)
+void RenderGodRays();                       // OnWorldDone: the rays the last RenderFog masked, over the finished world
 void RendererShutdown();
 
 // ===== WP7 driver: VolumetricFog.cpp

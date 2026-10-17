@@ -62,6 +62,7 @@ struct CVars {
     CVar* maxDistance;
     CVar* noise;
     CVar* debug;
+    CVar* godRays;
 };
 
 struct SavedFog {
@@ -120,6 +121,7 @@ Config ReadConfig() {
     cfg.maxDistance = std::max(CVarFloat(s_cvars.maxDistance, cfg.maxDistance), 100.0f);
     cfg.noiseAmount = std::clamp(CVarFloat(s_cvars.noise, cfg.noiseAmount), 0.0f, 1.0f);
     cfg.debugView = std::clamp(CVarInt(s_cvars.debug, 0), 0, 3);
+    cfg.godRays = std::clamp(CVarFloat(s_cvars.godRays, cfg.godRays), 0.0f, 4.0f);   // coa config.cpp:75
     return cfg;
 }
 
@@ -423,6 +425,7 @@ void RegisterCVars() {
     s_cvars.maxDistance = CVar::Register("vfogMaxDistance", "Volumetric fog maximum march distance (yards)", 1, "5000", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.noise = CVar::Register("vfogNoise", "Volumetric fog density noise amount", 1, "0.15", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.debug = CVar::Register("vfogDebug", "Volumetric fog debug view (0..3)", 1, "0", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    s_cvars.godRays = CVar::Register("vfogGodRays", "Volumetric fog god rays from the bright sky around the sun: 0 = off, up to 4 = strength", 1, "0", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
 
     g_vfogM2BatchFog = &BatchFog;
     g_vfogM2FogParticles = &FogParticles;
@@ -562,6 +565,8 @@ void OnWorldDone() {
     if (s_active && !s_cfg.transparentFog) {
         Composite();
     }
+    // coa RenderGodRaysOverTheWorld: after the whole world, before FFX glow. Only a RenderFog this frame arms it.
+    RenderGodRays();
     s_armed = false;
     s_glareDrawn = false;
     RestoreStockFog();

@@ -18,7 +18,7 @@ ShaderSrc as the working directory (vkd3d-compiler has no -D; the fxc wrapper re
 
 VFog (docs/VFOG_PORT.md section 5): VFogMarch{Q}[L][N] and VFogComposite{Q}[L][N], Q = 1/2/3 (STEPS
 16/24/32 as coa-vfog CMakeLists.txt), L = LOCAL_LIGHTS, N = VF_NOISE (density variation + authored noise),
-plus VFogTemporal and VFogHistoryDepth.
+plus VFogTemporal and VFogHistoryDepth, and the god rays VFogRayMask, VFogRayBlur and VFogRayComposite.
 """
 import argparse
 import concurrent.futures
@@ -45,6 +45,10 @@ def samplers(*regs):
 SHADERS = {
     'VFogTemporal': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 1, 2, 3), 0, 'VFogTemporal', {}),
     'VFogHistoryDepth': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0), 0, 'VFogHistoryDepth', {}),
+    # god rays (coa vf_ray_*): mask, radial blur x2, composite after the world
+    'VFogRayMask': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 1), 0, 'VFogRayMask', {}),
+    'VFogRayBlur': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0), 0, 'VFogRayBlur', {}),
+    'VFogRayComposite': ('ps_3_0', TEXCOORD0, COLOR0, samplers(2, 3), 0, 'VFogRayComposite', {}),
 }
 for _q, _steps in ((1, 16), (2, 24), (3, 32)):
     for _lights in (0, 1):

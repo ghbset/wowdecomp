@@ -54,7 +54,8 @@ The decisions:
   get the fitted linear fog. The fit uses the screen-wide fit, or the per-model fit when the model is past the
   fit range (wxl-vfog 0.4/0.6.13).
 - **Under water: off**, with stock fog (coa `Underwater=0`). The under-water branch has no early composite.
-- **Not ported in v1:** water (vw_*), god rays (default off in coa; FFX glow covers the look), the MSAA
+- **God rays** (vfog4): see section 2a. Off by default, as coa (`GodRays=0`).
+- **Not ported in v1:** water (vw_*), the MSAA
   split/silhouette, the GPU density probe, grading, the overlay, and wxl's fading-doodad early draw and TopUp.
   The fading-doodad draw is a v2 item if fading props pop; see wxl-vfog hooks.cpp DrawFadingModelsBeforeFog
   and /root/RE/render-path/doodad-fade-*.md.
@@ -85,6 +86,31 @@ around the composite (`DeviceSceneDepthBound`). `GxRs_ColorWrite` is
 RGB only, and depth test and write are off. Linear mode (ColorSpace=1) does the gamma math in the shader
 as coa does. Use the blend-over-scene-copy path only if the premultiplied form shows banding.
 
+## 2a. God rays (coa DrawGodRayMask / DrawGodRaysOverScene, renderer.cpp:1189-1260)
+
+Drawn when `vfogGodRays * lightVisibility * sunScreenFade > 0.005` (coa :1344): lightVisibility is the model's
+sun/moon elevation fade (moon scaled, interior-weighted), sunScreenFade = clamp(1.6 - max|ndc|, 0, 1) of the
+DayNight light direction projected through the main projection. Needs the back buffer (no rays when the world
+draws into a target) and the three shaders; without them the fog still draws. Under water: off with the fog.
+
+1. In RenderFog, after the composite: **VFogRayMask** into rays[1] (world viewport / 4, bilinear, clamped):
+   bright sky (depth > c99.y) around the sun, `pow(dot(view, toLight), 8)`, luma threshold 0.12 x 4 ramp. It
+   reads the pre-fog scene copy (taken whenever rays draw, even if the fog blend does not use it), bilinear at
+   the ray texel centre = coa's linear StretchRect into the quarter-res target.
+2. **VFogRayBlur** twice: rays[1] -> rays[0] at step 0.075, rays[0] -> rays[1] at 0.075/8; 8 taps toward the
+   sun uv, decay 0.9, normalised by the tap weight sum.
+3. In OnWorldDone (both vfogTransparent modes, before FFX glow): **VFogRayComposite** over a fresh copy of
+   the finished world viewport, opaque, RGB: `displayed += (1 - displayed) * (1 - exp(-rays * rayColor * strength))`
+   with the client glow compensation (c98.w). rayColor = sun colour (moon: direct), or the authored halo hue.
+
+Deviations from coa: coa folds the rays into the fog composite when that composite is the last pass
+(TransparentFog=0); here they are always a separate pass after the world, which is coa's own TransparentFog=1
+path. The difference is one 8-bit round trip of the fogged scene. coa draws the mask and blur at the end of
+the world in its early mode; here they are drawn at composite time from the same inputs (pre-fog copy, depth,
+sun), so the rays are the same. Registers: mask c9 (toLight view, falloff), c10 (0, threshold, 1/ray size);
+blur c9 (sun uv, step, 1/norm); composite c96.y strength, c97 colour, c98.w glow; samplers mask s0 depth,
+s1 scene; blur s0; composite s2 rays, s3 scene.
+
 History invalidation follows coa renderer.cpp:1323-1332: settings, map, screen-effect slot or
 projection/viewport change; forward dot < 0.707; a frame gap over 0.25 s; a move over 30 yd. Key it on the
 view matrix, never on a frame counter, because water reflection re-runs world passes (wxl lesson).
@@ -97,6 +123,8 @@ viewport size change or device restore.
 | Target | Size | Format | Notes |
 |---|---|---|---|
 | march | low | `GxTex_Argb8888` | coa's own fallback from A16B16G16R16F. Add an RGBA16F EGxTexFormat only if banding shows |
+| rays[2] | viewport / 4 | `GxTex_Argb8888`, bilinear | god rays (section 2a), created on first use |
+| scene copy | world viewport | `GxTex_Argb8888`, bilinear | pre-fog copy (s3, ray mask), reused for the post-world ray composite |
 | history[2] | low | `GxTex_Argb8888` | ping-pong |
 | historyDepth[2] | low | `GxTex_Argb8888` | packed 16-bit viewZ + depth class (vf_history_depth) |
 | scene depth | full | backend-owned | `DeviceCopySceneDepth()` |
@@ -143,9 +171,10 @@ to `Shaders/Pixel/ps_3_0/*.bls` (D3D9) and `ps_4_0` (D3D11, shader-xlate), and V
 | VFogComposite{Q}{L?}{N?} | same | vf_composite.hlsl/.hlsli |
 | VFogTemporal | 1 | vf_temporal.hlsl |
 | VFogHistoryDepth | 1 | vf_history_depth.hlsl |
+| VFogRayMask, VFogRayBlur, VFogRayComposite | 1 each | vf_ray_mask/blur/composite.hlsl (section 2a) |
 
 Names are built as `VFogMarch2`, `VFogMarch2L`, `VFogMarch2N` and `VFogMarch2LN`: 12 march + 12 composite +
-2 = 26 shaders. Unroll layer loops (`[unroll]` over the 4 layers), because vkd3d turns indexed constant
+2 = 26 shaders, plus the 3 god ray shaders. Unroll layer loops (`[unroll]` over the 4 layers), because vkd3d turns indexed constant
 arrays into cmp chains. The step loop stays a `[loop]`.
 
 Pixel registers are the same as coa (vf_common.hlsli, vf_integrate.hlsli, etc.) except where marked:
@@ -172,7 +201,7 @@ Pixel registers are the same as coa (vf_common.hlsli, vf_integrate.hlsli, etc.) 
 | Sampler | Use |
 |---|---|
 | s0 | scene depth (point) |
-| s1-s4 | composite: fog/history, unused god rays, unused scene copy, current march. Temporal: current, history, depth, historyDepth |
+| s1-s4 | composite: fog/history, god rays (VFogRayComposite only), scene copy, current march. Temporal: current, history, depth, historyDepth |
 | s9 | density noise atlas (bilinear, wrap) |
 | s10 | authored noise atlas (bilinear, wrap) |
 
@@ -233,7 +262,8 @@ change `farLimit` to `horizonFar` in this one place.
 
 `vfog` (1, master), `vfogQuality` (2), `vfogTemporal` (0.85), `vfogDensity` (1), `vfogHaze` (1),
 `vfogGroundFog` (0.6), `vfogFarFog` (1), `vfogAmbient` (1.75), `vfogData` (1), `vfogLocalLights` (1),
-`vfogTransparent` (1), `vfogStartOffset` (10), `vfogMaxDistance` (5000), `vfogNoise` (0.15), `vfogDebug` (0).
+`vfogTransparent` (1), `vfogStartOffset` (10), `vfogMaxDistance` (5000), `vfogNoise` (0.15), `vfogDebug` (0),
+`vfogGodRays` (0 = off; coa GodRays, a 0..4 strength, 1 is coa's "on").
 The defaults are coa CoAVolFog.ini plus the user's wxl-vfog look: Ambient 1.75, ClassicExposure 0.5,
 LocalLightIntensity 2.5, StartOffset 10. FarFog is 1, not wxl's 0, because no far-field plugin owns far fog
 now. **No dither**: it is a known fps regression. The remaining Config fields are constants in code
