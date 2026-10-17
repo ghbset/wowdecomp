@@ -14,6 +14,8 @@ The output is Tools/VulkanShaders/translated/ (gitignored; --out elsewhere). The
 <folder of the executable>\\VulkanShaders\\manifest.txt with vertex\\ and pixel\\ beside it, or the
 folder named by the GX_VULKAN_SHADERS environment variable; --deploy copies the manifest and every
 .spv into <client>\\VulkanShaders\\, removing stale modules.
+Data\\custom.MPQ (Tools/CustomMpq/build_custom_mpq.py) packs that folder and is read first;
+the loose folder is the fallback, and the only source while GX_VULKAN_SHADERS is set.
 """
 import argparse
 import glob

@@ -105,6 +105,15 @@ namespace gxvk::vk::manifest
     const char* Folder();
 
     /**
+     * Reads VulkanShaders\\<relative> out of the client's archives (Data\\custom.MPQ). False when the
+     * archives lack it, or when GX_VULKAN_SHADERS is set (a dev folder then wins), so the caller
+     * reads the loose file instead.
+     *
+     * @param out : new[]'d, NUL-terminated past size; the caller delete[]s it
+     */
+    bool ReadPacked(const char* relative, char*& out, size_t& size);
+
+    /**
      * The record with this content hash.
      *
      * @param const char* md5 : 32 lowercase hex characters

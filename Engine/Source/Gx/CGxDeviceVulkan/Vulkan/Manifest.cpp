@@ -2,6 +2,7 @@
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Manifest.hpp"
 
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Log.hpp"
+#include "Engine/Source/BlizzardCore/SFile2-Core.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -296,6 +297,29 @@ namespace
 
 namespace gxvk::vk::manifest
 {
+    bool ReadPacked(const char* relative, char*& out, size_t& size)
+    {
+        out  = nullptr;
+        size = 0;
+        if (std::getenv("GX_VULKAN_SHADERS")) return false;
+        char name[512];
+        std::snprintf(name, sizeof name, "VulkanShaders\\%s", relative);
+        for (char* p = name; *p; ++p)
+            if (*p == '/') *p = '\\';
+        void*    data  = nullptr;
+        uint32_t bytes = 0;
+        if (!SFile::LoadFile(name, &data, &bytes, 0, nullptr)) return false;
+        out = new (std::nothrow) char[bytes + 1];
+        if (out)
+        {
+            std::memcpy(out, data, bytes);
+            out[bytes] = '\0';
+            size       = bytes;
+        }
+        SFile::Unload(data);
+        return out != nullptr;
+    }
+
     bool Load(const char* folder)
     {
         Unload();
@@ -306,7 +330,7 @@ namespace gxvk::vk::manifest
         std::snprintf(path, sizeof path, "%s\\manifest.txt", folder);
         char*  text = nullptr;
         size_t size = 0;
-        if (!ReadWhole(path, text, size))
+        if (!ReadPacked("manifest.txt", text, size) && !ReadWhole(path, text, size))
         {
             Write(Warn, "vulkan: manifest: no \"%s\": the client's stock shaders stay invalid and the engine draws them through its fixed-function paths (run Tools/VulkanShaders/translate_shaders.py)", path);
             return false;

@@ -1408,6 +1408,21 @@ static void OpenArchives() {
         }
     }
 
+    // Not in the 12340 exe: Data\custom.MPQ carries what only our exes read (Vulkan shaders, the D3D11
+    // SM4 pack; Tools/CustomMpq). Highest priority of all, so it wins over every patch. Stock Wow.exe
+    // never opens it: the name matches none of its patch-*.MPQ patterns.
+    if (SFile::OpenArchive("Data\\custom.MPQ", priority, 0xC00, &s_archiveHandles[slot])) {
+        slot++;
+        priority++;
+    } else {
+        s_archiveHandles[slot] = nullptr;
+        HSLOG log;
+        if (SLogCreate("Logs\\custommpq.log", 0, &log)) {
+            SLogWrite(log, "Data\\custom.MPQ not opened; Vulkan / D3D11 files are read loose if present");
+            SLogClose(log);
+        }
+    }
+
     s_numPatchArchives = slot;
     int32_t basePriority = 63;
     s_firstBaseArchive = slot;

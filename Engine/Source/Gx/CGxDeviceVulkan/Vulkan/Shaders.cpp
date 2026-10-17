@@ -4,6 +4,7 @@
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Context.hpp"
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Loader.hpp"
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Log.hpp"
+#include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Manifest.hpp"
 
 #include <cstdio>
 #include <cstring>
@@ -163,7 +164,19 @@ namespace gxvk::vk::shaders
         uint32_t*   words = nullptr;
         size_t      bytes = 0;
         const char* why   = "";
-        if (!ReadWords(path, words, bytes, why))
+        // Data\\custom.MPQ first, the loose file beside the exe after (Manifest ReadPacked).
+        char*  packed = nullptr;
+        size_t packedSize = 0;
+        if (gxvk::vk::manifest::ReadPacked(relative, packed, packedSize))
+        {
+            if (packedSize >= 4 && packedSize % 4 == 0 && (words = new (std::nothrow) uint32_t[packedSize / 4]))
+            {
+                std::memcpy(words, packed, packedSize);
+                bytes = packedSize;
+            }
+            delete[] packed;
+        }
+        if (!words && !ReadWords(path, words, bytes, why))
         {
             ++s.stats.failed;
             Write(Warn, "vulkan: shaders: \"%s\": %s", path, why);
