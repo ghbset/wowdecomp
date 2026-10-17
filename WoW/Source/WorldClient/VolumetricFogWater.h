@@ -114,6 +114,10 @@ WorldViewport LiveWorldViewport();
 void BeginPasses(SavedPassState& saved);
 void EndPasses(const SavedPassState& saved, const WorldViewport& vp);   // unbinds stages 0-4
 
+// coa GradingRenderer::Grade (VolumetricFogRenderer.cpp): the 32-entry curve over a copy of the world viewport,
+// opaque, RGB. False when it could not draw (shader missing, world not on the back buffer, no copy).
+bool RenderGrade(const float* curve32, float strength, bool dither, uint32_t frame, const WorldViewport& world);
+
 // Driver accessors (VolumetricFog.cpp): this frame's inputs once OnOpaqueDone captured them.
 bool WaterFrame(const FrameInputs*& in, const Config*& cfg);
 

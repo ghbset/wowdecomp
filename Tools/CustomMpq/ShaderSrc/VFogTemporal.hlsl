@@ -141,9 +141,8 @@ float4 SameSurfaceCurrentAverage(float2 lowResTexel, float viewZ, float depthCla
     return sum / max(weightSum, 1);
 }
 
-float4 main(float2 targetUv : TEXCOORD0) : COLOR0
+float4 Filtered(float2 lowResTexel)
 {
-    float2 lowResTexel = LowResTexelFromUv(targetUv);
     float2 uv = LowResTexelToUv(lowResTexel);
     float2 pixel = LowResTexelToFullPixel(lowResTexel);
     float depth = SampleDepth(sDepth, pixel);
@@ -159,4 +158,10 @@ float4 main(float2 targetUv : TEXCOORD0) : COLOR0
     CurrentNeighbourhoodRange(uv, current, lowest, highest);
     float4 history = clamp(reprojected.value, lowest, highest);
     return lerp(current, history, LightingHistoryWeight(current.rgb, history.rgb));
+}
+
+float4 main(float2 targetUv : TEXCOORD0) : COLOR0
+{
+    float2 lowResTexel = LowResTexelFromUv(targetUv);
+    return Dithered(Filtered(lowResTexel), lowResTexel, float2(103, 157), FrameIndex());
 }

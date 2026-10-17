@@ -2109,6 +2109,7 @@ void CGWorldFrame::RenderWorld(void* param) {
     worldFrame->OnWorldUpdate();
     PlayerNameUpdateWorldText();
     worldFrame->OnWorldRender();
+    VolumetricFog::OnWorldRendered();   // VFOG: not in 12340 (colour grading after the glow, before names; coa 0x4FB042)
     WorldTextRenderBatch();
 
     g_theGxDevicePtr->XformSetProjection(projection);

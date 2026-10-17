@@ -31,6 +31,8 @@ constexpr uint32_t kLocalControlRegister = 53;
 constexpr uint32_t kVariationRegister = 78;
 constexpr uint32_t kCompositeRegister = 96;
 constexpr uint32_t kHorizonBandRegister = 99;
+constexpr uint32_t kDitherRegister = 79;            // vf_common cDither (x on, y frame)
+constexpr uint32_t kGradeRegister = 10;             // VFogGrade c10 strength, c11-c18 curve
 constexpr uint32_t kLocalLightRegister = 100;
 constexpr uint32_t kSavedPixelRegisters = kLocalLightRegister + 4 * kMaxLocalLights;    // c0-c131
 static_assert(kSavedPixelRegisters == kPassSavedPixelRegisters, "SavedPassState holds the whole register range");
@@ -59,6 +61,7 @@ struct Shaders {
     CGxShader* rayMask;
     CGxShader* rayBlur;
     CGxShader* rayComposite;
+    CGxShader* grade;
 };
 
 struct Targets {
@@ -659,6 +662,8 @@ bool RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg,
 
     SetPs(0, &common[0][0], 9);
     SetPs(kHorizonBandRegister, in.horizonBand, 1);
+    const float dither[4] = { cfg.dither ? 1.0f : 0.0f, static_cast<float>(frame % 1024u), 0.0f, 0.0f };
+    SetPs(kDitherRegister, dither, 1);
 
     // ---- march (coa :1369-1430) ----------------------------------------------------------------------
     SetPs(9, celestialLight, 1);
@@ -851,6 +856,38 @@ void RenderGodRays() {
     device->RsSet(GxRs_PixelShader, s_shaders.rayComposite);
     DrawQuad(static_cast<uint32_t>(vp.w), static_cast<uint32_t>(vp.h), vp.minX, vp.maxX, vp.minY, vp.maxY);
     EndPasses(s_saved, vp);
+}
+
+// coa GradingRenderer::GradeTarget / DrawGraded: copy the world viewport, then draw the graded copy over it.
+bool RenderGrade(const float* curve32, float strength, bool dither, uint32_t frame, const WorldViewport& world) {
+    CGxDevice* device = g_theGxDevicePtr;
+    if (!device || world.w < 1.0f || world.h < 1.0f || !Shader(s_shaders.grade, "VFogGrade")) {
+        return false;
+    }
+    const WorldViewport live = LiveWorldViewport();
+    if (live.target) {
+        return false;       // coa: grades only the render target the world was drawn into, the back buffer here
+    }
+    CGxTex* scene = CopySceneBeforeFog(static_cast<uint32_t>(world.x), static_cast<uint32_t>(world.y), static_cast<uint32_t>(world.w), static_cast<uint32_t>(world.h));
+    if (!scene) {
+        return false;       // coa "scene copy failed"
+    }
+
+    static SavedPassState s_saved;
+    BeginPasses(s_saved);
+    ScissorToWorld(world);
+    const float viewport[4] = { world.x, world.y, world.w, world.h };
+    float grade[1 + kGradingCurveEntries / 4][4] = { { strength, 0.0f, 0.0f, 0.0f } };
+    std::memcpy(grade[1], curve32, kGradingCurveEntries * sizeof(float));
+    const float ditherOn[4] = { dither ? 1.0f : 0.0f, static_cast<float>(frame % 1024u), 0.0f, 0.0f };
+    SetPs(0, viewport, 1);
+    SetPs(kGradeRegister, &grade[0][0], 1 + kGradingCurveEntries / 4);
+    SetPs(kDitherRegister, ditherOn, 1);
+    Bind(0, scene);
+    device->RsSet(GxRs_PixelShader, s_shaders.grade);
+    DrawQuad(static_cast<uint32_t>(world.w), static_cast<uint32_t>(world.h), world.minX, world.maxX, world.minY, world.maxY);
+    EndPasses(s_saved, live);
+    return true;
 }
 
 bool CompositeOverSceneCopy() {

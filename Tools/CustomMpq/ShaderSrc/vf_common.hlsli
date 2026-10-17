@@ -15,6 +15,8 @@ float4 cDepthToViewZ : register(c3);
 row_major float4x4 cViewToWorld : register(c4);
 float4 cLowResTarget : register(c8);
 float4 cHorizonBand : register(c99);    // depth minZ, maxZ (0.998046875, 0.9990234375), near yd, far yd
+float4 cDither : register(c79);         // x > 0: vfogDither on; y = frame index (mod 1024) for the grade pass
+
 
 float2 ViewportOrigin()
 {
@@ -186,6 +188,19 @@ float3 ViewRayAtUnitDepth(float2 pixel)
 float InterleavedGradientNoise(float2 pixel)
 {
     return frac(52.9829189 * frac(dot(pixel, float2(0.06711056, 0.00583715))));
+}
+
+// vfogDither (ALU only, no texture fetch).
+// +-0.5/255 triangular dither (the difference of two IGN values) on an 8-bit store. `offset` decorrelates the
+// passes; the frame term animates it so the temporal blend averages it out instead of accumulating a fixed bias.
+float4 Dithered(float4 colour, float2 position, float2 offset, float frame)
+{
+    [branch] if (cDither.x > 0)
+    {
+        float2 p = position + offset + frame * 5.588238;
+        colour.rgb += (InterleavedGradientNoise(p) - InterleavedGradientNoise(p + float2(37.0, 61.0))) * (0.5 / 255);
+    }
+    return colour;
 }
 
 // tex2Dlod at level 0 for uv in 0..1. The lod operand is saturate(uv - 2) = 0 rather than a literal 0: fxc

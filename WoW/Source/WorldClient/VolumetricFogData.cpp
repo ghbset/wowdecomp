@@ -140,7 +140,7 @@ struct LightBlend {
     }
 };
 
-// Parsed and blended as coa does; the native port does not grade (docs/VFOG_PORT.md section 1).
+// Parsed and blended as coa does; vfogGrade draws it (docs/VFOG_PORT.md section 2c).
 struct GradingBlend {
     float curve[kGradingCurveEntries];
     float weight;

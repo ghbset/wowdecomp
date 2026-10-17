@@ -20,6 +20,7 @@
 #include "WoW/Source/WorldClient/MapObjDef.h"
 #include "WoW/Source/WorldClient/MapObjGroup.h"
 #include "WoW/Source/WorldClient/VolumetricFogDriver.h"
+#include "WoW/Source/WorldClient/VolumetricFogModel.h"
 #include "WoW/Source/WorldClient/VolumetricFogWater.h"
 #include "WoW/Source/WorldClient/World.h"
 
@@ -64,6 +65,17 @@ struct CVars {
     CVar* noise;
     CVar* debug;
     CVar* godRays;
+    CVar* grade;
+    CVar* gradeStrength;
+    CVar* dither;
+};
+
+// coa forever_look.cpp GradingFrame: decided at the end of the world, drawn after the glow.
+struct GradeFrame {
+    bool pending;
+    float strength;
+    float curve[kGradingCurveEntries];
+    WorldViewport world;
 };
 
 struct SavedFog {
@@ -95,6 +107,7 @@ bool s_wasActive = false;
 bool s_opaqueValid = false;
 bool s_armed = false;          // the composite is on the frame: later batches take the fitted fog
 bool s_dataLoaded = false;
+GradeFrame s_grade = {};
 uint32_t s_frame = 0;
 
 float CVarFloat(CVar* var, float fallback) {
@@ -123,6 +136,9 @@ Config ReadConfig() {
     cfg.noiseAmount = std::clamp(CVarFloat(s_cvars.noise, cfg.noiseAmount), 0.0f, 1.0f);
     cfg.debugView = std::clamp(CVarInt(s_cvars.debug, 0), 0, 3);
     cfg.godRays = std::clamp(CVarFloat(s_cvars.godRays, cfg.godRays), 0.0f, 4.0f);   // coa config.cpp:75
+    cfg.grade = CVarInt(s_cvars.grade, 0) != 0;
+    cfg.gradeStrength = std::clamp(CVarFloat(s_cvars.gradeStrength, cfg.gradeStrength), 0.0f, 1.0f);   // coa config.cpp:52
+    cfg.dither = CVarInt(s_cvars.dither, 1) != 0;
     return cfg;
 }
 
@@ -403,6 +419,35 @@ const StockFogFit& FitFor(const float modelPos[3]) {
     return slot.fit;
 }
 
+LightParamsSelection SelectionFor(const FrameInputs& in) {
+    LightParamsSelection selection;
+    selection.stormBlend = std::isfinite(in.stormBlend) ? std::clamp(in.stormBlend, 0.0f, 1.0f) : 0.0f;
+    if (in.screenEffectSlot >= 0 && in.screenEffectSlot < kLightParamsSlots) {
+        selection.screenEffectSlot = in.screenEffectSlot;
+    }
+    return selection;
+}
+
+// coa forever_look.cpp PrepareGrading + ForeverLookWeight. Only while vfog draws this frame, which already rules
+// out the view under water (coa kCameraUnderWater); the ghost view is skipped as coa kGhostEffect.
+void PrepareGrade() {
+    s_grade.pending = false;
+    if (!s_cfg.grade || !(s_cfg.gradeStrength > 0.0f) || !s_active || !s_opaqueValid ||
+        (CGWorldFrame::ffxEffectDeath && FFX::s_effect == CGWorldFrame::ffxEffectDeath)) {
+        return;
+    }
+    AuthoredFog look;
+    ResolveFogData(s_in.mapId, s_in.camPos, s_in.dayFraction, SelectionFor(s_in), look);
+    if (!std::isfinite(look.coverage) || !(look.coverage > kMinimumClassicCoverage) || !look.hasGradingCurve) {
+        return;     // coa kNoClassicLight / kNoGradedClassicLight
+    }
+    const float weight = std::min((look.coverage - kMinimumClassicCoverage) / (1.0f - kMinimumClassicCoverage), 1.0f);
+    s_grade.strength = s_cfg.gradeStrength * weight;
+    std::memcpy(s_grade.curve, look.gradingCurve, sizeof(s_grade.curve));
+    s_grade.world = LiveWorldViewport();
+    s_grade.pending = s_grade.strength > 0.0f && Finite(s_grade.curve, kGradingCurveEntries);
+}
+
 bool FogParticles() {
     return s_armed && s_cfg.transparentFog;
 }
@@ -426,6 +471,9 @@ void RegisterCVars() {
     s_cvars.maxDistance = CVar::Register("vfogMaxDistance", "Volumetric fog maximum march distance (yards)", 1, "5000", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.noise = CVar::Register("vfogNoise", "Volumetric fog density noise amount", 1, "0.15", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.debug = CVar::Register("vfogDebug", "Volumetric fog debug view (0..3)", 1, "0", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    s_cvars.grade = CVar::Register("vfogGrade", "Volumetric fog colour grading: the modern client's colour curve for the lights around the camera, over the 3D view after the glow (not names or the UI): 1 = on, 0 = off (default, as coa)", 1, "0", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    s_cvars.gradeStrength = CVar::Register("vfogGradeStrength", "Volumetric fog colour grading strength while vfogGrade is on, 0..1 (coa ColorGrading)", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    s_cvars.dither = CVar::Register("vfogDither", "Volumetric fog: 1 = dither the 8-bit fog targets and the grade against banding (default), 0 = off", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.godRays = CVar::Register("vfogGodRays", "Volumetric fog god rays from the bright sky around the sun: 0 = off, 1 = on (default), up to 4 = strength", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
 
     RegisterWaterCVars();
@@ -570,9 +618,18 @@ void OnWorldDone() {
     }
     // coa RenderGodRaysOverTheWorld: after the whole world, before FFX glow. Only a RenderFog this frame arms it.
     RenderGodRays();
+    PrepareGrade();
     s_armed = false;
     s_glareDrawn = false;
     RestoreStockFog();
+}
+
+void OnWorldRendered() {
+    if (!s_grade.pending) {
+        return;
+    }
+    s_grade.pending = false;
+    RenderGrade(s_grade.curve, s_grade.strength, s_cfg.dither, s_frame, s_grade.world);
 }
 
 bool WaterFrame(const FrameInputs*& in, const Config*& cfg) {

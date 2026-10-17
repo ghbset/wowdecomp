@@ -63,7 +63,7 @@ struct AuthoredFog {
     float classicDirectLight[3];
     bool hasGlow;
     float glow;
-    bool hasGradingCurve;                       // parsed, not used by the native port
+    bool hasGradingCurve;                       // vfogGrade (VolumetricFog.cpp PrepareGrade)
     float gradingCurve[kGradingCurveEntries];
 };
 

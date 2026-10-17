@@ -37,7 +37,8 @@ that reads DNInfo fog (as the old FarField did) is covered automatically.
 | late transparents | `CM2SceneRender::SetupLighting`, before `CShaderEffect::SetFogParams` | `BatchFog()` gives a fitted linear fog | 0x81FD15 |
 | particles | `CM2SceneRender::DrawParticle` | while `Active()`, emitters with blend <= 2 get fog flag 2 (wxl-vfog 0.6.12) | 0x8214E0 |
 | liquid depth | MaterialWater.cpp:149/228/308 | `GxRs_DepthWrite = stock \|\| LiquidDepthWrite()` | LiquidDepth |
-| world done | end of OnWorldRender (before `FFX::Finish`) | `OnWorldDone()` restores DNInfo fog | 0x4F9281 restore |
+| world done | end of OnWorldRender (before `FFX::Finish`) | `OnWorldDone()` restores DNInfo fog, decides the grade | 0x4F9281 restore |
+| world rendered | `CGWorldFrame::RenderWorld`, after `OnWorldRender` (glow done), before `WorldTextRenderBatch` | `OnWorldRendered()` draws the grade | 0x4FB042 |
 
 The decisions:
 - **Push-out with no lag.** coa-vfog guesses from last frame, and wxl needed an 8-frame hold. Natively,
@@ -56,8 +57,16 @@ The decisions:
 - **Under water: off**, with stock fog (coa `Underwater=0`). The under-water branch has no early composite.
 - **God rays** (vfog4): see section 2a. On by default (`vfogGodRays 1`, coa's "on" strength); coa ships `GodRays=0`.
 - **Water** (vfog5): see section 2b. On by default, as coa (`Water=1`).
+- **Colour grading** (vfog6): see section 2c. Off by default, as coa (`ColorGrading=0`).
+- **Dither** (vfog6): `vfogDither 1` puts a +-0.5/255 triangular dither (interleaved gradient noise from the pixel
+  position, ALU only, no fetch; vf_common `Dithered`) on what the march, temporal and composite store into 8-bit
+  targets and on the grade, against fog banding. Each pass has its own offset; the frame index animates it so the
+  temporal blend averages it instead of accumulating a fixed bias (h = c + d/(1-w)). The composite dithers the colour it
+  writes, i.e. after the conversion back to display space in LinearOverSceneCopy. coa's own dither was removed earlier
+  as an fps regression that was **never isolated** (wxl-vfog/wxl-light composites, 2026-10-10), so it is a CVar:
+  `vfogDither 0` skips it on a uniform branch (c79.x = 0), the old path.
 - **Not ported in v1:** water ripples/wakes (vw_ripple_step, water_ripples/contacts), the MSAA
-  split/silhouette, the GPU density probe, grading, the overlay, and wxl's fading-doodad early draw and TopUp.
+  split/silhouette, the GPU density probe, the overlay, ForeverGlow, and wxl's fading-doodad early draw and TopUp.
   The fading-doodad draw is a v2 item if fading props pop; see wxl-vfog hooks.cpp DrawFadingModelsBeforeFog
   and /root/RE/render-path/doodad-fade-*.md.
 
@@ -186,6 +195,25 @@ no ripples, wakes or client splash suppression (`WaterRipples`, `WaterClientSpla
 **Left**: ripples and unit wakes (coa water_ripples/water_contacts/client_ripple_sprites, vw_ripple_step,
 `vfogWaterRipples`, splash suppression); MSAA.
 
+## 2c. Colour grading (coa grading_renderer.cpp, forever_look.cpp PrepareGrading, shaders/vp_grade.hlsl)
+
+The modern client's per-light colour curve (32 entries, fogdata.bin's grading curves: brighter midtones, the
+brightest highlights clipped), blended as coa: per light, the keys around the time of day (InterpolateGrading), the
+lights by their weight, identity where no key carries a curve (GradingBlend::Result). Strength =
+`vfogGradeStrength * clamp((coverage - 0.5) / 0.5, 0, 1)` (coa ColorGrading x ForeverLookWeight).
+
+Placement as coa: decided in `OnWorldDone` (world viewport = the live one there), drawn in `OnWorldRendered`, i.e.
+after god rays, the whole world and the FFX glow (`FFX::Finish`), before names, icons (`WorldTextRenderBatch`) and the
+UI, so the interface is never graded. **VFogGrade** copies the world viewport of the back buffer (`GxTexCopy`, the
+shared scene copy) and draws `lerp(scene, curve(scene), strength)` over it opaque, RGB only, scissored. Skipped
+(as coa): vfogGrade 0, the ghost view (`FFX::s_effect == ffxEffectDeath`), the camera under water, no light with a
+curve, coverage <= 0.5, the world not on the back buffer.
+
+Deviations from coa: the curve is 8 pixel constants (c11-c18, c10.x strength, c0 viewport, c79 dither) instead of a
+32x1 R32F texture; the shader's hat-weight sum is exactly coa's lerp between neighbouring entries and needs no float
+texture on three backends. Grading needs vfog active (vfog 1, above water) because the camera inputs come from the fog
+frame; coa grades with its fog off too. The output is dithered with vfogDither (coa has none).
+
 ## 3. Render targets
 
 All are created with `TexCreate` and the renderTarget flag, like `FFX::CreateTex`, and recreated on a
@@ -244,6 +272,7 @@ to `Shaders/Pixel/ps_3_0/*.bls` (D3D9) and `ps_4_0` (D3D11, shader-xlate), and V
 | VFogHistoryDepth | 1 | vf_history_depth.hlsl |
 | VFogRayMask, VFogRayBlur, VFogRayComposite | 1 each | vf_ray_mask/blur/composite.hlsl (section 2a) |
 | VFogWaterDepth, VFogWaterMask | 1 each | vw_linear_depth.hlsl (section 2b) |
+| VFogGrade | 1 | vp_grade.hlsl (section 2c) |
 | VFogWater{1,2,3} | SSR_STEPS 0/16/32 | vw_water.hlsl + vw_*.hlsli (section 2b) |
 
 Names are built as `VFogMarch2`, `VFogMarch2L`, `VFogMarch2N` and `VFogMarch2LN`: 12 march + 12 composite +
@@ -267,6 +296,7 @@ Pixel registers are the same as coa (vf_common.hlsli, vf_integrate.hlsli, etc.) 
 | c36-c47 | 3 noisy layers x 4 |
 | c53 | local-light control |
 | c78 | density variation |
+| **c79** | **new**: vfogDither (x on, y frame); every VFog fog pass and VFogGrade |
 | c96-c98 | composite, godray colour (w = 0, dither removed), sun |
 | **c99** | **new**: horizon band (minZ, maxZ, near, far) |
 | **c100-c131** | **new**: 8 local lights x 4 (pos view + cutoff, colour, attenuation c/l/q, spare). Replaces sampler s8 |
@@ -339,14 +369,16 @@ change `farLimit` to `horizonFar` in this one place.
 `vfog` (1, master), `vfogQuality` (2), `vfogTemporal` (0.85), `vfogDensity` (1), `vfogHaze` (1),
 `vfogGroundFog` (0.6), `vfogFarFog` (1), `vfogAmbient` (1.75), `vfogData` (1), `vfogLocalLights` (1),
 `vfogTransparent` (1), `vfogStartOffset` (10), `vfogMaxDistance` (5000), `vfogNoise` (0.15), `vfogDebug` (0),
-`vfogGodRays` (1 = on, the user's choice; coa GodRays, a 0..4 strength, 0 = off, coa ships 0).
+`vfogGodRays` (1 = on, the user's choice; coa GodRays, a 0..4 strength, 0 = off, coa ships 0),
+`vfogDither` (1; 0 = the undithered path), grading: `vfogGrade` (0 = off, coa ColorGrading=0), `vfogGradeStrength`
+(1, 0..1, coa ColorGrading's strength when on).
 Water (coa CoAVolFog.ini Water* defaults and ranges): `vfogWater` (1), `vfogWaterQuality` (2, 1..3),
 `vfogWaterWaves` (1, 0..2), `vfogWaterWind` (2, 0.5..10), `vfogWaterFoam` (1, 0..2), `vfogWaterReflections` (1, 0..2),
 `vfogWaterSpecular` (1, 0..4), `vfogWaterClarity` (1, 0.25..4), `vfogWaterZoneColors` (0.5, 0..1), `vfogWaterDebug`
 (0; 1 normal, 2 foam, 3 transmittance, 4 reflection, 5 class, 6 ripples = flat grey).
 The defaults are coa CoAVolFog.ini plus the user's wxl-vfog look: Ambient 1.75, ClassicExposure 0.5,
 LocalLightIntensity 2.5, StartOffset 10. FarFog is 1, not wxl's 0, because no far-field plugin owns far fog
-now. **No dither**: it is a known fps regression. The remaining Config fields are constants in code
+now. Dither: see section 1 (vfogDither; the old fps regression was never isolated, so it can be toggled). The remaining Config fields are constants in code
 until someone needs a knob for them.
 
 ## 9. Perf budget (1440p, mid GPU)

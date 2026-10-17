@@ -19,6 +19,7 @@ ShaderSrc as the working directory (vkd3d-compiler has no -D; the fxc wrapper re
 VFog (docs/VFOG_PORT.md section 5): VFogMarch{Q}[L][N] and VFogComposite{Q}[L][N], Q = 1/2/3 (STEPS
 16/24/32 as coa-vfog CMakeLists.txt), L = LOCAL_LIGHTS, N = VF_NOISE (density variation + authored noise),
 plus VFogTemporal and VFogHistoryDepth, and the god rays VFogRayMask, VFogRayBlur and VFogRayComposite.
+Grading (coa vp_grade): VFogGrade.
 Water (coa vw_*): VFogWaterDepth, VFogWaterMask and VFogWater{1,2,3} (SSR_STEPS 0/16/32).
 """
 import argparse
@@ -50,6 +51,8 @@ SHADERS = {
     'VFogRayMask': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 1), 0, 'VFogRayMask', {}),
     'VFogRayBlur': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0), 0, 'VFogRayBlur', {}),
     'VFogRayComposite': ('ps_3_0', TEXCOORD0, COLOR0, samplers(2, 3), 0, 'VFogRayComposite', {}),
+    # colour grading (coa vp_grade): the light's curve over the finished world, before names and the UI
+    'VFogGrade': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0), 0, 'VFogGrade', {}),
     # modern water (coa vw_*, docs "Water"): linear depth copies, then one shading pass per water class
     'VFogWaterDepth': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0), 0, 'VFogWaterDepth', {'MASK': 0}),
     'VFogWaterMask': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 1), 0, 'VFogWaterDepth', {'MASK': 1}),

@@ -12,5 +12,5 @@
 float4 main(float2 targetUv : TEXCOORD0) : COLOR0
 {
     float2 pixel = FullPixelFromUv(targetUv);
-    return CompositeAtDepth(pixel, SampleDepth(sDepth, pixel));
+    return Dithered(CompositeAtDepth(pixel, SampleDepth(sDepth, pixel)), pixel, float2(211, 97), FrameIndex());
 }

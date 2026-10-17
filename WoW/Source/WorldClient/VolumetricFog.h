@@ -56,6 +56,9 @@ struct Config {
     float temporal = 0.85f;         // vfogTemporal (0 = off, no jitter)
     int debugView = 0;              // vfogDebug 0..3
     float godRays = 1.0f;           // vfogGodRays: coa GodRays, 0 = off, 0..4 strength (default 1)
+    bool grade = false;             // vfogGrade: coa ColorGrading > 0 (coa ships 0 = off)
+    float gradeStrength = 1.0f;     // vfogGradeStrength: coa ColorGrading's 0..1 strength when on
+    bool dither = true;             // vfogDither: +-0.5/255 dither on the 8-bit fog stores and the grade
 };
 
 // ---- per-frame engine inputs (coa-vfog src/engine.h FrameInputs, read natively) ----------------
@@ -193,6 +196,7 @@ void OnViewerLiquid();                      // CWorldScene::Render, right after 
 void OnOpaqueDone();                        // after scene->Draw(M2PASS_0)
 void OnLiquidDone();                        // after RenderLiquidPass, above-water branch only
 void OnWorldDone();                         // end of CGWorldFrame::OnWorldRender
+void OnWorldRendered();                     // CGWorldFrame::RenderWorld, after OnWorldRender (glow done), before names
 bool GlareDrawn();                          // OnLiquidDone drew DayNight::RenderGlares under the fog: skip the stock call
 bool LiquidDepthWrite();                    // force liquid depth writes while Active()
 bool BatchFog(const float modelPos[3], float& start, float& end, float& density, float color[3]);

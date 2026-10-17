@@ -1,4 +1,5 @@
-// Port of coa-vfog shaders/vf_composite.hlsli. Changes (docs/VFOG_PORT.md 2, 5): no dither (fps regression),
+// Port of coa-vfog shaders/vf_composite.hlsli. Changes (docs/VFOG_PORT.md 2, 5): coa's dither replaced by vfogDither
+// (vf_common Dithered, ALU only, applied in VFogComposite.hlsl to the colour written),
 // god rays not folded into the fog composite (VF_GOD_RAYS 0 there; VFogRayComposite draws them after the world), no MSAA split, and the fixed-function form is
 // un-premultiplied, float4(fog.rgb / max(a, 1e-4), a), for GxBlend_Alpha (SRCALPHA, INVSRCALPHA), because
 // the Gx API has no (ONE, INVSRCALPHA). Same result on screen.
