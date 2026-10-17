@@ -493,6 +493,18 @@ class Emitter(object):
         uv = self.src_sw(coord, [0, 1] if t == '2d' else [0, 1, 2])
         self.assign(i.dst, full='textureLod(s%d, %s, %s)' % (samp.index, uv, self.comp(coord, 3)))
 
+    def r_texldd(self, i):
+        # texldd dst, coord, sampler, ddx, ddy (tex2Dgrad): explicit gradients, so no derivative orientation to fix
+        coord, samp, ddx, ddy = i.srcs[0], i.srcs[1], i.srcs[2], i.srcs[3]
+        if samp.rtype != ir.RT_SAMPLER:
+            raise Refused('texldd without a sampler operand')
+        t = self.samplers.get(samp.index)
+        if t is None:
+            raise Refused('s%d sampled without a dcl' % samp.index)
+        sel = [0, 1] if t == '2d' else [0, 1, 2]
+        self.assign(i.dst, full='textureGrad(s%d, %s, %s, %s)' % (samp.index, self.src_sw(coord, sel),
+                                                                  self.src_sw(ddx, sel), self.src_sw(ddy, sel)))
+
     def r_texkill(self, i):
         d = i.dst
         if d.rtype == ir.RT_TEMP:
@@ -731,7 +743,7 @@ RULES = {
     40: Emitter.r_if_bool, 41: Emitter.r_ifc, 42: Emitter.r_else, 43: Emitter.r_endif,
     44: Emitter.r_break, 45: Emitter.r_breakc,
     46: Emitter.r_mova, 65: Emitter.r_texkill, 66: Emitter.r_texld, 88: Emitter.r_cmp,
-    90: Emitter.r_dp2add, 95: Emitter.r_texldl,
+    90: Emitter.r_dp2add, 93: Emitter.r_texldd, 95: Emitter.r_texldl,
 }
 
 

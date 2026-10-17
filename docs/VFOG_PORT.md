@@ -54,8 +54,9 @@ The decisions:
   get the fitted linear fog. The fit uses the screen-wide fit, or the per-model fit when the model is past the
   fit range (wxl-vfog 0.4/0.6.13).
 - **Under water: off**, with stock fog (coa `Underwater=0`). The under-water branch has no early composite.
-- **God rays** (vfog4): see section 2a. Off by default, as coa (`GodRays=0`).
-- **Not ported in v1:** water (vw_*), the MSAA
+- **God rays** (vfog4): see section 2a. On by default (`vfogGodRays 1`, coa's "on" strength); coa ships `GodRays=0`.
+- **Water** (vfog5): see section 2b. On by default, as coa (`Water=1`).
+- **Not ported in v1:** water ripples/wakes (vw_ripple_step, water_ripples/contacts), the MSAA
   split/silhouette, the GPU density probe, grading, the overlay, and wxl's fading-doodad early draw and TopUp.
   The fading-doodad draw is a v2 item if fading props pop; see wxl-vfog hooks.cpp DrawFadingModelsBeforeFog
   and /root/RE/render-path/doodad-fade-*.md.
@@ -115,6 +116,76 @@ History invalidation follows coa renderer.cpp:1323-1332: settings, map, screen-e
 projection/viewport change; forward dot < 0.707; a frame gap over 0.25 s; a move over 30 yd. Key it on the
 view matrix, never on a frame counter, because water reflection re-runs world passes (wxl lesson).
 
+## 2b. Water (coa water_renderer.cpp, water_data.cpp, water_spectrum.cpp, shaders/vw_*)
+
+coa's modern water: lakes, rivers, the sea and WMO indoor pools shaded like the modern client (refraction of the
+pre-water scene, Beer-Lambert transmittance, in-scattering, wave/shore/depth foam with the Forever masks, GGX sun
+glint, EnvBRDF reflection with a screen-space march and a fogged sky fallback, shore fade), per-class Forever presets
+from `VFog\waterdata.bin`, Forever FFT waves. Code: `VolumetricFogWater.cpp` (data, classification, CVars, passes,
+hooks), `VolumetricFogWaterWaves.cpp` (waves), `VolumetricFogWater.h` (private header; it also declares the full-screen
+pass helpers VolumetricFogRenderer.cpp now shares: SetPs, Bind, DrawQuad, LiveWorldViewport, Begin/EndPasses).
+
+Draws only while vfog is active (above water, `WaterFrame()`), `vfogWater` is 1, waterdata.bin loaded, the R32F
+render-target format is available and the five shaders are in the MPQ. Anything missing: the client's own water.
+Under water both the fog and the water are off (coa Underwater=0: coa has no underwater fog by default, and
+its water is skipped with the camera in liquid), so the underwater view keeps the stock fog and the stock water.
+
+**Classification** (coa water_classify.h): the liquid type of the instance's `CMaterialSettings` (its index in
+`CSettingsBank::s_settings`), LiquidType material 1 (water) and texture 0 under `\river\` or `\ocean\`: type 17 =
+interior, sound bank 1 = ocean, type 9 = river, else lake. A class waterdata.bin has no preset for stays stock.
+Magma (material 2) and slime (3) are never classified, so they keep the client's look.
+
+**Mask scheme (no stencil).** coa tags each class into the stencil during the client's draws and shades after the
+pass. Here, in `Liquid::CRenderer::Flush` (transparent pass; coa hooks the same pass only):
+1. `WaterArm`: after the stock qsort, a stable sort moves the water to the end grouped by class (lake, river,
+   ocean, interior). The stock comparator orders by material first, so cross-material order was already arbitrary;
+   inside a class the stock order holds.
+2. Before the first water draw (`Begin`): `GxTexCopy` of the world viewport (pre-water scene colour, point
+   sampled) and a `DeviceCopySceneDepth` linearised to R32F view Z (**VFogWaterDepth**, = coa's scene depth copy).
+3. After each class's draws (`ShadeClass`): another depth copy, **VFogWaterMask** writes view Z where the depth
+   moved closer since the previous copy (that class drew the front surface: water writes depth while vfog draws,
+   `LiquidDepthWrite`), else minus it. The previous copy ping-pongs between two R32F targets. Then **VFogWater{Q}**
+   shades that class over the back buffer with `GxBlend_Alpha`, RGB writes: alpha 1 on the class's pixels, 0
+   elsewhere. A later class drawn in front simply overwrites; water behind an earlier class fails the depth test
+   and leaves no mark.
+Cost per frame with water: 1 colour copy + (1 + classes) depth copies and linearisations + one shading pass per class.
+
+**Waves (deviation: CPU).** The Gx API has no RGBA16F/32F targets and no render-to-mip, so coa's GPU FFT runs on
+the CPU instead: coa's own CPU reference path (water_spectrum.cpp: WaterReferenceH0/Modes/FoldModes/InverseTransform/
+AssembleDisplacement/Surface) in float, same spectra, Forever tile parameters, 1024 s loop clock, 1/256^2
+normalisation, surface stencil, Jacobian foam/oxygen persistence (FoamStep, dt clamped to 0.1 s) and box-filtered
+mips. Resolution as coa: 128 at vfogWaterQuality 1, 256 above. Each drawn tile is one thread; a step is launched
+after the frame's last water class and collected at the next frame's first (never waited on: if a step is still
+running the previous maps stay, so the waves update at the worker's rate, about 10 ms per 256 step here).
+Per tile two textures, wrap, trilinear, every mip down to 1x1, uploaded with `GxTexUpdate`:
+- slopes, `GxTex_Gr1616F`: mean slope (coa moments.xy);
+- state, `GxTex_Argb8888`: R sqrt(variance / 0.25), G sqrt(wide slope^2 / 1), B foam, A oxygen.
+The shader rebuilds coa's moments: z = variance + |filtered slope|^2, w = wide^2 (vw_surface SampleMoments); storing
+the variance rather than E[s^2] keeps 8 bits from swamping a mirror-flat surface's zero variance. Foam and oxygen are
+read at level 0 as coa's foam maps. Measured ranges (waves 2): variance < 0.06, wide^2 < 0.16.
+
+**Registers / samplers** (vw_constants.hlsli = coa's): c0-c8 vf_common (c3.z = 65536, coa kWaterMaxViewDepth),
+c9-c67 coa ShadingConstants (light, sun, ambient, isotropic, sky x5, stock fog (always off: vfog pushes it out),
+absorption, scattering x3, foams x4, surface response, inverse tile sizes, wave control, scrolls, depth decode, mask
+tints x10, reflection fog 4 layers x 5 + range, ripples (zero)); the depth passes also read c99. Samplers: s0 scene
+colour, s1 scene depth (R32F), s2 signed water depth (R32F), s3-s6 tile slopes, s7-s10 tile state, s11 packed wave
+foam masks (R/G/B = high/mid/low), s14 shore mask, s15 depth mask (Argb8888, full mip chains from waterdata.bin).
+Missing maps bind an 8x8 zero texture (coa m_flat).
+
+**Shaders**: VFogWaterDepth, VFogWaterMask (MASK 0/1 of VFogWaterDepth.hlsl), VFogWater1/2/3 = coa
+shade_low/mid/high (SSR_STEPS 0/16/32); variant = quality - 1, or 1 (sky only) when vfogWaterReflections is 0.
+The Vulkan translator gained `texldd` (tex2Dgrad -> textureGrad).
+
+**Deviations from coa**: CPU waves (above); scene copies clamp instead of mirror addressing (the Gx API has no
+mirror); no packed-RGBA8 depth fallback (needs R32F targets); no MSAA (DeviceCopySceneDepth is no-MSAA, as the fog);
+classes are shaded one after another inside the liquid pass instead of all after it (same pixels, same inputs:
+every class reads the same pre-water copy, as coa); water is drawn after the other transparent liquids; the
+scene copy is taken before the first water draw rather than before the whole liquid pass (it includes slime);
+no ripples, wakes or client splash suppression (`WaterRipples`, `WaterClientSplashes`); no water GPU timer/summary log.
+
+**Left**: ripples and unit wakes (coa water_ripples/water_contacts/client_ripple_sprites, vw_ripple_step,
+`vfogWaterRipples`, splash suppression); MSAA.
+
 ## 3. Render targets
 
 All are created with `TexCreate` and the renderTarget flag, like `FFX::CreateTex`, and recreated on a
@@ -172,6 +243,8 @@ to `Shaders/Pixel/ps_3_0/*.bls` (D3D9) and `ps_4_0` (D3D11, shader-xlate), and V
 | VFogTemporal | 1 | vf_temporal.hlsl |
 | VFogHistoryDepth | 1 | vf_history_depth.hlsl |
 | VFogRayMask, VFogRayBlur, VFogRayComposite | 1 each | vf_ray_mask/blur/composite.hlsl (section 2a) |
+| VFogWaterDepth, VFogWaterMask | 1 each | vw_linear_depth.hlsl (section 2b) |
+| VFogWater{1,2,3} | SSR_STEPS 0/16/32 | vw_water.hlsl + vw_*.hlsli (section 2b) |
 
 Names are built as `VFogMarch2`, `VFogMarch2L`, `VFogMarch2N` and `VFogMarch2LN`: 12 march + 12 composite +
 2 = 26 shaders, plus the 3 god ray shaders. Unroll layer loops (`[unroll]` over the 4 layers), because vkd3d turns indexed constant
@@ -229,6 +302,9 @@ other opcode the VFog shaders use. No vPos, oDepth or volume samplers are needed
 - `Tools/CustomMpq/VFog/fogdata.bin`: coa data/fogdata.bin, VFD1 v4, 755960 bytes, byte-identical to
   wxl-vfog's copy. It is packed as `VFog\fogdata.bin` (WP2 adds `folder_files('VFog', ...)`) and loaded by
   WP1 with `SFileOpenFile`/`SFileReadFile`. If it is missing or invalid, the derived layers are used, as coa does.
+- `Tools/CustomMpq/VFog/waterdata.bin`: coa data/waterdata.bin (VWD1 v1, 8390050 bytes: 4 Forever presets, 7 FFT
+  tiles, 6 foam masks 1024^2 with full mips), packed as `VFog\waterdata.bin`, read by VolumetricFogWater.cpp on the
+  first frame with water. Missing or invalid: the client's own water.
 - `Shaders\Pixel\ps_3_0|ps_4_0\VFog*.bls`: WP2. The outputs are committed, as FarBlend's were.
 
 ## 7. Per-frame parameters (shared with the stock fog)
@@ -263,7 +339,11 @@ change `farLimit` to `horizonFar` in this one place.
 `vfog` (1, master), `vfogQuality` (2), `vfogTemporal` (0.85), `vfogDensity` (1), `vfogHaze` (1),
 `vfogGroundFog` (0.6), `vfogFarFog` (1), `vfogAmbient` (1.75), `vfogData` (1), `vfogLocalLights` (1),
 `vfogTransparent` (1), `vfogStartOffset` (10), `vfogMaxDistance` (5000), `vfogNoise` (0.15), `vfogDebug` (0),
-`vfogGodRays` (0 = off; coa GodRays, a 0..4 strength, 1 is coa's "on").
+`vfogGodRays` (1 = on, the user's choice; coa GodRays, a 0..4 strength, 0 = off, coa ships 0).
+Water (coa CoAVolFog.ini Water* defaults and ranges): `vfogWater` (1), `vfogWaterQuality` (2, 1..3),
+`vfogWaterWaves` (1, 0..2), `vfogWaterWind` (2, 0.5..10), `vfogWaterFoam` (1, 0..2), `vfogWaterReflections` (1, 0..2),
+`vfogWaterSpecular` (1, 0..4), `vfogWaterClarity` (1, 0.25..4), `vfogWaterZoneColors` (0.5, 0..1), `vfogWaterDebug`
+(0; 1 normal, 2 foam, 3 transmittance, 4 reflection, 5 class, 6 ripples = flat grey).
 The defaults are coa CoAVolFog.ini plus the user's wxl-vfog look: Ambient 1.75, ClassicExposure 0.5,
 LocalLightIntensity 2.5, StartOffset 10. FarFog is 1, not wxl's 0, because no far-field plugin owns far fog
 now. **No dither**: it is a known fps regression. The remaining Config fields are constants in code

@@ -55,7 +55,7 @@ struct Config {
     float startOffset = 10.0f;      // vfogStartOffset (wxl-vfog 0.6.11)
     float temporal = 0.85f;         // vfogTemporal (0 = off, no jitter)
     int debugView = 0;              // vfogDebug 0..3
-    float godRays = 0.0f;           // vfogGodRays: coa GodRays, 0 = off, 0..4 strength
+    float godRays = 1.0f;           // vfogGodRays: coa GodRays, 0 = off, 0..4 strength (default 1)
 };
 
 // ---- per-frame engine inputs (coa-vfog src/engine.h FrameInputs, read natively) ----------------

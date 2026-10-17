@@ -20,6 +20,7 @@
 #include "WoW/Source/WorldClient/MapObjDef.h"
 #include "WoW/Source/WorldClient/MapObjGroup.h"
 #include "WoW/Source/WorldClient/VolumetricFogDriver.h"
+#include "WoW/Source/WorldClient/VolumetricFogWater.h"
 #include "WoW/Source/WorldClient/World.h"
 
 namespace VolumetricFog {
@@ -425,7 +426,9 @@ void RegisterCVars() {
     s_cvars.maxDistance = CVar::Register("vfogMaxDistance", "Volumetric fog maximum march distance (yards)", 1, "5000", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.noise = CVar::Register("vfogNoise", "Volumetric fog density noise amount", 1, "0.15", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.debug = CVar::Register("vfogDebug", "Volumetric fog debug view (0..3)", 1, "0", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
-    s_cvars.godRays = CVar::Register("vfogGodRays", "Volumetric fog god rays from the bright sky around the sun: 0 = off, up to 4 = strength", 1, "0", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    s_cvars.godRays = CVar::Register("vfogGodRays", "Volumetric fog god rays from the bright sky around the sun: 0 = off, 1 = on (default), up to 4 = strength", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+
+    RegisterWaterCVars();
 
     g_vfogM2BatchFog = &BatchFog;
     g_vfogM2FogParticles = &FogParticles;
@@ -570,6 +573,12 @@ void OnWorldDone() {
     s_armed = false;
     s_glareDrawn = false;
     RestoreStockFog();
+}
+
+bool WaterFrame(const FrameInputs*& in, const Config*& cfg) {
+    in = &s_in;
+    cfg = &s_cfg;
+    return s_active && s_opaqueValid;
 }
 
 bool LiquidDepthWrite() {

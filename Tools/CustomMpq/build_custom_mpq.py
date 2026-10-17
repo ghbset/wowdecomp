@@ -18,7 +18,9 @@ Contents:
                           built from ShaderSrc/*.hlsl by ShaderSrc/build_shaders.py (VFog*: volumetric
                           fog, docs/VFOG_PORT.md). Tools/VulkanShaders translates the ps_3_0 ones with the client's.
   VFog\\...               every file in Tools/CustomMpq/VFog (fogdata.bin: the Classic/Forever fog layers,
-                          coa-vfog data/fogdata.bin, read by VolumetricFogData.cpp).
+                          coa-vfog data/fogdata.bin, read by VolumetricFogData.cpp; waterdata.bin: the Forever
+                          water presets, FFT tiles and foam masks, coa-vfog data/waterdata.bin, read by
+                          VolumetricFogWater.cpp).
 Cache/vkpipelines.bin is a runtime cache and stays loose.
 
 Needs StormLib (libstorm.so, Debian package libstorm9). Python 3.8+, standard library only.

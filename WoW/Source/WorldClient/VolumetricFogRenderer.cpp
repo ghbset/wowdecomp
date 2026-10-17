@@ -3,6 +3,7 @@
 // God rays: coa DrawGodRayMask / DrawGodRaysOverScene (renderer.cpp:1189-1260), always drawn after the world.
 // Not ported (doc section 1): the MSAA split, the depth probe, logging.
 #include "WoW/Source/WorldClient/VolumetricFogModel.h"
+#include "WoW/Source/WorldClient/VolumetricFogWater.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -32,6 +33,7 @@ constexpr uint32_t kCompositeRegister = 96;
 constexpr uint32_t kHorizonBandRegister = 99;
 constexpr uint32_t kLocalLightRegister = 100;
 constexpr uint32_t kSavedPixelRegisters = kLocalLightRegister + 4 * kMaxLocalLights;    // c0-c131
+static_assert(kSavedPixelRegisters == kPassSavedPixelRegisters, "SavedPassState holds the whole register range");
 constexpr float kDensityNoiseSize = 32.0f;          // coa noise_volume.h kDensityNoiseSize
 constexpr double kHistoryMaxSeconds = 0.25;         // coa renderer.cpp:84-86
 constexpr float kHistoryMaxMove = 30.0f;
@@ -345,6 +347,9 @@ TexelRect LocalLightTexels(const float (*lights)[4], uint32_t count, const float
     return texels;
 }
 
+}  // namespace
+
+// Shared with VolumetricFogWater.cpp (declared in VolumetricFogWater.h).
 void SetPs(uint32_t reg, const float* values, uint32_t count) {
     g_theGxDevicePtr->ShaderConstantsSet(GxSh_Pixel, reg, values, count);
 }
@@ -357,7 +362,7 @@ void Bind(int stage, CGxTex* tex) {
 // pixels, through the fixed-function VS. TEXCOORD0 = uv across that viewport, (x + 0.5) / width with v = 0 on the
 // top row, at every pixel centre on every backend: D3D9 rasterises at integer pixel coordinates, so its uvs carry
 // the half texel (as FFX does).
-void DrawQuad(uint32_t width, uint32_t height, float minX = 0.0f, float maxX = 1.0f, float minY = 0.0f, float maxY = 1.0f) {
+void DrawQuad(uint32_t width, uint32_t height, float minX, float maxX, float minY, float maxY) {
     static uint16_t s_indices[4] = { 0, 3, 1, 2 };
     static CGxBatch s_batch = { GxPrim_TriangleStrip, 0, 4, 0, 3 };
 
@@ -390,11 +395,6 @@ void DrawQuad(uint32_t width, uint32_t height, float minX = 0.0f, float maxX = 1
 
 // World viewport in pixels of the current target, D3D-style top-left origin (coa D3DVIEWPORT9), from the
 // live Gx viewport: the same formula every backend uses for the back buffer (CGxDeviceD3d::IXformSetViewport).
-struct WorldViewport {
-    CGxTex* target;     // nullptr = the back buffer
-    float minX, maxX, minY, maxY, minZ, maxZ;
-    float x, y, w, h;
-};
 
 WorldViewport LiveWorldViewport() {
     WorldViewport vp = {};
@@ -411,12 +411,6 @@ WorldViewport LiveWorldViewport() {
     return vp;
 }
 
-// Full-screen pass state; EndPasses undoes all of it.
-struct SavedPassState {
-    float constants[kSavedPixelRegisters * 4];
-    C44Matrix projection;
-    C44Matrix view;
-};
 
 void BeginPasses(SavedPassState& saved) {
     CGxDevice* device = g_theGxDevicePtr;
@@ -452,6 +446,8 @@ void EndPasses(const SavedPassState& saved, const WorldViewport& vp) {
     GxXformSetViewport(vp.minX, vp.maxX, vp.minY, vp.maxY, vp.minZ, vp.maxZ);
     SetPs(0, saved.constants, kSavedPixelRegisters);
 }
+
+namespace {
 
 // Scissored to the world viewport of the back buffer, RGB only.
 void ScissorToWorld(const WorldViewport& vp) {
@@ -862,6 +858,7 @@ bool CompositeOverSceneCopy() {
 }
 
 void RendererShutdown() {
+    WaterShutdown();
     DestroyTargets();
     DestroyTex(s_densityNoise);
     DestroyTex(s_authoredNoise);
