@@ -113,6 +113,7 @@ namespace gxvk::vk
             case VK_FORMAT_R32_SFLOAT:                return "R32_SFLOAT";
             case VK_FORMAT_D32_SFLOAT:                return "D32_SFLOAT";
             case VK_FORMAT_D24_UNORM_S8_UINT:         return "D24_UNORM_S8_UINT";
+            case VK_FORMAT_D32_SFLOAT_S8_UINT:        return "D32_SFLOAT_S8_UINT";
             case VK_FORMAT_BC1_RGBA_UNORM_BLOCK:      return "BC1_RGBA_UNORM_BLOCK";
             case VK_FORMAT_BC2_UNORM_BLOCK:           return "BC2_UNORM_BLOCK";
             case VK_FORMAT_BC3_UNORM_BLOCK:           return "BC3_UNORM_BLOCK";
@@ -121,6 +122,12 @@ namespace gxvk::vk
         static char text[24];
         std::snprintf(text, sizeof text, "VkFormat(%d)", static_cast<int>(f));
         return text;
+    }
+
+    /// Whether a depth format has a stencil aspect.
+    inline bool HasStencil(VkFormat f)
+    {
+        return f == VK_FORMAT_D24_UNORM_S8_UINT || f == VK_FORMAT_D32_SFLOAT_S8_UINT || f == VK_FORMAT_D16_UNORM_S8_UINT;
     }
 
     /// A VkColorSpaceKHR as a name.

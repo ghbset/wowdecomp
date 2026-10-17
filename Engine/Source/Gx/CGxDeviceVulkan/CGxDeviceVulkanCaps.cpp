@@ -4,6 +4,7 @@
 #include <cstdint>
 #include "Engine/Source/Gx/CGxDeviceVulkan/CGxDeviceVulkan.h"
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Context.hpp"
+#include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Frame.hpp"
 
 namespace context = gxvk::vk::context;
 
@@ -155,6 +156,7 @@ void CGxDeviceVulkan::ISetCaps(const CGxFormat& format) {
     this->m_caps.m_blendFactor = 1;
     this->m_caps.m_stereoAvailable = 0;
     this->m_caps.m_shaderAlphaRef = 1;
+    this->m_caps.m_stencilBits = gxvk::vk::HasStencil(gxvk::vk::frame::DepthFormat()) ? 8 : 0;  // DECOMP
     this->m_caps.unused_0118[0] = 0;
     this->m_caps.unused_0118[1] = 0;
     this->m_caps.unused_0118[2] = 0;

@@ -9,7 +9,8 @@ namespace gxvk::vk::frame::detail
     bool ChooseDepthFormat(const context::Handles& h)
     {
         if (s.depthFormat != VK_FORMAT_UNDEFINED) return true;
-        const VkFormat candidates[3] = { VK_FORMAT_D24_UNORM_S8_UINT, VK_FORMAT_D32_SFLOAT, VK_FORMAT_D16_UNORM };
+        // D32S8 before D32: AMD has no D24S8, and the stencil is a Gx state (GxRs_Stencil*).
+        const VkFormat candidates[4] = { VK_FORMAT_D24_UNORM_S8_UINT, VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D32_SFLOAT, VK_FORMAT_D16_UNORM };
         for (VkFormat f : candidates)
         {
             VkFormatProperties props = {};
@@ -49,8 +50,8 @@ namespace gxvk::vk::frame::detail
         a[1].samples        = VK_SAMPLE_COUNT_1_BIT;
         a[1].loadOp         = clearDepth ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
         a[1].storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
-        a[1].stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        a[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        a[1].stencilLoadOp  = HasStencil(s.depthFormat) ? a[1].loadOp : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        a[1].stencilStoreOp = HasStencil(s.depthFormat) ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
         a[1].initialLayout  = clearDepth ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
         a[1].finalLayout    = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
@@ -125,6 +126,8 @@ namespace gxvk::vk::frame::detail
         a[1].loadOp        = clearDepth ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
         a[1].initialLayout = clearDepth ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
         a[1].finalLayout   = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        a[1].stencilLoadOp  = HasStencil(s.depthFormat) ? a[1].loadOp : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        a[1].stencilStoreOp = HasStencil(s.depthFormat) ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
         a[2].format        = colour;
         a[2].samples       = VK_SAMPLE_COUNT_1_BIT;
         a[2].loadOp        = VK_ATTACHMENT_LOAD_OP_DONT_CARE;   // the resolve writes the whole render area
@@ -135,8 +138,9 @@ namespace gxvk::vk::frame::detail
         a[3].loadOp        = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         a[3].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         a[3].finalLayout   = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        a[3].stencilStoreOp = HasStencil(s.depthFormat) ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;   // the stencil resolve
 
-        const VkImageAspectFlags depthAspect = VK_IMAGE_ASPECT_DEPTH_BIT | (s.depthFormat == VK_FORMAT_D24_UNORM_S8_UINT ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
+        const VkImageAspectFlags depthAspect = VK_IMAGE_ASPECT_DEPTH_BIT | (HasStencil(s.depthFormat) ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
         VkAttachmentReference2 ref[4] = {};
         const VkImageLayout layouts[4] = { VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                                            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
@@ -271,7 +275,7 @@ namespace gxvk::vk::frame::detail
             view.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
             view.format                          = format;
             view.subresourceRange.aspectMask     = !isDepth ? VK_IMAGE_ASPECT_COLOR_BIT
-                                                 : VK_IMAGE_ASPECT_DEPTH_BIT | (format == VK_FORMAT_D24_UNORM_S8_UINT ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
+                                                 : VK_IMAGE_ASPECT_DEPTH_BIT | (HasStencil(format) ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
             view.subresourceRange.levelCount     = 1;
             view.subresourceRange.layerCount     = 1;
             r = s.dapi->CreateImageView(s.device, &view, nullptr, &d.view);

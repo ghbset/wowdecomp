@@ -88,6 +88,7 @@ enum EGxBuffer {
 enum EGxBufferBit : uint32_t {
     GxBufferBit_Color = 0x1,
     GxBufferBit_Depth = 0x2,
+    GxBufferBit_Stencil = 0x4,  // DECOMP: clears the stencil to 0 (D3D11/Vulkan: the whole surface)
 };
 
 enum EGxOverride {
@@ -237,6 +238,9 @@ class CGxCaps {
     /* 0130 */ int32_t m_shaderAlphaRef;
     /* 0134 */ int32_t unk_0134;
     /* 0138 */ int32_t unk_0138;
+    // DECOMP: not in the stock client. Stencil bits of the scene depth-stencil (8 with D24S8/D32S8, 0 without);
+    // GxRs_Stencil* are ignored when 0.
+    /* 013C */ int32_t m_stencilBits;
 };
 
 class CGxQuery {
@@ -354,7 +358,40 @@ enum EGxRenderState {
     GxRs_PointSprite = 83,
     Unk84 = 84,
     GxRs_ColorMaterial = 85,
-    GxRenderStates_Last = 86,
+    // DECOMP: not in the stock client. Front-face stencil (both faces get it). IRsInit defaults are the
+    // stock device state: test off, ALWAYS, ref 0, masks 0xFF, ops KEEP. Values: EGxStencilCmp/EGxStencilOp.
+    GxRs_StencilTest = 86,
+    GxRs_StencilFunc = 87,
+    GxRs_StencilRef = 88,
+    GxRs_StencilReadMask = 89,
+    GxRs_StencilWriteMask = 90,
+    GxRs_StencilFail = 91,
+    GxRs_StencilZFail = 92,
+    GxRs_StencilPass = 93,
+    GxRenderStates_Last = 94,
+};
+
+// DECOMP: the D3D9/D3D11 values (D3DCMP_*, D3DSTENCILOP_*); Vulkan's are these minus 1.
+enum EGxStencilCmp {
+    GxStencilCmp_Never = 1,
+    GxStencilCmp_Less = 2,
+    GxStencilCmp_Equal = 3,
+    GxStencilCmp_LessEqual = 4,
+    GxStencilCmp_Greater = 5,
+    GxStencilCmp_NotEqual = 6,
+    GxStencilCmp_GreaterEqual = 7,
+    GxStencilCmp_Always = 8,
+};
+
+enum EGxStencilOp {
+    GxStencilOp_Keep = 1,
+    GxStencilOp_Zero = 2,
+    GxStencilOp_Replace = 3,
+    GxStencilOp_IncrSat = 4,
+    GxStencilOp_DecrSat = 5,
+    GxStencilOp_Invert = 6,
+    GxStencilOp_Incr = 7,
+    GxStencilOp_Decr = 8,
 };
 
 enum EGxShTarget {

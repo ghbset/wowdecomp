@@ -426,12 +426,28 @@ void CGxDeviceVulkan::IRenderStates(pipelines::Draw& d) {
 
     d.cull = cull;
 
+    // DECOMP: stencil, packed for the pipeline key; values clamped to the 1..8 the tables have.
+    d.stencil = 0;
+    d.stencilMasks = 0;
+
+    if (this->m_caps.m_stencilBits && this->m_appRenderStates[GxRs_StencilTest].m_value.m_data.i[0]) {
+        auto v = [this](EGxRenderState rs) {
+            uint32_t x = this->m_appRenderStates[rs].m_value.m_data.u[0];
+            return x < 1 || x > 8 ? 1u : x;
+        };
+        d.stencil = 1u | v(GxRs_StencilFunc) << 1 | v(GxRs_StencilFail) << 5 | v(GxRs_StencilZFail) << 9 | v(GxRs_StencilPass) << 13;
+        d.stencilMasks = (this->m_appRenderStates[GxRs_StencilReadMask].m_value.m_data.u[0] & 0xFF)
+            | (this->m_appRenderStates[GxRs_StencilWriteMask].m_value.m_data.u[0] & 0xFF) << 8
+            | (this->m_appRenderStates[GxRs_StencilRef].m_value.m_data.u[0] & 0xFF) << 16;
+    }
+
     if (this->m_caps.m_depthBias) {
         float step;
 
         switch (frame::DepthFormat()) {
             case VK_FORMAT_D16_UNORM:  step = 65536.0f;    break;
-            case VK_FORMAT_D32_SFLOAT: step = 8388608.0f;  break;
+            case VK_FORMAT_D32_SFLOAT:
+            case VK_FORMAT_D32_SFLOAT_S8_UINT: step = 8388608.0f;  break;
             default:                   step = 16777216.0f; break;
         }
 

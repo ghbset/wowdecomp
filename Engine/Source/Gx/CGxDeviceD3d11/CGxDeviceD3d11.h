@@ -101,6 +101,7 @@ class CGxDeviceD3d11 : public CGxDevice {
     D3D11_RASTERIZER_DESC m_rsDesc;
     D3D11_BLEND_DESC m_blendDesc;
     D3D11_DEPTH_STENCIL_DESC m_dsDesc;
+    UINT m_stencilRef = 0;  // DECOMP: OMSetDepthStencilState's ref
     float m_blendFactor[4];
     uint32_t m_stateDirty;
     uint32_t m_samplerDirty;

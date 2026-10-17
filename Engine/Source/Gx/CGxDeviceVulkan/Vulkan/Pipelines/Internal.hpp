@@ -138,6 +138,8 @@ namespace gxvk::vk::pipelines::detail
         uint16_t     vertexRecord;    ///< manifest index, kNoRecord when not Translated
         uint16_t     fragmentRecord;
         uint32_t     layoutIndex;     ///< the set-0 layout (sampler-slot set)
+        uint32_t     stencil;         ///< Draw::stencil (0: off)
+        uint32_t     stencilMasks;    ///< Draw::stencilMasks, 0 when off
     };
 
     struct Entry

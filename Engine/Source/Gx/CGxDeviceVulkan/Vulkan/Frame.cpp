@@ -32,6 +32,16 @@ namespace
             a[n].clearValue.depthStencil.stencil = 0;
             ++n;
         }
+        if ((mask & 4u) && gxvk::vk::HasStencil(s.depthFormat))
+        {
+            if (mask & 2u) a[n - 1].aspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
+            else
+            {
+                a[n].aspectMask                      = VK_IMAGE_ASPECT_STENCIL_BIT;
+                a[n].clearValue.depthStencil.stencil = 0;
+                ++n;
+            }
+        }
         if (n == 0) return;
         VkClearRect r = {};
         r.rect.extent = extent;
@@ -331,7 +341,7 @@ namespace gxvk::vk::frame
 
     void Clear(uint32_t mask, const float colour[4], const VkRect2D* rect)
     {
-        if (!(mask & 3u) || !EnsureFrame()) return;
+        if (!(mask & 7u) || !EnsureFrame()) return;
         if (s.passOpen)
         {
             ClearInPass(mask, colour, rect);
@@ -343,7 +353,8 @@ namespace gxvk::vk::frame
         const bool known = TargetView(s.target, image, format, extent);
         // A clear of the whole target, or of a target that holds nothing yet, is the next pass's
         // load op; a partial clear of a target with contents opens the pass and clears in place.
-        if (!known || Whole(rect, extent) || image->layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+        // A stencil-only clear has no load op of its own (the stencil loads with the depth): it opens the pass.
+        if ((mask & 6u) != 4u && (!known || Whole(rect, extent) || image->layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL))
         {
             if (mask & 1u)
             {

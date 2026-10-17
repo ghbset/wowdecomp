@@ -243,6 +243,8 @@ namespace gxvk::vk::pipelines
         k.vertexRecord   = draw.vertex == VertexProgram::Translated ? manifest::IndexOf(draw.vertexRecord) : manifest::kNoRecord;
         k.fragmentRecord = draw.fragment == FragmentProgram::Translated ? manifest::IndexOf(draw.fragmentRecord) : manifest::kNoRecord;
         k.layoutIndex    = layoutIndex;
+        k.stencil        = draw.stencil;
+        k.stencilMasks   = draw.stencil ? draw.stencilMasks : 0u;
 
         const Entry* entry = Lookup(k);
         if (!entry || entry->pipeline == VK_NULL_HANDLE)

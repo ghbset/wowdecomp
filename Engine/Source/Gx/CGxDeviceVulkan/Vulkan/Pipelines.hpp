@@ -125,6 +125,11 @@ namespace gxvk::vk::pipelines
         uint32_t colourMask = 0xF;
         bool     wireframe  = false;
 
+        /// DECOMP: GxRs_Stencil*, 0 when the test is off: bit 0 on, the EGxStencilCmp at bit 1, the
+        /// EGxStencilOp fail/zfail/pass at bits 5/9/13 (each 4 bits); masks = read | write << 8 | ref << 16.
+        uint32_t stencil      = 0;
+        uint32_t stencilMasks = 0;
+
         /// The dynamic states: D3D9's DEPTHBIAS, as Vulkan's constant depth bias factor (units of
         /// the depth buffer's smallest step); D3D9's BLENDFACTOR, for the ConstantAlpha blend.
         float depthBias        = 0.0f;

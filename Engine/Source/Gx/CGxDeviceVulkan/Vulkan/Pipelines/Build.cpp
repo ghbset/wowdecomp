@@ -434,6 +434,21 @@ namespace
         depth.depthCompareOp   = k.depthTest ? depthOp : VK_COMPARE_OP_ALWAYS;
         depth.minDepthBounds   = 0.0f;
         depth.maxDepthBounds   = 1.0f;
+        if (k.stencil & 1u)
+        {
+            // EGxStencilCmp/Op are the D3D values, Vulkan's plus 1. The ref is in the key, not dynamic.
+            VkStencilOpState face = {};
+            face.compareOp   = static_cast<VkCompareOp>(((k.stencil >> 1) & 0xFu) - 1u);
+            face.failOp      = static_cast<VkStencilOp>(((k.stencil >> 5) & 0xFu) - 1u);
+            face.depthFailOp = static_cast<VkStencilOp>(((k.stencil >> 9) & 0xFu) - 1u);
+            face.passOp      = static_cast<VkStencilOp>(((k.stencil >> 13) & 0xFu) - 1u);
+            face.compareMask = k.stencilMasks & 0xFFu;
+            face.writeMask   = (k.stencilMasks >> 8) & 0xFFu;
+            face.reference   = (k.stencilMasks >> 16) & 0xFFu;
+            depth.stencilTestEnable = VK_TRUE;
+            depth.front             = face;
+            depth.back              = face;
+        }
 
         VkPipelineColorBlendStateCreateInfo blending = {};
         blending.sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;

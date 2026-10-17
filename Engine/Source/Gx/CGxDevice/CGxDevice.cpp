@@ -1410,6 +1410,16 @@ void CGxDevice::IRsInit() {
     this->m_appRenderStates[GxRs_PointSprite].m_value.m_data.i[0] = 0;
     this->m_appRenderStates[Unk84].m_value.m_data.f[0] = 0.0f;
     this->m_appRenderStates[GxRs_ColorMaterial].m_value.m_data.i[0] = 0;
+
+    // DECOMP: stencil, the device defaults (off)
+    this->m_appRenderStates[GxRs_StencilTest].m_value.m_data.i[0] = 0;
+    this->m_appRenderStates[GxRs_StencilFunc].m_value.m_data.i[0] = GxStencilCmp_Always;
+    this->m_appRenderStates[GxRs_StencilRef].m_value.m_data.i[0] = 0;
+    this->m_appRenderStates[GxRs_StencilReadMask].m_value.m_data.i[0] = 0xFF;
+    this->m_appRenderStates[GxRs_StencilWriteMask].m_value.m_data.i[0] = 0xFF;
+    this->m_appRenderStates[GxRs_StencilFail].m_value.m_data.i[0] = GxStencilOp_Keep;
+    this->m_appRenderStates[GxRs_StencilZFail].m_value.m_data.i[0] = GxStencilOp_Keep;
+    this->m_appRenderStates[GxRs_StencilPass].m_value.m_data.i[0] = GxStencilOp_Keep;
 }
 
 // VERIFY: 255ba7d0 manual

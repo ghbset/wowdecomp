@@ -1079,6 +1079,7 @@ void CGxDeviceD3d11::ISetCaps(const CGxFormat& format) {
     this->m_caps.m_pointSprite = 0;
     this->m_caps.m_blendFactor = 1;
     this->m_caps.m_shaderAlphaRef = 1;
+    this->m_caps.m_stencilBits = s_GxFormatToDxgiDepth[format.m_depthFormat][1] == DXGI_FORMAT_D24_UNORM_S8_UINT ? 8 : 0;  // DECOMP
 
     for (uint32_t i = 0; i < 4; i++) {
         this->m_caps.unused_0118[i] = 0;
@@ -1580,6 +1581,11 @@ void CGxDeviceD3d11::SceneClear(uint32_t mask, CImVector color) {
 
     if (this->m_viewportDirty) {
         this->IXformSetViewport();
+    }
+
+    // DECOMP: stencil clear, the whole surface (D3D9 clips it to the viewport)
+    if ((mask & GxBufferBit_Stencil) && this->m_curDsv && this->m_caps.m_stencilBits) {
+        this->m_d3dContext->ClearDepthStencilView(this->m_curDsv, D3D11_CLEAR_STENCIL, 1.0f, 0);
     }
 
     const CBoundingBox& vp = this->m_viewport;
@@ -2938,6 +2944,36 @@ void CGxDeviceD3d11::IRsSendToHw(EGxRenderState which) {
             this->m_stateDirty |= Dirty_Blend;
             break;
 
+        case GxRs_StencilTest:
+        case GxRs_StencilFunc:
+        case GxRs_StencilRef:
+        case GxRs_StencilReadMask:
+        case GxRs_StencilWriteMask:
+        case GxRs_StencilFail:
+        case GxRs_StencilZFail:
+        case GxRs_StencilPass: {
+            // DECOMP: stencil (not in the stock client); EGxStencilCmp/Op are the D3D11 values. Off: the init desc.
+            const CGxAppRenderState* rs = this->m_appRenderStates.Ptr();
+            D3D11_DEPTH_STENCILOP_DESC face = { D3D11_STENCIL_OP_KEEP, D3D11_STENCIL_OP_KEEP, D3D11_STENCIL_OP_KEEP, D3D11_COMPARISON_ALWAYS };
+            bool on = rs[GxRs_StencilTest].m_value.m_data.i[0] && this->m_caps.m_stencilBits;
+
+            if (on) {
+                face.StencilFailOp = static_cast<D3D11_STENCIL_OP>(rs[GxRs_StencilFail].m_value.m_data.u[0]);
+                face.StencilDepthFailOp = static_cast<D3D11_STENCIL_OP>(rs[GxRs_StencilZFail].m_value.m_data.u[0]);
+                face.StencilPassOp = static_cast<D3D11_STENCIL_OP>(rs[GxRs_StencilPass].m_value.m_data.u[0]);
+                face.StencilFunc = static_cast<D3D11_COMPARISON_FUNC>(rs[GxRs_StencilFunc].m_value.m_data.u[0]);
+            }
+
+            this->m_dsDesc.StencilEnable = on;
+            this->m_dsDesc.StencilReadMask = on ? static_cast<UINT8>(rs[GxRs_StencilReadMask].m_value.m_data.u[0]) : 0xFF;
+            this->m_dsDesc.StencilWriteMask = on ? static_cast<UINT8>(rs[GxRs_StencilWriteMask].m_value.m_data.u[0]) : 0xFF;
+            this->m_dsDesc.FrontFace = face;
+            this->m_dsDesc.BackFace = face;
+            this->m_stencilRef = on ? (rs[GxRs_StencilRef].m_value.m_data.u[0] & 0xFF) : 0;
+            this->m_stateDirty |= Dirty_Depth;
+            break;
+        }
+
         default:
             break;
     }
@@ -2965,7 +3001,7 @@ void CGxDeviceD3d11::IStateSync() {
     }
 
     if (this->m_stateDirty & Dirty_Depth) {
-        this->m_d3dContext->OMSetDepthStencilState(static_cast<ID3D11DepthStencilState*>(this->IStateGet(State_Depth, &this->m_dsDesc, sizeof(this->m_dsDesc))), 0);
+        this->m_d3dContext->OMSetDepthStencilState(static_cast<ID3D11DepthStencilState*>(this->IStateGet(State_Depth, &this->m_dsDesc, sizeof(this->m_dsDesc))), this->m_stencilRef);
     }
 
     this->m_stateDirty = 0;

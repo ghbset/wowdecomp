@@ -1909,6 +1909,21 @@ void CGxDeviceD3d9Ex::IRsSendToHw(EGxRenderState which) {
             break;
         }
 
+        case GxRs_StencilTest:
+        case GxRs_StencilFunc:
+        case GxRs_StencilRef:
+        case GxRs_StencilReadMask:
+        case GxRs_StencilWriteMask:
+        case GxRs_StencilFail:
+        case GxRs_StencilZFail:
+        case GxRs_StencilPass: {
+            // DECOMP: stencil (not in the stock client); EGxStencilCmp/Op are the D3DCMP/D3DSTENCILOP values.
+            static const D3DRENDERSTATETYPE s_stencilRs[] = { D3DRS_STENCILENABLE, D3DRS_STENCILFUNC, D3DRS_STENCILREF, D3DRS_STENCILMASK, D3DRS_STENCILWRITEMASK, D3DRS_STENCILFAIL, D3DRS_STENCILZFAIL, D3DRS_STENCILPASS };
+            DWORD v = which == GxRs_StencilTest ? (value.m_data.i[0] && this->m_caps.m_stencilBits) : value.m_data.u[0];
+            this->m_d3dDevice->SetRenderState(s_stencilRs[which - GxRs_StencilTest], v);
+            break;
+        }
+
         default:
             break;
     }
@@ -2609,6 +2624,7 @@ int32_t CGxDeviceD3d9Ex::ICreateD3dDevice(const CGxFormat& format) {
     this->m_devDepthFormat = d3dpp.AutoDepthStencilFormat;
 
     this->ISetCaps(format);
+    this->m_caps.m_stencilBits = this->m_devDepthFormat == D3DFMT_D24S8 ? 8 : 0;  // DECOMP
     this->Log(this->m_caps);
     CGxDevice::Log("\tNVAPI: %d", this->m_d3dNVAPI);
     CGxDevice::Log("\tstereoHandle: %x", this->m_d3dStereoHandle);
@@ -3209,6 +3225,11 @@ void CGxDeviceD3d9Ex::SceneClear(uint32_t mask, CImVector color) {
 
     if (mask & GxBufferBit_Depth) {
         flags |= D3DCLEAR_ZBUFFER;
+    }
+
+    // DECOMP: stencil clear (an error on a depth buffer without stencil)
+    if ((mask & GxBufferBit_Stencil) && this->m_caps.m_stencilBits) {
+        flags |= D3DCLEAR_STENCIL;
     }
 
     if (this->m_viewportDirty) {
