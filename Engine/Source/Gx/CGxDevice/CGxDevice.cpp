@@ -116,7 +116,7 @@ void CGxDevice::DeviceCopyTex(CGxTex* source, uint32_t sourcePlane, CGxTex* dest
 }
 
 // VFOG: not in 12340; backends with a readable depth override it.
-CGxTex* CGxDevice::DeviceCopySceneDepth() {
+CGxTex* CGxDevice::DeviceCopySceneDepth(bool* transient) {
     return nullptr;
 }
 

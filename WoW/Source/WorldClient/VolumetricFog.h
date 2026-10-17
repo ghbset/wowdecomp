@@ -178,7 +178,7 @@ StockFogFit FitStockFogAt(const FogParams& fog, const FrameInputs& in, const Con
 
 // ===== WP6 renderer: VolumetricFogRenderer.cpp
 bool RendererReady();                       // shaders loaded and the device gives a scene depth texture
-void RenderFog(const FogParams& fog, const FrameInputs& in, const Config& cfg, uint32_t frame, double seconds);
+bool RenderFog(const FogParams& fog, const FrameInputs& in, const Config& cfg, uint32_t frame, double seconds);
 void InvalidateHistory();
 void RendererShutdown();
 
@@ -186,6 +186,7 @@ void RendererShutdown();
 void RegisterCVars();                       // from CWorldParam::Initialize
 bool Active();                              // fog will draw (or drew) this frame; stock fog is pushed out
 void OnWorldUpdate();                       // CWorld::Update, after CWorld::farFog is taken
+void OnViewerLiquid();                      // CWorldScene::Render, right after UpdateViewerLiquid
 void OnOpaqueDone();                        // after scene->Draw(M2PASS_0)
 void OnLiquidDone();                        // after RenderLiquidPass, above-water branch only
 void OnWorldDone();                         // end of CGWorldFrame::OnWorldRender

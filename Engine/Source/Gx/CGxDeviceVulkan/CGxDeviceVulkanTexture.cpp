@@ -645,7 +645,12 @@ namespace {
     VkFormat         g_sceneDepthRefused = VK_FORMAT_UNDEFINED;   ///< CreateDepthCopy failed for it: not retried (logged once)
 }
 
-CGxTex* CGxDeviceVulkan::DeviceCopySceneDepth() {
+CGxTex* CGxDeviceVulkan::DeviceCopySceneDepth(bool* transient) {
+    // Everything but a refused format or a failed create passes with the frame: retry next frame.
+    bool dummy;
+    bool& passing = transient ? *transient : dummy;
+    passing = true;
+
     if (!this->m_context || !this->m_drawPath) {
         return nullptr;
     }
@@ -653,7 +658,12 @@ CGxTex* CGxDeviceVulkan::DeviceCopySceneDepth() {
     const texture::Image* scene = frame::Scene();
     const VkFormat format = frame::DepthFormat();
 
-    if (!scene || format == VK_FORMAT_UNDEFINED || format == g_sceneDepthRefused) {
+    if (!scene || format == VK_FORMAT_UNDEFINED) {
+        return nullptr;
+    }
+
+    if (format == g_sceneDepthRefused) {
+        passing = false;
         return nullptr;
     }
 
@@ -671,6 +681,7 @@ CGxTex* CGxDeviceVulkan::DeviceCopySceneDepth() {
 
         if (!this->TexCreate(GxTex_2d, width, height, 0, GxTex_D24X8, GxTex_D24X8, flags, nullptr, nullptr, "VFogSceneDepth", g_sceneDepth)) {
             g_sceneDepth = nullptr;
+            passing = false;
             return nullptr;
         }
     }
@@ -699,6 +710,7 @@ CGxTex* CGxDeviceVulkan::DeviceCopySceneDepth() {
             // the device refuses would too, which no back buffer reaches.
             g_sceneDepthRefused = format;
             Write(Warn, "vulkan: VFOG: no sampled copy of the %ux%u scene depth; DeviceCopySceneDepth returns null", width, height);
+            passing = false;
             return nullptr;
         }
     }

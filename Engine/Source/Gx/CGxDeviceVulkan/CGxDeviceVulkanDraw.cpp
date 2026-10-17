@@ -264,10 +264,14 @@ void CGxDeviceVulkan::Draw(CGxBatch* batch, int32_t count) {
     memcpy(pixelRows, this->m_pixelRegs, sizeof(pixelRows));
     const uint32_t fogColour = this->m_appRenderStates[GxRs_FogColor].m_value.m_data.u[0];
     const bool fogOn = this->m_appRenderStates[GxRs_Fog].m_value.m_data.i[0] != 0 && (this->m_appMasterEnables & (1 << GxMasterEnable_Fog)) != 0;
-    pixelRows[15 * 4 + 0] = ((fogColour >> 16) & 0xFF) / 255.0f;
-    pixelRows[15 * 4 + 1] = ((fogColour >> 8) & 0xFF) / 255.0f;
-    pixelRows[15 * 4 + 2] = (fogColour & 0xFF) / 255.0f;
-    pixelRows[15 * 4 + 3] = fogOn ? 1.0f : 0.0f;
+    // A translated pixel record with more than kPixelRows rows (the VFog march and composite: their
+    // fog layers sit in c12..c35) owns c15 itself, so it keeps the value the engine set there.
+    if (d.fragment != pipelines::FragmentProgram::Translated || d.pixelRows <= pipelines::kPixelRows) {
+        pixelRows[15 * 4 + 0] = ((fogColour >> 16) & 0xFF) / 255.0f;
+        pixelRows[15 * 4 + 1] = ((fogColour >> 8) & 0xFF) / 255.0f;
+        pixelRows[15 * 4 + 2] = (fogColour & 0xFF) / 255.0f;
+        pixelRows[15 * 4 + 3] = fogOn ? 1.0f : 0.0f;
+    }
 
     // The fixed-function pixel program (Shaders/Ff.frag) applies D3D9's linear fog itself (the
     // D3D9 device sets D3DFOG_LINEAR vertex fog): its scale and bias on view z in row 14, which

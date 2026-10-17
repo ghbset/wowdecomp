@@ -340,10 +340,10 @@ void InvalidateHistory() {
     s_history.valid = false;
 }
 
-void RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg, uint32_t frame, double seconds) {
+bool RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg, uint32_t frame, double seconds) {
     CGxDevice* device = g_theGxDevicePtr;
     if (!device || s_depthUnsupported || s_shaderMissing) {
-        return;
+        return false;
     }
 
     // World viewport in pixels of the current target, D3D-style top-left origin (coa D3DVIEWPORT9), from the
@@ -364,13 +364,13 @@ void RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg,
     uint32_t lowW = (static_cast<uint32_t>(vpW) + scale - 1) / scale;
     uint32_t lowH = (static_cast<uint32_t>(vpH) + scale - 1) / scale;
     if (vpW < 1.0f || vpH < 1.0f || lowW < kMinTargetSize || lowH < kMinTargetSize) {
-        return;
+        return false;
     }
 
     float viewToWorld[16];
     float worldToView[16];
     if (!WorldViewFromCameraRelative(in, viewToWorld, worldToView)) {
-        return;
+        return false;
     }
 
     int quality = std::clamp(cfg.quality, 1, 3);
@@ -380,30 +380,35 @@ void RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg,
     FogParams fog = noisy && !authoredNoise ? WithMeanNoise(fogIn) : fogIn;
     noisy = noisy && authoredNoise;
 
+    // coa compiles the density variation into every march and composite; here it lives in the N variants.
+    CGxTex* densityNoise = cfg.noiseAmount > 0.0f ? AtlasTex(s_densityNoise, DensityNoiseAtlas(), "VFogDensityNoise") : nullptr;
+    const bool noiseVariant = noisy || densityNoise != nullptr;
+
     uint32_t lightCount = cfg.localLights ? static_cast<uint32_t>(std::clamp(in.localLightCount, 0, kMaxLocalLights)) : 0;
     bool lit = lightCount > 0;
-    CGxShader* unlitMarch = VariantShader(s_shaders.march, "VFogMarch", quality, false, noisy);
-    CGxShader* litMarch = lit ? VariantShader(s_shaders.march, "VFogMarch", quality, true, noisy) : unlitMarch;
-    CGxShader* composite = VariantShader(s_shaders.composite, "VFogComposite", quality, lit, noisy);
+    CGxShader* unlitMarch = VariantShader(s_shaders.march, "VFogMarch", quality, false, noiseVariant);
+    CGxShader* litMarch = lit ? VariantShader(s_shaders.march, "VFogMarch", quality, true, noiseVariant) : unlitMarch;
+    CGxShader* composite = VariantShader(s_shaders.composite, "VFogComposite", quality, lit, noiseVariant);
     bool temporal = cfg.temporal > 0.0f;
     if (!unlitMarch || !litMarch || !composite || (temporal && (!Shader(s_shaders.temporal, "VFogTemporal") || !Shader(s_shaders.historyDepth, "VFogHistoryDepth")))) {
         s_shaderMissing = true;
-        return;
+        return false;
     }
 
     if (!EnsureTargets(lowW, lowH)) {
-        return;
+        return false;
     }
 
     // Scene depth after the liquid pass (doc section 2 step 1).
-    CGxTex* depth = device->DeviceCopySceneDepth();
+    bool depthTransient = false;
+    CGxTex* depth = device->DeviceCopySceneDepth(&depthTransient);
     if (!depth) {
-        s_depthUnsupported = true;
-        return;
+        s_depthUnsupported = !depthTransient;
+        return false;
     }
 
     if (vpX < 0.0f || vpY < 0.0f || vpX + vpW > depth->m_width || vpY + vpH > depth->m_height) {
-        return;
+        return false;
     }
 
     const float* proj = in.glProjection;
@@ -476,7 +481,6 @@ void RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg,
     }
 
     // coa :1424-1429 density variation, the wind drift wrapped at the noise period.
-    CGxTex* densityNoise = cfg.noiseAmount > 0.0f ? AtlasTex(s_densityNoise, DensityNoiseAtlas(), "VFogDensityNoise") : nullptr;
     double windPeriod = kDensityNoiseSize / std::max(cfg.noiseScale, 0.001f);
     float variation[4] = { densityNoise ? cfg.noiseAmount : 0.0f, cfg.noiseScale, static_cast<float>(std::fmod(seconds * cfg.noiseWindSpeed, windPeriod)), 0.0f };
 
@@ -641,6 +645,7 @@ void RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg,
     s_history.localLightCount = static_cast<int>(lightCount);
     s_history.seconds = seconds;
     s_history.valid = temporal;
+    return true;
 }
 
 void RendererShutdown() {

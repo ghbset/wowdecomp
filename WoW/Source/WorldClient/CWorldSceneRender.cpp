@@ -26,6 +26,7 @@
 #include "WoW/Source/WorldClient/OcclusionCull.h"
 #include "WoW/Source/WorldClient/ShadowQuery.h"
 #include "WoW/Source/WorldClient/SortTable.h"
+#include "WoW/Source/WorldClient/VolumetricFog.h"
 #include "Engine/Source/Gx/CGxMatrixStack.h"
 #include "Engine/Source/ShaderEffect/ShadowCache.h"
 #include "Engine/Source/Tempest/C44Matrix.h"
@@ -75,6 +76,7 @@ void CWorldScene::Render(const C3Vector& cameraPos, float time) {
     }
 
     CWorldScene::UpdateViewerLiquid();
+    VolumetricFog::OnViewerLiquid();   // VFOG: not in 12340
     g_theGxDevicePtr->RsPush();
     g_theGxDevicePtr->XformPush(GxXform_World);
 

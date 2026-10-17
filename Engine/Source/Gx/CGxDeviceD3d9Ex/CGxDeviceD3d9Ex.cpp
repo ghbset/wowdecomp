@@ -3605,7 +3605,7 @@ void CGxDeviceD3d9Ex::IReleaseSceneDepth() {
 // VFOG: CGxDevice.h contract. No copy: the INTZ texture is the bound depth-stencil itself, sampled (.r = depth 0..1,
 // point filter) while the caller draws with depth test and write off, as coa-vfog does. nullptr when INTZ is not in
 // use (MSAA, unsupported, device lost).
-CGxTex* CGxDeviceD3d9Ex::DeviceCopySceneDepth() {
+CGxTex* CGxDeviceD3d9Ex::DeviceCopySceneDepth(bool* transient) {
     if (!this->m_context || !this->m_sceneDepthTexture) {
         return nullptr;
     }

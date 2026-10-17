@@ -426,6 +426,19 @@ void OnWorldUpdate() {
     PushStockFogOutOfRange();
 }
 
+void OnViewerLiquid() {
+    // OnWorldUpdate decided on last frame's liquid status (UpdateViewerLiquid writes it later, in CWorldScene::Render,
+    // which calls this right after it and before anything is drawn): the camera just went under, so the frame takes
+    // the underwater branch, which has no composite. Give it the stock fog.
+    if (!s_active || !World::SceneCamLiquidStatus(nullptr)) {
+        return;
+    }
+    RestoreStockFog();
+    InvalidateHistory();
+    s_active = false;
+    s_wasActive = false;
+}
+
 void OnOpaqueDone() {
     if (!s_active) {
         return;
@@ -474,13 +487,21 @@ void OnOpaqueDone() {
 }
 
 void OnLiquidDone() {
-    if (!s_active || !s_opaqueValid) {
+    if (!s_active) {
         return;
     }
 
     const double seconds = FrameTime::s_curTimeMs * 0.001;
-    s_params = BuildFogParams(s_in, s_cfg);
-    RenderFog(s_params, s_in, s_cfg, s_frame++, seconds);
+    bool drawn = false;
+    if (s_opaqueValid) {
+        s_params = BuildFogParams(s_in, s_cfg);
+        drawn = RenderFog(s_params, s_in, s_cfg, s_frame++, seconds);
+    }
+    if (!drawn) {
+        // Nothing composited: the late passes get the stock fog back, not the fitted one.
+        RestoreStockFog();
+        return;
+    }
 
     s_fit = s_cfg.transparentFog ? FitStockFog(s_params, s_in, s_cfg) : StockFogFit{};
     s_modelFitCached = false;

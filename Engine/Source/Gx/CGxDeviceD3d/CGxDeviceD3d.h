@@ -270,7 +270,7 @@ class CGxDeviceD3d : public CGxDevice {
     virtual void DeviceSaveDepthSurface();
     virtual void DeviceRestoreDepthSurface();
     virtual void DeviceResolveDepthBuffer(CGxTex* texture);
-    virtual CGxTex* DeviceCopySceneDepth();
+    virtual CGxTex* DeviceCopySceneDepth(bool* transient = nullptr);
     virtual void DeviceCopyTex(CGxTex* source, uint32_t sourcePlane, CGxTex* dest, uint32_t destPlane);
     virtual void DeviceOverride(EGxOverride override, uint32_t value);
     virtual void CapsWindowSize(CRect& rect);

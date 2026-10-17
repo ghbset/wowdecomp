@@ -1337,7 +1337,7 @@ void CGxDeviceD3d11::DeviceResolveDepthBuffer(CGxTex* texture) {
 // can be bound as an SRV while m_depthDsv stays the DSV (IBindRenderTargets only drops SRVs, IStateSyncTextures
 // rebinds it on the next draw). Resize/device recreate: ITexForceRecreation releases it (render-target flag), and
 // a size change makes a new one here. MSAA or a non-D24 depth format: nullptr.
-CGxTex* CGxDeviceD3d11::DeviceCopySceneDepth() {
+CGxTex* CGxDeviceD3d11::DeviceCopySceneDepth(bool* transient) {
     if (!this->m_context || !this->m_depthTexture) {
         return nullptr;
     }
