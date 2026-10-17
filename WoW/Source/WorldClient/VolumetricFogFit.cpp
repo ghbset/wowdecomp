@@ -82,10 +82,11 @@ float SmoothStep(float edge0, float edge1, float x) {
     return t * t * (3.0f - 2.0f * t);
 }
 
-// coa renderer.cpp:1479 (composite c96.x). The native composite blends fixed-function and leaves c98.w (glow
-// compensation, scene-copy paths only) at 0, so the fit compensates no glow either, to match what was drawn.
-FitLight CompositeLight(const FogParams& fog, const FrameInputs&, const Config& cfg) {
-    return { fog.authored ? cfg.classicExposure : cfg.exposure, 0.0f };
+// coa renderer.cpp:1479 (composite c96.x, c98.w). Glow is compensated only when the composite blended over a
+// scene copy (VolumetricFogRenderer.cpp), so the fit matches what was drawn.
+FitLight CompositeLight(const FogParams& fog, const FrameInputs& in, const Config& cfg) {
+    const float glow = CompositeOverSceneCopy() && cfg.glowCompensation ? in.clientGlowAmount : 0.0f;
+    return { fog.authored ? cfg.classicExposure : cfg.exposure, glow };
 }
 
 FogRayLights CompositeLights(const FrameInputs& in, const Config& cfg) {
@@ -314,8 +315,8 @@ StockFogFit FitStockFogAt(const FogParams& drawn, const FrameInputs& in, const C
     fit.end = depth / opacity;
     fit.density = kLinearStockFogExponent;
     FittedFogColour(&ray, samples, 1, fog.linear, light, fit.color);
-    if (!fog.linear) {
-        return fit;
+    if (!fog.linear || !CompositeOverSceneCopy()) {
+        return fit;     // the fixed-function composite mixes display colours, as the model's shader does
     }
     // The composite fogs in linear light (out = surface T + S); the model's shader mixes display colours
     // (out = surface (1 - f) + C f). f and C are the pair that matches the composite for a black surface and a

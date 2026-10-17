@@ -288,7 +288,8 @@ bool HaloHue(const AuthoredFog& fog, float* displayReferredRgb) {
     return true;
 }
 
-// fog_model.cpp:295-312. coa gated on its own cameraInterior flag; DNInfo's m_interiorFogBlend is 0 outdoors.
+// fog_model.cpp:295-312. in.interiorBlend is already 0 unless the camera is in an interior WMO group (coa's
+// cameraInterior gate, VolumetricFog.cpp CameraInInteriorGroup).
 float InteriorWeight(const FrameInputs& in, const Config& cfg) {
     return cfg.interiorAware && std::isfinite(in.interiorBlend) ? std::clamp(in.interiorBlend, 0.0f, 1.0f) : 0.0f;
 }

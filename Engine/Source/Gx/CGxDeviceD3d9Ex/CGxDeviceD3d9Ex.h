@@ -257,6 +257,7 @@ class CGxDeviceD3d9Ex : public CGxDevice {
     // fog can sample it (DeviceCopySceneDepth). m_sceneDepthTex wraps it, lives for the device's lifetime and is
     // never in m_textures, so texture recreation leaves it alone.
     LPDIRECT3DTEXTURE9 m_sceneDepthTexture;
+    LPDIRECT3DSURFACE9 m_sceneDepthUnbound = nullptr;  // the depth-stencil DeviceSceneDepthBound(false) took off
     CGxTex* m_sceneDepthTex;
 
     virtual void ITexMarkAsUpdated(CGxTex* texId);
@@ -281,6 +282,7 @@ class CGxDeviceD3d9Ex : public CGxDevice {
     virtual void DeviceRestoreDepthSurface();
     virtual void DeviceResolveDepthBuffer(CGxTex* texture);
     virtual CGxTex* DeviceCopySceneDepth(bool* transient = nullptr);
+    virtual void DeviceSceneDepthBound(bool bound);
     virtual void DeviceCopyTex(CGxTex* source, uint32_t sourcePlane, CGxTex* dest, uint32_t destPlane);
     virtual void DeviceOverride(EGxOverride override, uint32_t value);
     virtual void CapsWindowSize(CRect& rect);

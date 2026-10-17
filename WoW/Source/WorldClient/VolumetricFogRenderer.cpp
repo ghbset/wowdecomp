@@ -39,7 +39,7 @@ constexpr double kMaxNoiseStepSeconds = 0.25;       // coa renderer.cpp:67
 constexpr float kNearQuarterTurn = 1.57f;           // wxl-vfog ec1c66b
 constexpr uint32_t kMinTargetSize = 8;              // GxTexCreate's minimum
 
-enum Blend { Blend_GammaFixedFunction = 0, Blend_LinearFixedFunction = 2 };     // coa FogBlend, no scene copy
+enum Blend { Blend_GammaFixedFunction = 0, Blend_LinearOverSceneCopy = 1, Blend_LinearFixedFunction = 2 };     // coa FogBlend
 
 struct Shaders {
     CGxShader* march[3][2][2];          // [quality-1][local lights][noise]
@@ -54,6 +54,9 @@ struct Targets {
     CGxTex* march;
     CGxTex* history[2];
     CGxTex* historyDepth[2];
+    CGxTex* sceneCopy;          // full world viewport, coa LinearOverSceneCopy (s3)
+    uint32_t sceneCopyWidth;
+    uint32_t sceneCopyHeight;
 };
 
 struct History {
@@ -80,6 +83,7 @@ double s_noiseSeconds = -1.0;
 bool s_callbackAdded;
 bool s_depthUnsupported;        // DeviceCopySceneDepth gave nullptr; cleared on device restore
 bool s_shaderMissing;           // a needed VFog shader is not in the MPQ
+bool s_overSceneCopy;           // the last composite blended in linear light over a scene copy
 
 CGxShader* Shader(CGxShader*& slot, const char* name) {
     if (!slot) {
@@ -108,6 +112,9 @@ void DestroyTargets() {
         DestroyTex(s_targets.history[i]);
         DestroyTex(s_targets.historyDepth[i]);
     }
+    DestroyTex(s_targets.sceneCopy);
+    s_targets.sceneCopyWidth = 0;
+    s_targets.sceneCopyHeight = 0;
 
     s_targets.width = 0;
     s_targets.height = 0;
@@ -148,6 +155,24 @@ bool EnsureTargets(uint32_t width, uint32_t height) {
     s_targets.width = width;
     s_targets.height = height;
     return true;
+}
+
+// coa renderer.cpp:1446 LinearOverSceneCopy: the world viewport of the back buffer, before the fog. Every backend's
+// TexCopy reads the back buffer (D3D9 StretchRect, D3D11 resolved back buffer, Vulkan frame::CopyFromScene).
+CGxTex* CopySceneBeforeFog(uint32_t x, uint32_t y, uint32_t width, uint32_t height) {
+    if (!s_targets.sceneCopy || s_targets.sceneCopyWidth != width || s_targets.sceneCopyHeight != height) {
+        DestroyTex(s_targets.sceneCopy);
+        s_targets.sceneCopy = CreateTarget(width, height);
+        if (!s_targets.sceneCopy) {
+            return nullptr;
+        }
+        s_targets.sceneCopyWidth = width;
+        s_targets.sceneCopyHeight = height;
+    }
+    const C2iVector dest = { 0, 0 };
+    const C2iVector source = { static_cast<int32_t>(x), static_cast<int32_t>(y) };
+    const C2iVector size = { static_cast<int32_t>(width), static_cast<int32_t>(height) };
+    return GxTexCopy(s_targets.sceneCopy, dest, source, size, 0, 0) ? s_targets.sceneCopy : nullptr;
 }
 
 void AtlasTexCallback(EGxTexCommand command, uint32_t width, uint32_t height, uint32_t depth, uint32_t mipLevel, void* userArg, uint32_t& texelStrideInBytes, const void*& texels) {
@@ -599,14 +624,21 @@ bool RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg,
     world.maxY = vpMaxY;
     device->SetScissor(world);
     GxRsSet(GxRs_ScissorTest, 1);
-    GxRsSet(GxRs_BlendingMode, GxBlend_Alpha);
     GxRsSet(GxRs_ColorWrite, 7);    // RGB
+
+    // coa's default for ColorSpace=1: blend in linear light over a copy of the scene, drawn opaque; the
+    // fixed-function alpha blend is the fallback when the copy fails (or the world is not on the back buffer).
+    CGxTex* sceneCopy = fog.linear && !prevTarget ? CopySceneBeforeFog(static_cast<uint32_t>(vpX), static_cast<uint32_t>(vpY), static_cast<uint32_t>(vpW), static_cast<uint32_t>(vpH)) : nullptr;
+    s_overSceneCopy = sceneCopy != nullptr;
+    GxRsSet(GxRs_BlendingMode, sceneCopy ? GxBlend_Opaque : GxBlend_Alpha);
+    const Blend blend = sceneCopy ? Blend_LinearOverSceneCopy : fog.linear ? Blend_LinearFixedFunction : Blend_GammaFixedFunction;
+    const float glow = sceneCopy && cfg.glowCompensation ? in.clientGlowAmount : 0.0f;
 
     float exposure = fog.authored ? cfg.classicExposure : cfg.exposure;
     float compositeConstants[3][4] = {
-        { exposure, 0.0f, static_cast<float>(cfg.debugView), static_cast<float>(fog.linear ? Blend_LinearFixedFunction : Blend_GammaFixedFunction) },
+        { exposure, 0.0f, static_cast<float>(cfg.debugView), static_cast<float>(blend) },
         { fog.rayColor[0], fog.rayColor[1], fog.rayColor[2], 0.0f },    // w = 0: no dither
-        { sunPx[0], sunPx[1], 0.0f, 0.0f },                               // glow compensation only over a scene copy
+        { sunPx[0], sunPx[1], 0.0f, glow },                               // coa m_drawnGlowCompensation
     };
     const FogParams compositeFog = lit ? WithMeanNoise(fog) : fog;
     SetPs(9, celestialLight, 1);
@@ -616,15 +648,18 @@ bool RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg,
     Bind(0, depth);
     Bind(1, fogResult);
     Bind(2, nullptr);
-    Bind(3, nullptr);
+    Bind(3, sceneCopy);
     Bind(4, s_targets.march);
     device->RsSet(GxRs_PixelShader, composite);
     // VFogComposite reads TEXCOORD0 as uv across the world viewport (vf_common FullPixelFromUv: c0.xy + uv * c0.zw).
+    device->DeviceSceneDepthBound(false);   // D3D9: s0 is the INTZ depth-stencil the back buffer uses
     DrawQuad(static_cast<uint32_t>(vpW), static_cast<uint32_t>(vpH), vpMinX, vpMaxX, vpMinY, vpMaxY);
+    device->DeviceSceneDepthBound(true);
 
     // ---- restore ------------------------------------------------------------------------------------
     Bind(0, nullptr);
     Bind(1, nullptr);
+    Bind(3, nullptr);
     Bind(4, nullptr);
     device->RsPop();
     GxXformPop(GxXform_World);
@@ -646,6 +681,10 @@ bool RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg,
     s_history.seconds = seconds;
     s_history.valid = temporal;
     return true;
+}
+
+bool CompositeOverSceneCopy() {
+    return s_overSceneCopy;
 }
 
 void RendererShutdown() {

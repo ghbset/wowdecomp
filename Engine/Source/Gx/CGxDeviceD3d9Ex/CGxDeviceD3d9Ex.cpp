@@ -3605,6 +3605,39 @@ void CGxDeviceD3d9Ex::IReleaseSceneDepth() {
 // VFOG: CGxDevice.h contract. No copy: the INTZ texture is the bound depth-stencil itself, sampled (.r = depth 0..1,
 // point filter) while the caller draws with depth test and write off, as coa-vfog does. nullptr when INTZ is not in
 // use (MSAA, unsupported, device lost).
+// VFOG: reading a texture that is the bound depth-stencil is undefined in D3D9 even with depth test and write off.
+void CGxDeviceD3d9Ex::DeviceSceneDepthBound(bool bound) {
+    if (!this->m_d3dDevice) {
+        return;
+    }
+    if (bound) {
+        if (this->m_sceneDepthUnbound) {
+            this->m_d3dDevice->SetDepthStencilSurface(this->m_sceneDepthUnbound);
+            this->m_sceneDepthUnbound->Release();
+            this->m_sceneDepthUnbound = nullptr;
+        }
+        return;
+    }
+    if (this->m_sceneDepthUnbound || !this->m_sceneDepthTexture) {
+        return;
+    }
+    LPDIRECT3DSURFACE9 bound0 = nullptr;
+    LPDIRECT3DSURFACE9 intz = nullptr;
+    if (SUCCEEDED(this->m_d3dDevice->GetDepthStencilSurface(&bound0)) && bound0 && SUCCEEDED(this->m_sceneDepthTexture->GetSurfaceLevel(0, &intz))) {
+        if (bound0 == intz) {
+            this->m_d3dDevice->SetDepthStencilSurface(nullptr);
+            this->m_sceneDepthUnbound = bound0;     // keeps the reference until it goes back
+            bound0 = nullptr;
+        }
+    }
+    if (intz) {
+        intz->Release();
+    }
+    if (bound0) {
+        bound0->Release();
+    }
+}
+
 CGxTex* CGxDeviceD3d9Ex::DeviceCopySceneDepth(bool* transient) {
     if (!this->m_context || !this->m_sceneDepthTexture) {
         return nullptr;

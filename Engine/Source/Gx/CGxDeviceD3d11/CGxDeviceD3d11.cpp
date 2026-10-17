@@ -208,8 +208,9 @@ CGxDeviceD3d11::CGxDeviceD3d11() {
     this->m_depthTexture = nullptr;
     this->m_depthDsv = nullptr;
     this->m_depthSrv = nullptr;
-    this->m_rtDepthTexture = nullptr;
-    this->m_rtDepthDsv = nullptr;
+    memset(this->m_rtDepthTexture, 0, sizeof(this->m_rtDepthTexture));
+    memset(this->m_rtDepthDsv, 0, sizeof(this->m_rtDepthDsv));
+    this->m_rtDepthNext = 0;
     this->m_resolveTexture = nullptr;
     this->m_sceneDepthCopy = nullptr;
     this->m_constantBuffers[0] = nullptr;
@@ -1179,8 +1180,10 @@ void CGxDeviceD3d11::IReleaseBackBuffer() {
     SafeRelease(this->m_depthSrv);
     SafeRelease(this->m_depthDsv);
     SafeRelease(this->m_depthTexture);
-    SafeRelease(this->m_rtDepthDsv);
-    SafeRelease(this->m_rtDepthTexture);
+    for (int i = 0; i < kRtDepthSlots; i++) {
+        SafeRelease(this->m_rtDepthDsv[i]);
+        SafeRelease(this->m_rtDepthTexture[i]);
+    }
     SafeRelease(this->m_resolveTexture);
     SafeRelease(this->m_backBufferSrv);
 }
@@ -1196,23 +1199,29 @@ void CGxDeviceD3d11::IBindRenderTargets() {
 
         if (!this->m_textureTarget[GxBuffers_Depth].m_apiSpecific) {
             CGxTex* color = this->m_textureTarget[GxBuffers_Color].m_texture;
-            D3D11_TEXTURE2D_DESC desc;
+            int slot = -1;
 
-            if (this->m_rtDepthTexture) {
-                this->m_rtDepthTexture->GetDesc(&desc);
+            // One scratch depth per target size, so FFX and vfog ping-pong no longer recreates one every frame.
+            for (int i = 0; i < kRtDepthSlots && slot < 0; i++) {
+                D3D11_TEXTURE2D_DESC desc;
 
-                if (desc.Width != color->m_width || desc.Height != color->m_height) {
-                    SafeRelease(this->m_rtDepthDsv);
-                    SafeRelease(this->m_rtDepthTexture);
+                if (this->m_rtDepthTexture[i]) {
+                    this->m_rtDepthTexture[i]->GetDesc(&desc);
+
+                    if (desc.Width == color->m_width && desc.Height == color->m_height) {
+                        slot = i;
+                    }
                 }
             }
 
-            // ponytail: one scratch depth, recreated on every size change; cache per size if RT ping-pong shows up.
-            if (!this->m_rtDepthTexture) {
-                this->ICreateDepth(color->m_width, color->m_height, 1, this->m_rtDepthTexture, this->m_rtDepthDsv, nullptr);
+            if (slot < 0) {
+                slot = static_cast<int>(this->m_rtDepthNext++ % kRtDepthSlots);
+                SafeRelease(this->m_rtDepthDsv[slot]);
+                SafeRelease(this->m_rtDepthTexture[slot]);
+                this->ICreateDepth(color->m_width, color->m_height, 1, this->m_rtDepthTexture[slot], this->m_rtDepthDsv[slot], nullptr);
             }
 
-            dsv = this->m_rtDepthDsv;
+            dsv = this->m_rtDepthDsv[slot];
         }
     }
 

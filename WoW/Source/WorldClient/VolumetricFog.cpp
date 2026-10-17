@@ -13,8 +13,12 @@
 #include "Engine/Source/Model2/M2Scene.h"
 #include "WoW/Source/UIUtil/Camera.h"
 #include "WoW/Source/Ui/WorldFrame.h"
+#include "WoW/Source/WorldClient/DayNight.h"
 #include "WoW/Source/WorldClient/DayNight__DNInfo.h"
 #include "WoW/Source/WorldClient/FrameTime.h"
+#include "WoW/Source/WorldClient/MapObj.h"
+#include "WoW/Source/WorldClient/MapObjDef.h"
+#include "WoW/Source/WorldClient/MapObjGroup.h"
 #include "WoW/Source/WorldClient/VolumetricFogDriver.h"
 #include "WoW/Source/WorldClient/World.h"
 
@@ -72,9 +76,16 @@ Config s_cfg;
 FrameInputs s_in = {};
 FogParams s_params = {};
 StockFogFit s_fit = {};
-StockFogFit s_modelFit = {};
-float s_modelFitPos[3] = {};
-bool s_modelFitCached = false;
+// Per-model fits for this frame, keyed on the model position (batches of many models interleave back to front).
+struct ModelFit {
+    uint32_t stamp;
+    float pos[3];
+    StockFogFit fit;
+};
+constexpr uint32_t kModelFitSlots = 128;
+ModelFit s_modelFits[kModelFitSlots] = {};
+uint32_t s_fitStamp = 1;      // bumped per composite; a slot from an older stamp is empty
+bool s_glareDrawn = false;    // RenderGlares ran before the composite this frame (coa DrawGlareBeforeTheFog)
 SavedFog s_saved = {};
 bool s_pushed = false;
 bool s_active = false;
@@ -162,6 +173,27 @@ void PushStockFogOutOfRange() {
     s_pushed = true;
 }
 
+// coa engine_lights.cpp CaptureInteriorUnsafe: m_interiorFogBlend is also set inside exterior WMO fog volumes
+// (DayNight::UpdateFog), so it counts only when one of the camera's loaded groups lacks the exterior flags 0x48.
+bool CameraInInteriorGroup() {
+    CMapObjDef* def = CWorldScene::s_viewerMapObjDef;
+    CMapObj* owner = def ? def->m_owner : nullptr;
+    if (!owner || !owner->m_isGroupLoaded) {
+        return false;
+    }
+    const TSGrowableArray<uint32_t>& ids = CWorldScene::s_viewerMapObjGroups;
+    for (uint32_t i = 0; i < ids.m_count; ++i) {
+        if (ids.m_data[i] >= static_cast<uint32_t>(owner->m_groupInfoCount)) {
+            continue;
+        }
+        const CMapObjGroup* group = owner->GetGroup(static_cast<int32_t>(ids.m_data[i]), 0);
+        if (group && !(group->m_flags & 0x48)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // coa engine.cpp BuildFrameInputsUnsafe + ReadLightParamsSelection, the DNInfo half (before the push-out).
 void ReadDayNightInputs(FrameInputs& in) {
     const DayNight::DNInfo& info = DayNight::g_dnInfo;
@@ -176,7 +208,7 @@ void ReadDayNightInputs(FrameInputs& in) {
     in.farClip = World::s_farClip;
     in.inLiquid = false;
     in.clientGlowAmount = GlowScreenEffectRuns() ? Clamp01(info.m_bands.m_glow) : 0.0f;
-    in.interiorBlend = Clamp01(info.m_interiorFogBlend);
+    in.interiorBlend = CameraInInteriorGroup() ? Clamp01(info.m_interiorFogBlend) : 0.0f;
     in.stormBlend = Clamp01(info.m_stormBlend);
     const int32_t slot = static_cast<int32_t>(info.m_overrideLightParamsId);
     in.screenEffectSlot = slot >= 0 && slot < kLightParamsSlots ? slot : -1;
@@ -355,13 +387,17 @@ const StockFogFit& FitFor(const float modelPos[3]) {
     if (!Finite(modelPos, 3) || dx * dx + dy * dy + dz * dz <= kFitRange * kFitRange) {
         return s_fit;
     }
-    // ponytail: one cached model per frame (batches of a model come in a row); a small map if far models interleave.
-    if (!s_modelFitCached || std::memcmp(s_modelFitPos, modelPos, sizeof(s_modelFitPos)) != 0) {
-        s_modelFit = FitStockFogAt(s_params, s_in, s_cfg, modelPos);
-        std::memcpy(s_modelFitPos, modelPos, sizeof(s_modelFitPos));
-        s_modelFitCached = true;
+    // ponytail: direct-mapped, a colliding model just refits; go set-associative if collisions show in a profile.
+    uint32_t bits[3];
+    std::memcpy(bits, modelPos, sizeof(bits));
+    const uint32_t hash = (bits[0] * 73856093u) ^ (bits[1] * 19349663u) ^ (bits[2] * 83492791u);
+    ModelFit& slot = s_modelFits[(hash ^ (hash >> 16)) % kModelFitSlots];
+    if (slot.stamp != s_fitStamp || std::memcmp(slot.pos, modelPos, sizeof(slot.pos)) != 0) {
+        slot.fit = FitStockFogAt(s_params, s_in, s_cfg, modelPos);
+        std::memcpy(slot.pos, modelPos, sizeof(slot.pos));
+        slot.stamp = s_fitStamp;
     }
-    return s_modelFit;
+    return slot.fit;
 }
 
 bool FogParticles() {
@@ -382,7 +418,7 @@ void RegisterCVars() {
     s_cvars.ambient = CVar::Register("vfogAmbient", "Volumetric fog ambient light scale", 1, "1.75", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.data = CVar::Register("vfogData", "Volumetric fog: 0 = derived layers only, 1 = authored fog data where it covers", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.localLights = CVar::Register("vfogLocalLights", "Volumetric fog lit by nearby point lights", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
-    s_cvars.transparent = CVar::Register("vfogTransparent", "Fit the volumetric fog onto transparents drawn after it", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    s_cvars.transparent = CVar::Register("vfogTransparent", "Volumetric fog: 1 = composite before transparents and fit the fog onto them, 0 = one composite after the whole world", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.startOffset = CVar::Register("vfogStartOffset", "Volumetric fog start distance (yards)", 1, "10", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.maxDistance = CVar::Register("vfogMaxDistance", "Volumetric fog maximum march distance (yards)", 1, "5000", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.noise = CVar::Register("vfogNoise", "Volumetric fog density noise amount", 1, "0.15", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
@@ -404,6 +440,7 @@ void OnWorldUpdate() {
     }
     s_armed = false;
     s_opaqueValid = false;
+    s_glareDrawn = false;
     s_cfg = ReadConfig();
 
     if (s_cfg.enable && !s_dataLoaded) {
@@ -486,30 +523,47 @@ void OnOpaqueDone() {
                     Finite(in.cameraRelativeView, 16) && Finite(in.camPos, 3) && std::isfinite(in.fogStart) && std::isfinite(in.fogEnd);
 }
 
+bool Composite() {
+    if (!s_opaqueValid) {
+        return false;
+    }
+    s_params = BuildFogParams(s_in, s_cfg);
+    return RenderFog(s_params, s_in, s_cfg, s_frame++, FrameTime::s_curTimeMs * 0.001);
+}
+
 void OnLiquidDone() {
-    if (!s_active) {
+    // vfogTransparent 0 is coa's TransparentFog=0: one composite after the whole world (OnWorldDone), so
+    // transparents take the fog of the scene behind them.
+    if (!s_active || !s_cfg.transparentFog) {
         return;
     }
 
-    const double seconds = FrameTime::s_curTimeMs * 0.001;
-    bool drawn = false;
+    // coa DrawGlareBeforeTheFog: the sun and moon glare goes under the fog with the scene; the stock call is skipped.
     if (s_opaqueValid) {
-        s_params = BuildFogParams(s_in, s_cfg);
-        drawn = RenderFog(s_params, s_in, s_cfg, s_frame++, seconds);
+        DayNight::RenderGlares();
+        s_glareDrawn = true;
     }
-    if (!drawn) {
+    if (!Composite()) {
         // Nothing composited: the late passes get the stock fog back, not the fitted one.
         RestoreStockFog();
         return;
     }
 
-    s_fit = s_cfg.transparentFog ? FitStockFog(s_params, s_in, s_cfg) : StockFogFit{};
-    s_modelFitCached = false;
+    s_fit = FitStockFog(s_params, s_in, s_cfg);
+    s_fitStamp++;
     s_armed = true;
 }
 
+bool GlareDrawn() {
+    return s_glareDrawn;
+}
+
 void OnWorldDone() {
+    if (s_active && !s_cfg.transparentFog) {
+        Composite();
+    }
     s_armed = false;
+    s_glareDrawn = false;
     RestoreStockFog();
 }
 

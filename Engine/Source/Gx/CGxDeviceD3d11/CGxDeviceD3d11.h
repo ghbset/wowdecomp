@@ -65,8 +65,10 @@ class CGxDeviceD3d11 : public CGxDevice {
     ID3D11Texture2D* m_depthTexture;
     ID3D11DepthStencilView* m_depthDsv;
     ID3D11ShaderResourceView* m_depthSrv;
-    ID3D11Texture2D* m_rtDepthTexture;
-    ID3D11DepthStencilView* m_rtDepthDsv;
+    static constexpr int kRtDepthSlots = 4;     // FFX glow (full/half/quarter) + vfog low-res: one scratch depth each
+    ID3D11Texture2D* m_rtDepthTexture[kRtDepthSlots];
+    ID3D11DepthStencilView* m_rtDepthDsv[kRtDepthSlots];
+    uint32_t m_rtDepthNext;     // slot replaced on the next miss (round robin)
     ID3D11Texture2D* m_resolveTexture;
     CGxTex* m_sceneDepthCopy; // VFOG: DeviceCopySceneDepth's GxTex_D24X8 snapshot of m_depthTexture
     ID3D11Buffer* m_constantBuffers[2]; // [0] VS b0, [1] PS b0: app register files (s_shadowConstants)

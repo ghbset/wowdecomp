@@ -1784,7 +1784,9 @@ void CGWorldFrame::OnWorldRender() {
     CWorldScene::RenderParticulate();
     GxuSortDrawList(GxuCat_1, GxuSort_B2F, *World::GetCamPos());
     GxuFlushDrawList(GxuCat_1, *World::GetCamPos());
-    DayNight::RenderGlares();
+    if (!VolumetricFog::GlareDrawn()) {   // VFOG: drawn before the fog composite instead (coa GlarePassThunk)
+        DayNight::RenderGlares();
+    }
     PlayerNameUpdateLate();
 
     if (CWorld::enables & 0x20000000) {

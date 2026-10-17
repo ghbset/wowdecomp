@@ -44,8 +44,12 @@ The decisions:
   `OnWorldUpdate` knows this frame's answer before any fog constant is built. `Active()` is true when: CVar
   `vfog` is set, `RendererReady()`, the camera is not in liquid (`World::SceneCamLiquidStatus`), and FFX/fog
   master enable allow it. The push happens after `farFog` is read, so object fog culling stays stock.
-- **Early composite only, no late composite.** coa's default draws at FFX::Finish. We use its TransparentFog
-  mode, which wxl-vfog shipped as its default. With stock fog pushed out, anything drawn after the composite
+- **Early composite by default.** coa's default draws at FFX::Finish. We use its TransparentFog
+  mode, which wxl-vfog shipped as its default. `vfogTransparent 0` is coa's TransparentFog=0: one composite in
+  `OnWorldDone`, after the whole world, so transparents take the fog of the scene behind them. In the early mode
+  the sun/moon glare (`DayNight::RenderGlares`) is drawn just before the composite and the stock call skipped
+  (coa DrawGlareBeforeTheFog). The interior blend counts only when a camera WMO group lacks flags 0x48 (coa
+  CaptureInteriorUnsafe). With stock fog pushed out, anything drawn after the composite
   would otherwise be bare. Transparents drawn after it (weather, M2PASS_1, spell visuals, particles, GxuCat_1)
   get the fitted linear fog. The fit uses the screen-wide fit, or the per-model fit when the model is past the
   fit range (wxl-vfog 0.4/0.6.13).
@@ -71,8 +75,13 @@ Every pass draws one full-screen quad through the fixed-function VS. The quad us
 `FFX::s_quadBatch` conventions and passes **TEXCOORD0 = target uv**. The shader turns uv into a pixel
 position instead of using VPOS, because the Vulkan emitter has no vPos.
 
-Blend: the Gx API has no (ONE, INVSRCALPHA). So the composite outputs `float4(fog.rgb / max(a, 1e-4), a)`
-and draws with `GxBlend_Alpha` (SRCALPHA, INVSRCALPHA), which gives the same result. `GxRs_ColorWrite` is
+Blend: with ColorSpace=1 the composite is coa's default LinearOverSceneCopy: `GxTexCopy` copies the world
+viewport of the back buffer (every backend: D3D9 StretchRect, D3D11 resolved back buffer, Vulkan CopyFromScene)
+to s3, and the composite draws opaque, blending in linear light with glow compensation (c98.w). If the copy fails
+or the world is not on the back buffer, the fallback: the Gx API has no (ONE, INVSRCALPHA), so the composite
+outputs `float4(fog.rgb / max(a, 1e-4), a)` and draws with `GxBlend_Alpha` (SRCALPHA, INVSRCALPHA). The stock-fog
+fits follow the blend actually drawn (`CompositeOverSceneCopy()`). On D3D9 the INTZ depth-stencil is unbound
+around the composite (`DeviceSceneDepthBound`). `GxRs_ColorWrite` is
 RGB only, and depth test and write are off. Linear mode (ColorSpace=1) does the gamma math in the shader
 as coa does. Use the blend-over-scene-copy path only if the premultiplied form shows banding.
 

@@ -180,6 +180,7 @@ StockFogFit FitStockFogAt(const FogParams& fog, const FrameInputs& in, const Con
 bool RendererReady();                       // shaders loaded and the device gives a scene depth texture
 bool RenderFog(const FogParams& fog, const FrameInputs& in, const Config& cfg, uint32_t frame, double seconds);
 void InvalidateHistory();
+bool CompositeOverSceneCopy();              // last RenderFog blended over a scene copy (coa LinearOverSceneCopy)
 void RendererShutdown();
 
 // ===== WP7 driver: VolumetricFog.cpp
@@ -190,6 +191,7 @@ void OnViewerLiquid();                      // CWorldScene::Render, right after 
 void OnOpaqueDone();                        // after scene->Draw(M2PASS_0)
 void OnLiquidDone();                        // after RenderLiquidPass, above-water branch only
 void OnWorldDone();                         // end of CGWorldFrame::OnWorldRender
+bool GlareDrawn();                          // OnLiquidDone drew DayNight::RenderGlares under the fog: skip the stock call
 bool LiquidDepthWrite();                    // force liquid depth writes while Active()
 bool BatchFog(const float modelPos[3], float& start, float& end, float& density, float color[3]);
 

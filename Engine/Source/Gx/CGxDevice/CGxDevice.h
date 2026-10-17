@@ -249,6 +249,9 @@ class CGxDevice {
     // nullptr = unsupported (the volumetric fog then stays off), or, with *transient set, not available
     // this frame only (retry next frame). docs/VFOG_PORT.md.
     virtual CGxTex* DeviceCopySceneDepth(bool* transient = nullptr);
+    // VFOG: D3D9's scene depth IS the bound depth-stencil; false unbinds it before a draw that samples it, true
+    // puts it back (coa renderer.cpp PrepareFullscreenPasses). No-op where the depth is a separate copy.
+    virtual void DeviceSceneDepthBound(bool bound) {}
 
     static HSLOG m_log;
     static C2iVector s_clientAdjust;
