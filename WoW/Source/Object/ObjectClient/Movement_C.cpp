@@ -6,6 +6,7 @@
 #include "WoW/Source/Object/CMovementGlobals.h"
 #include "WoW/Source/Object/CMoveSpline.h"
 #include "WoW/Source/Object/Movement.h"
+#include "WoW/Source/Object/SmoothMove.h"
 #include "WoW/Source/Object/ObjectClient/GameObject_C.h"
 #include "WoW/Source/Object/ObjectClient/Unit_C.h"
 #include "WoW/Source/Object/ObjectClient/Vehicle_C.h"
@@ -201,6 +202,8 @@ int32_t MovementIdleMoveUnits(const void* data, void* param) {
         if (globals->m_movers.Head()) {
             CMovement_C::MoveUnits(now, globals->m_lastUpdateTime);
         }
+
+        SmoothMove::Tick(elapsed);   // CUSTOM
 
         CGUnit_C* mover = static_cast<CGUnit_C*>(ClntObjMgrObjectPtr(CGUnit_C::s_activeMover, TYPEMASK_UNIT, __FILE__, __LINE__));
 

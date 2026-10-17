@@ -1,4 +1,5 @@
 #include "Movement.h"
+#include "WoW/Source/Object/SmoothMove.h"
 #include <cmath>
 #include <cstddef>
 #include <cstring>
@@ -917,6 +918,7 @@ void CMovement_C::SetUpdateInfo(uint32_t time, const CClientMoveUpdate* update, 
         this->RemoveFromMoversList(0);
         this->m_spline->CopyFrom(update->m_moveSpline);
         this->m_spline->m_spline.m_splineMode = (this->m_spline->m_flags & 0x42000) != 0;
+        SmoothMove::SmoothSpline(this);   // CUSTOM
     } else {
         if (this->m_spline && (this->m_spline->m_flags & 0x800)) {
             this->m_unit->OnCollideFallLand(0, 1);
@@ -4394,6 +4396,7 @@ void CMovement_C::CallMoveEventHandlers(uint32_t time, uint32_t remaining, uint3
         this->ForceStopMove(1);
         this->SnapToSpline(this->m_spline->m_finalDestination, 0);
         spline = this->m_spline;
+        float facingBefore = this->m_facing;   // CUSTOM
 
         if (spline->m_flags & SPLINEFLAG_FINAL_ANGLE) {
             this->m_facing = spline->m_face.m_angle;
@@ -4408,6 +4411,8 @@ void CMovement_C::CallMoveEventHandlers(uint32_t time, uint32_t remaining, uint3
         } else if (spline->m_flags & SPLINEFLAG_FINAL_POINT) {
             this->m_facing = CalculateFacingTo(&this->m_position, reinterpret_cast<const C3Vector*>(spline->m_face.m_point));
         }
+
+        SmoothMove::DeferFacing(this, facingBefore);   // CUSTOM
 
         uint32_t splineFlags = this->m_spline->m_flags;
         uint32_t parabolic = splineFlags & SPLINEFLAG_PARABOLIC;
@@ -5380,9 +5385,13 @@ int32_t CMovement_C::PlotUnitSplineMovement(uint32_t time, uint32_t elapsed, C3V
     int32_t wasInAir = (this->m_flags2 & MOVEMENTFLAG2_JUMP_SPLINE_IN_AIR) && this->m_spline && !(this->m_spline->m_flags & SPLINEFLAG_NO_SPLINE) && (this->m_spline->m_flags & SPLINEFLAG_PARABOLIC);
     int32_t wasAnimTier = (this->m_flags2 & MOVEMENTFLAG2_ANIM_TIER_IN_TRANS) && this->m_spline && !(this->m_spline->m_flags & SPLINEFLAG_NO_SPLINE) && (this->m_spline->m_flags & SPLINEFLAG_ANIMATION);
 
+    float facingBefore = this->m_facing;   // CUSTOM
+
     if (!this->CMovementShared::PlotUnitSplineMovement(time, position)) {
         return 0;
     }
+
+    SmoothMove::LimitTurn(this, facingBefore, elapsed);   // CUSTOM
 
     if (!wasInAir && (this->m_flags2 & MOVEMENTFLAG2_JUMP_SPLINE_IN_AIR) && this->m_spline && !(this->m_spline->m_flags & SPLINEFLAG_NO_SPLINE) && (this->m_spline->m_flags & SPLINEFLAG_PARABOLIC)) {
         this->m_unit->ProcessLocalMoveEvent(time, MSG_MOVE_JUMP, true, 0.0f, 0, 0, 255);
@@ -6579,6 +6588,7 @@ int32_t CMovement_C::OnSpline(const C3Vector* points, uint32_t pointCount, uint3
 
     this->AddSpline(points[pointCount - 1]);
     CMovementShared::OnSpline(MovementGetGlobals()->m_lastUpdateTime, points, pointCount, duration, splineFlags, splineId);
+    SmoothMove::SmoothSpline(this);   // CUSTOM
 
     if (!this->m_globalUnitsLink.IsLinked()) {
         CMovementGlobals* globals = MovementGetGlobals();

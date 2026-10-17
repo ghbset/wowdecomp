@@ -30,6 +30,14 @@ uint32_t C3Spline_CatmullRom::GetSplineMode() {
 void C3Spline_CatmullRom::Evaluate(uint32_t seg, float t, C3Vector& pos) {
     if (this->m_splineMode) {
         C3Spline::Evaluate(seg, t, s_catmullRomBasis, pos);
+
+        // CUSTOM: mode 2 (4.3.4 0x004C9C10) = Catmull-Rom in X/Y, linear Z (smoothed ground paths)
+        if (this->m_splineMode == 2) {
+            const C3Vector& a = this->Point(seg + 1);
+            const C3Vector& b = this->Point(seg + 2);
+            pos.z = (b.z - a.z) * t + a.z;
+        }
+
         return;
     }
 
@@ -165,7 +173,24 @@ void C3Spline_CatmullRom::IFrameArclength(float t, C44Matrix& frame) {
         dir.z = inv * dir.z;
     }
 
-    if (this->m_splineMode) {
+    if (this->m_splineMode == 2) {
+        // CUSTOM: mode 2 (4.3.4 0x004CA370): heading = the horizontal tangent, no pitch
+        C3Vector vel(0.0f, 0.0f, 0.0f);
+        C3Spline::EvaluateDer1(seg, segT, C44Matrix(s_catmullRomDer1), vel);
+        vel.z = 0.0f;
+        float velSq = vel.x * vel.x + vel.y * vel.y;
+
+        if (velSq > 0.000099999997f) {
+            float inv = 1.0f / sqrt(velSq);
+            frame.a0 = vel.x * inv;
+            frame.a1 = vel.y * inv;
+        } else {
+            frame.a0 = dir.x;
+            frame.a1 = dir.y;
+        }
+
+        frame.a2 = 0.0f;
+    } else if (this->m_splineMode) {
         C3Vector vel(0.0f, 0.0f, 0.0f);
         C3Spline::EvaluateDer1(seg, segT, C44Matrix(s_catmullRomDer1), vel);
 
@@ -234,6 +259,121 @@ uint32_t C3Spline_CatmullRom::IGetPoints(float t, C3Vector* points, uint32_t cou
     }
 
     return remaining;
+}
+
+// CUSTOM: port of 4.3.4 C3Spline_CatmullRom::Smooth (0x004CABF0, pathSmoothing). Resamples the current
+// (linear, cache valid) path piecewise-linearly every `step` yd, keeping the corner points, where step =
+// the shortest segment longer than minLength (at least minLength). The caller then evaluates it as
+// Catmull-Rom (mode 2): corners round over about one step, the end point and end controls are kept, and
+// the lead-in control keeps its direction at step length. Returns 0 (spline untouched) if it would need
+// more than 100 points or there are fewer than 2 segments. keepStart (4.3.4: cyclic re-entry) is not used.
+int32_t C3Spline_CatmullRom::Smooth(float minLength) {
+    const int32_t maxAllowed = 100;
+    int32_t segCount = static_cast<int32_t>(this->m_pointCount) - 3;
+
+    if (segCount <= 1 || this->m_length <= 0.0f) {
+        return 0;
+    }
+
+    float stepLength = this->GetCachedSegLength(0);
+
+    if (minLength > stepLength) {
+        stepLength = minLength;
+    }
+
+    for (int32_t i = 1; i < segCount; i++) {
+        float length = this->GetCachedSegLength(i);
+
+        if (length > minLength && stepLength > length) {
+            stepLength = length;
+        }
+    }
+
+    float maxPointsF = this->m_length / stepLength + static_cast<float>(segCount + 4);
+
+    if (!(maxPointsF <= static_cast<float>(maxAllowed))) {
+        return 0;
+    }
+
+    int32_t maxPoints = static_cast<int32_t>(maxPointsF);
+    C3Vector points[maxAllowed];
+    points[0] = this->m_points[0];
+
+    float totalLength = this->m_length;
+    float traveled = 0.0f;
+    int32_t count = 1;
+    uint32_t mode = this->m_splineMode;
+    this->m_splineMode = 0;
+
+    for (int32_t seg = 0; seg < segCount && count < maxPoints; seg++) {
+        const C3Vector& point = this->Point(seg + 1);
+        C3Vector delta = points[count - 1] - point;
+
+        if (delta.x * delta.x + delta.y * delta.y + delta.z * delta.z >= 0.00000023841858f) {
+            points[count++] = point;
+        }
+
+        float length = this->GetCachedSegLength(seg);
+
+        if (length > stepLength) {
+            int32_t steps = static_cast<int32_t>(length / stepLength);
+            float step = length / static_cast<float>(steps);
+
+            for (int32_t i = 0; i < steps - 1 && count < maxPoints; i++) {
+                float t = ((static_cast<float>(i) + 1.0f) * step + traveled) / totalLength;
+                C3Vector pos;
+
+                if (t >= 1.0f) {
+                    pos = this->Point(this->m_pointCount - 2);
+                } else {
+                    this->IPosArclength(t, pos);
+                }
+
+                C3Vector last = points[count - 1] - pos;
+
+                if (last.x * last.x + last.y * last.y + last.z * last.z >= 0.00000023841858f) {
+                    points[count++] = pos;
+                }
+            }
+        }
+
+        traveled += length;
+    }
+
+    this->m_splineMode = mode;
+
+    if (count >= maxPoints - 2 || count < 3) {
+        return 0;
+    }
+
+    C3Vector dir = points[0] - points[1];
+    float dirSq = dir.x * dir.x + dir.y * dir.y + dir.z * dir.z;
+
+    if (dirSq > 0.00000023841858f) {
+        float inv = 1.0f / sqrt(dirSq);
+        dir.x *= inv;
+        dir.y *= inv;
+        dir.z *= inv;
+    }
+
+    points[0].x = points[1].x + dir.x * stepLength;
+    points[0].y = points[1].y + dir.y * stepLength;
+    points[0].z = points[1].z + dir.z * stepLength;
+
+    // the last path point was added by the loop only if it starts a segment; add it and the end control
+    C3Vector end = this->Point(segCount + 1);
+    C3Vector endControl = this->Point(segCount + 2);
+    points[count++] = end;
+    points[count++] = endControl;
+
+    this->ISetPoints(points, count);
+
+    if (this->m_pointCount > 3) {
+        this->IValidateCache();
+        this->m_length = this->ILength();
+    }
+
+    return 1;
 }
 
 // VERIFY: ad1247b6 auto

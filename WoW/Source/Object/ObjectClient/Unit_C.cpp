@@ -44,6 +44,7 @@
 #include "WoW/Source/Magic/MagicClient/SpellVisuals.h"
 #include "WoW/Source/Net/NetClient/NetClient.h"
 #include "WoW/Source/Net/Types.h"
+#include "WoW/Source/Object/SmoothMove.h"
 #include "WoW/Source/Object/CMoveSpline.h"
 #include "WoW/Source/Object/CreatureStats.h"
 #include "WoW/Source/Object/Object.h"
@@ -13164,6 +13165,8 @@ void CGUnit_C::OnMonsterMove(CDataStore* msg, NETMESSAGE msgId, uint64_t transpo
     }
 
     if (!started) {
+        float facingBefore = this->m_movementData.m_facing;   // CUSTOM
+
         switch (faceType) {
             case 2: {
                 C3Vector target = this->m_movementData.CPassenger::GetPosition(facePoint);
@@ -13180,6 +13183,7 @@ void CGUnit_C::OnMonsterMove(CDataStore* msg, NETMESSAGE msgId, uint64_t transpo
         }
 
         this->m_movementData.OnSplineSnap(splineId, end, splineFlags, flush);
+        SmoothMove::DeferFacing(&this->m_movementData, facingBefore);   // CUSTOM
     }
 
     if (this->m_vehicle && this->m_vehicle->m_vehicleRec) {
