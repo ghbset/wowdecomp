@@ -420,6 +420,14 @@ class Emitter(object):
     def r_frc(self, i):
         self.assign(i.dst, vec='fract(%s)' % self.srcm(i.srcs[0], i.dst))
 
+    # dsx / dsy (ddx / ddy; our CataWaterAbove's fwidth): gl_Position.y is negated, so the image lands on the window as
+    # D3D's does and Vulkan's window-space dFdy is D3D's dsy.
+    def r_dsx(self, i):
+        self.assign(i.dst, vec='dFdx(%s)' % self.srcm(i.srcs[0], i.dst))
+
+    def r_dsy(self, i):
+        self.assign(i.dst, vec='dFdy(%s)' % self.srcm(i.srcs[0], i.dst))
+
     def r_compare(self, i, fn, op):
         d = i.dst
         a, b = self.srcm(i.srcs[0], d), self.srcm(i.srcs[1], d)
@@ -755,7 +763,7 @@ RULES = {
     40: Emitter.r_if_bool, 41: Emitter.r_ifc, 42: Emitter.r_else, 43: Emitter.r_endif,
     44: Emitter.r_break, 45: Emitter.r_breakc,
     46: Emitter.r_mova, 65: Emitter.r_texkill, 66: Emitter.r_texld, 88: Emitter.r_cmp,
-    90: Emitter.r_dp2add, 93: Emitter.r_texldd, 95: Emitter.r_texldl,
+    90: Emitter.r_dp2add, 91: Emitter.r_dsx, 92: Emitter.r_dsy, 93: Emitter.r_texldd, 95: Emitter.r_texldl,
 }
 
 

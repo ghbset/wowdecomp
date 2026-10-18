@@ -18,6 +18,7 @@
 #include "Engine/Source/Model2/M2Scene.h"
 #include "WoW/Source/UIUtil/Camera.h"
 #include "WoW/Source/Ui/WorldFrame.h"
+#include "WoW/Source/WorldClient/CataWater.h"
 #include "WoW/Source/WorldClient/DayNight.h"
 #include "WoW/Source/WorldClient/DayNight__DNInfo.h"
 #include "WoW/Source/WorldClient/FrameTime.h"
@@ -576,6 +577,7 @@ void RegisterCVars() {
     s_cvars.liquidDepth = reg("vfogLiquidDepth", "Volumetric fog: water writes depth so it is fogged at its own distance; always on while modern water draws (coa LiquidDepth)", "1");
 
     RegisterWaterCVars();
+    CataWater::RegisterCVars();
 
     g_vfogM2BatchFog = &BatchFog;
     g_vfogM2FogParticles = &FogParticles;
