@@ -738,3 +738,36 @@ casters: lit where the sun reaches, dark in shadow. The screen-space god rays (V
 
 custom.MPQ: 5121 files; the SPIR-V set regenerated (1633 records + 2 companions, spirv-val clean; only the 72 VFogMarch/
 VFogComposite* records changed), the SM4 pack from shadow-s1, our ps_3_0/ps_4_0 fog shaders rebuilt.
+
+## 2026-10-18: sun and moon alignment (`gfxSunArc`, branch `sunalign`)
+
+The user: "the sunlight doesn't align with the sun's position". Stock, the world light (`SetDirection`) keeps a
+45 degree bearing at 20..37 degrees up all day and all night, while the sun disc (`SetPlanets`) climbs to 85
+degrees at noon and sets; the shadows (gfxSunShadows) and the fog (`ReadLightDirection`) already follow the disc,
+so the shading disagreed with all three.
+
+- **What wxl-pack did** (wxl-light `Sun.cpp`, arc on by default): rewrote the engine's sun/moon key tables so the
+  discs cross the sky east-south-west (sun 62, moon 55 degrees at the top; the moon's horizon keys moved to
+  07:18/19:36 so it rises and sets within minutes of the sun), then after the day-night step set the world light
+  from the disc that is up (`Handover`: one body at a time by a smoothstep weight of its height, at least 10
+  degrees up, direct light faded into ambient near the horizon). Shadows and fog followed the same body.
+- **Here**: the same tables and handover, in source. `DayNight::SetPlanets` picks the arc tables;
+  `PickLightBody` (end of `DayNight::UpdateLighting`) chooses `DayNight::g_lightBody` and, under the arc, writes
+  `m_light1.m_dir` and the faded diffuse/ambient. The **one source of truth** is `g_sunToward` / `g_moonToward`
+  (SetPlanets) plus `g_lightBody`: the disc, sun glare and cloud lighting sit there, the world light is taken from
+  it, `CShadowQuery` (gfxSunShadows) reads `g_lightBody` instead of its own "sun while up" rule, and
+  `VolumetricFog::ReadLightDirection` (in-scatter, S3 shafts, screen-space god rays, water glint) takes
+  `lightIsMoon` from it instead of coa's fixed hours. So all of them change sides on the same frame.
+- **Differences from the removed N1** (e258860, reverted in 8bf6eed with no reason recorded): N1 measured the bodies
+  from disc minus camera (float noise at world coordinates), kept a second body choice in `CShadowQuery` that
+  could disagree with the light's, left the fog and clouds on their fixed hours, added `gfxDebugHour`, and changed
+  the shadow cache (`CShadowCache::s_bandRedraw` and a latch, since restored separately by shadow-s2). This
+  change touches only DayNight, the body pick in ShadowQuery and the fog's `lightIsMoon`; no shadow-cache code.
+- **Handover** (simulated over a day): sun to moon at about 20:15 and moon to sun at about 06:21, each once, with the
+  winning body's weight 0.07 / 0.03, so the direct light is almost gone when the side changes. Known gap, as
+  before: the shadows have no dusk/dawn fade (wxl-light faded them in its own receivers), so they swap sides once
+  at that moment.
+- **CVar** `gfxSunArc` (default 1, live): Video Options > Advanced > Light & God Rays, "Sun and moon cross the sky".
+  0 is the stock sky and light exactly (only the shadow body pick remains, with its old rule).
+
+custom.MPQ: 5121 files, only `Interface\FrameXML\VideoOptionsAdvanced.lua` differs from vfog25's. No shaders.

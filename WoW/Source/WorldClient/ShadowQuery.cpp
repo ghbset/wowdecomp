@@ -107,9 +107,9 @@ static void GetViewerPosition(C3Vector* position) {
     }
 }
 
-// The shadow light (gfxSunShadows): the sun disc while it is up, else the moon, kept between these elevations.
+// The shadow light (gfxSunShadows): the sun or moon disc DayNight chose (g_lightBody), kept between these elevations.
 // Under the floor shadows run off to infinity and the maps' fixed bias lets go of the ground; over the ceiling
-// noon is flat. (Re-applied from e258860 without its sun arc: the stock sun and moon share one bearing, 45 deg,
+// noon is flat. (Re-applied from e258860; gfxSunArc, in DayNight, is its arc. Without it the stock sun and moon share one bearing, 45 deg,
 // the same as the stock world light's, so the shading and the shadows agree on the side and only the length
 // follows the clock.)
 static const float kShadowMinElev = 12.0f, kShadowMaxElev = 70.0f;   // degrees
@@ -122,7 +122,6 @@ static const uint32_t kLatchWaitMs = 2000;     // a step waits for the near maps
 static C3Vector s_latch(0.0f, 0.0f, 1.0f);     // toward the light, as the shadow maps have it
 static int32_t s_haveLatch;
 static uint32_t s_latchMs;
-static int32_t s_lightBody;                    // 0 the sun, 1 the moon
 
 /// Toward the sun or moon (unit) and its height in degrees, as DayNight::SetPlanets placed the discs. (Kept from
 /// SetPlanets' own sines rather than disc minus camera: at world coordinates that difference is noisy enough, a few
@@ -140,14 +139,10 @@ static bool LightBody(C3Vector& toward, float& elevDeg) {
         elev[b] = std::asin(z) * 57.29578f;
     }
 
-    if (elev[0] > 0.0f) {
-        s_lightBody = 0;
-    } else if (elev[1] > 0.0f) {
-        s_lightBody = 1;
-    }
-
-    toward = dir[s_lightBody];
-    elevDeg = elev[s_lightBody];
+    // The body DayNight made the light (gfxSunArc handover), so the shadows change sides on the frame it does.
+    const int32_t body = DayNight::g_lightBody == 1 ? 1 : 0;
+    toward = dir[body];
+    elevDeg = elev[body];
     return true;
 }
 

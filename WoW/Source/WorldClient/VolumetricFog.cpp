@@ -295,7 +295,8 @@ void ReadDayNightInputs(FrameInputs& in) {
 // coa engine.cpp: the visible sun or moon sprite, relative to the sky centre (DNInfo::m_cameraPos).
 void ReadLightDirection(FrameInputs& in) {
     const DayNight::DNInfo& info = DayNight::g_dnInfo;
-    in.lightIsMoon = !(info.m_dayProgression >= kSunDayStart && info.m_dayProgression <= kSunDayEnd);
+    // gfxSunArc: the body the world's light and the shadows come from (DayNight::g_lightBody); else coa's hours.
+    in.lightIsMoon = DayNight::SunArc() ? DayNight::g_lightBody == 1 : !(info.m_dayProgression >= kSunDayStart && info.m_dayProgression <= kSunDayEnd);
     const C3Vector& body = in.lightIsMoon ? DayNight::g_planets.m_moon.m_position : DayNight::g_planets.m_sun.m_position;
     float d[3] = { body.x - info.m_cameraPos.x, body.y - info.m_cameraPos.y, body.z - info.m_cameraPos.z };
     const float len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
