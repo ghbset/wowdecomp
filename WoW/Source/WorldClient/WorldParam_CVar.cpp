@@ -14,6 +14,7 @@
 #include "WoW/Source/WorldClient/OcclusionCull.h"
 #include "WoW/Source/WorldClient/VolumetricFog.h"
 #include "Engine/Source/ConsoleBase/ConsoleVar.h"
+#include "Engine/Source/Model2/M2Scene.h"
 #include "Engine/Source/ConsoleBase/IConsole.h"
 #include "Engine/Source/Storm/H/storm.h"
 #include "WoW/Source/ConsoleDevice/ConsoleDevice.h"
@@ -658,6 +659,11 @@ void CWorldParam::Initialize() {
     CWorldParam::cvar_gxTextureCacheSize = CVar::Register("gxTextureCacheSize", "GX Texture Cache Size", 1, "0", CWorldParam::GxTextureCacheSizeCallback, CATEGORY_GRAPHICS, false, nullptr, false);
     CVar::Register("spellEffectLevel", "Video Option: Spell Effects", 1, "9", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     VolumetricFog::RegisterCVars();   // VFOG: not in 12340
+    // BENILLA: not in 12340. Ground spell quads drape the terrain (CM2Scene IsGroundDecalBatch); 0 = stock flat planes.
+    CVar::Register("groundDecals", "Ground spell effects follow the terrain", 1, "1", [](CVar*, const char*, const char* value, void*) -> bool {
+        CM2Scene::s_groundDecals = SStrToInt(value) != 0;
+        return true;
+    }, CATEGORY_GRAPHICS, false, nullptr, false);
 
     AddConsoleDeviceDefaultCallback(CWorldParam::SetDefaults);
 

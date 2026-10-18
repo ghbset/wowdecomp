@@ -8,6 +8,7 @@
 #include "Engine/Source/Base/ObjectAlloc.h"
 #include "Engine/Source/Gx/CGxDevice/CGxDevice.h"
 #include "Engine/Source/Model2/M2Cache.h"
+#include "Engine/Source/Model2/M2GroundDecal.h"
 #include "Engine/Source/Model2/M2Light.h"
 #include "Engine/Source/Model2/M2Model.h"
 #include "Engine/Source/Model2/M2Shared.h"
@@ -30,6 +31,58 @@ const uint32_t s_blendModes[3][7] = { { 0, 1, 2, 10, 3, 4, 5 }, { 2, 2, 2, 10, 3
 
 // STATIC: 0x00AF5898
 uint32_t CM2Scene::s_optFlags = 0xFFFFFFFF;
+int32_t CM2Scene::s_groundDecals = 1;
+
+// BENILLA: not in 12340 (M2GroundDecal.h). A single-texture, non-env batch of a Spells\ model that is
+// world-planted or on the Base (19) or root attachment, one bone at full weight that is not billboarded,
+// whose 4 vertices are a flat ground rectangle. Chest-anchored quads (ProtectionFrom*) stay geometry.
+static int32_t IsGroundDecalBatch(CM2Model* model, const M2Batch* batch, const M2SkinSection* section) {
+    if (section->m_vertexCount != 4 || batch->m_textureCount != 1 || (!(batch->m_shader & 0x8000) && (batch->m_shader & 0x80))) {
+        return 0;
+    }
+
+    if (model->m_attachParent && model->m_attachmentId != 19 && model->m_attachmentIndex != 0xFFFF) {
+        return 0;
+    }
+
+    const char* name = model->m_shared->m_fileName;
+    const char* spells = "spells";
+
+    for (int32_t i = 0; i < 6; i++) {
+        if ((name[i] | 0x20) != spells[i]) {
+            return 0;
+        }
+    }
+
+    if (name[6] != '\\' && name[6] != '/') {
+        return 0;
+    }
+
+    M2Data* data = model->m_shared->m_data;
+    M2SkinProfile* skin = model->m_shared->m_skinData;
+    const C3Vector* positions[4];
+    uint8_t bone = 0;
+
+    for (uint32_t i = 0; i < 4; i++) {
+        const M2Vertex* vertex = &data->m_vertices[skin->m_vertices[section->m_vertexStart + i]];
+
+        if (i == 0) {
+            bone = vertex->m_indices.b[0];
+        }
+
+        if (vertex->m_indices.b[0] != bone || vertex->m_weights.b[0] != 255) {
+            return 0;
+        }
+
+        positions[i] = &vertex->m_position;
+    }
+
+    if (bone >= data->m_bones.m_count || (data->m_bones[bone].m_flags & 0x78)) {
+        return 0;
+    }
+
+    return M2GroundDecal::IsGroundQuad(positions);
+}
 
 // STATIC: 0x00AF58A0
 static const float s_lightGridScale = 0.05f;
@@ -1884,6 +1937,11 @@ int32_t CM2Scene::Animate(const C3Vector& cameraPos) {
 
             M2Material* material = &data->m_materials[batch->m_materialIndex];
             int32_t projected = (batch->m_flags & 4) && this->m_projectTextureCallback;
+
+            // BENILLA: ground spell quads drape the terrain through the projected element
+            if (!projected && !optimized && CM2Scene::s_groundDecals && this->m_projectTextureCallback && IsGroundDecalBatch(model, batch, section)) {
+                projected = 1;
+            }
             M2Material* baseMaterial = batch->m_materialLayer ? &data->m_materials[batch->m_materialIndex - batch->m_materialLayer] : material;
             int32_t transparent = baseMaterial->m_blendMode > 1 || alpha < 0.99998999f;
             CShaderEffect* effect = optimized ? model->m_optGeo->m_effects[i] : model->m_shared->m_effects[i];

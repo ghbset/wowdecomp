@@ -609,3 +609,31 @@ All packages run in parallel, and no two own the same file. None of them builds,
 | WP7 | Driver + client integration | VolumetricFog.cpp, WorldFrame.cpp, World.cpp, WorldParam_CVar.cpp, MaterialWater.cpp, CM2SceneRender.cpp | contract |
 
 Merge order: WP3/4/5 -> WP2 -> WP1 -> WP6 -> WP7. Then build once, and the user tests in game.
+
+## 2026-10-18: ground spell decals (benilla port, branch `decals`)
+
+benilla (`benilla-world/src/ground_fx.rs`, `decal.rs`; detector `GroundQuad::ground_quad_hover` in
+`benilla-formats/src/models/types.rs`) redraws flat spell ground quads (Consecration, the paladin aura rings,
+Blizzard/Flamestrike floors) as decals clipped onto terrain and WMO faces, instead of the flat M2 planes that
+hills bury and dips leave floating.
+
+The 3.3.5a client already has that projector: an M2 batch with flag 4 becomes element type 1, and
+`CM2SceneRender::DrawBatchProj` (0x00820720) builds a world box and eye-linear tex matrix from the quad
+(`CM2Model::GetRegionBounds`), then `World::ProjectTextureCallback` → `ProjectTex2dDrawShaderEffect` redraws
+the terrain/WMO triangles in the box (`World::GetTris`, flags 0x200122, the same set as benilla's ring) with
+`Projected_ModMod`/`Projected_ModAdd`. So no new shader and nothing per backend: D3D9, D3D11 and Vulkan all
+run stock effects that already ship.
+
+- `CM2Scene` (M2Scene.cpp `IsGroundDecalBatch`): a non-flag-4 batch is sent down that path when
+  `groundDecals` is 1 and it is: a `Spells\` model; world-planted, or on the Base (19) or root attachment
+  (benilla's ground anchor; chest-anchored quads such as ProtectionFrom* stay geometry); one texture, not
+  env-mapped; 4 vertices on one non-billboarded bone at full weight; a flat axis-aligned XY rectangle at model
+  z in [-0.01, 1.0] (`M2GroundDecal.h`, benilla's thresholds).
+- `DrawBatchProj`, for those batches only: draws whatever `projectedTextures` says (stock flag-4 batches
+  still obey it), multiplies the batch's texture animation into the tex matrix, and pads the box in z by the
+  quad's width (benilla `fit_frame`: ±2·max half-extent) instead of ±2, so slopes to 45° stay inside.
+- CVar `groundDecals` (default 1; 0 = stock flat planes).
+- Cost: per decal, one `World::GetTris` box query plus one draw per receiving terrain chunk/WMO group batch,
+  instead of one 2-triangle draw. CPU only; no extra passes or targets.
+- Check: `clang++ -std=c++17 -I. Tools/GroundDecalCheck/check.cpp -o /tmp/gdc && /tmp/gdc`.
+- Not done: doodad receivers (benilla has none either); a multi-texture ground batch keeps the flat plane.

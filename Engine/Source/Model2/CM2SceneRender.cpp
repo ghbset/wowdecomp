@@ -669,8 +669,26 @@ void CM2SceneRender::DrawBatchProj() {
         return;
     }
 
-    box.b.z = box.b.z - 2.0f;
-    box.t.z = box.t.z + 2.0f;
+    // BENILLA: a batch without the projected flag is a ground spell quad CM2Scene redirected here
+    // (IsGroundDecalBatch). It always draws (not only under projectedTextures), keeps its texture
+    // animation, and its slab reaches as far as the quad is wide (benilla's fit_frame), so a slope up
+    // to 45 degrees stays inside the box.
+    int32_t groundDecal = !(this->m_curBatch->m_flags & 4);
+    float pad = 2.0f;
+
+    if (groundDecal) {
+        float extent = box.t.x - box.b.x > box.t.y - box.b.y ? box.t.x - box.b.x : box.t.y - box.b.y;
+        pad = extent > pad ? extent : pad;
+
+        uint32_t transform = this->m_data->m_textureTransformCombos[this->m_curBatch->m_textureTransformComboIndex];
+
+        if (transform < this->m_data->m_textureTransforms.m_count) {
+            texMatrix = texMatrix * this->m_curModel->m_textureMatrices[transform];
+        }
+    }
+
+    box.b.z = box.b.z - pad;
+    box.t.z = box.t.z + pad;
 
     C44Matrix depthMatrix;
     depthMatrix.a0 = 0.0f;
@@ -728,7 +746,7 @@ void CM2SceneRender::DrawBatchProj() {
     this->SetupBillboardView(*reinterpret_cast<const C3Vector*>(&this->m_scene->m_viewInv.d0));
     CShaderEffect::SetTexMtx_TexGen(GxTexGen_EyeLinear, texMatrix, 0);
     CShaderEffect::SetTexMtx_TexGen(GxTexGen_EyeLinear, depthMatrix, 1);
-    this->m_scene->m_projectTextureCallback(box, imColor, this->m_curLocalLighting, this->m_scene->m_projectTextureParam, (this->m_curModel->m_fFlags >> 2) & 1);
+    this->m_scene->m_projectTextureCallback(box, imColor, this->m_curLocalLighting, this->m_scene->m_projectTextureParam, ((this->m_curModel->m_fFlags >> 2) & 1) | groundDecal);
     g_theGxDevicePtr->XformSetView(s_identity);
 
     CGxMatrixStack& world = g_theGxDevicePtr->m_xforms[GxXform_World];

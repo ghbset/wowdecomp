@@ -87,6 +87,7 @@ class CM2Scene {
     /* 0144 */ uint32_t m_passMask;
 
     static uint32_t s_optFlags;
+    static int32_t s_groundDecals;   // BENILLA: CVar groundDecals, not in 12340
 
     static void AnimateThread(void* param);
     static void __stdcall ComputeElementShaders(M2Element* element);
