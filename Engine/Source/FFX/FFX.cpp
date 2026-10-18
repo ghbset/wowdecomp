@@ -391,9 +391,11 @@ void FFX::Finish() {
 
     C2iVector sourcePos = { 0, 0 };
     C2iVector destPos = { 0, 0 };
-    GxTexCopy(TextureGetGxTex(FFX::s_full[0].m_texture, 1, nullptr), destPos, sourcePos, FFX::s_full[0].m_size, 0, 0);
-
-    FFX::s_effect->Execute();
+    // Not in 12340: the effect redraws the screen from s_full[0], so a refused copy (Vulkan) would show the last
+    // frame that copied. D3D9's StretchRect does not fail here.
+    if (GxTexCopy(TextureGetGxTex(FFX::s_full[0].m_texture, 1, nullptr), destPos, sourcePos, FFX::s_full[0].m_size, 0, 0)) {
+        FFX::s_effect->Execute();
+    }
 
     GxXformSetViewport(0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 1.0f);
 }
