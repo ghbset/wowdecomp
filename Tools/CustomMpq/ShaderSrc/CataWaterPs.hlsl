@@ -1,5 +1,5 @@
 // CataWaterAbove / CataWaterBelow (ps_3_0): Cataclysm 4.3.4's ProcWaterAbove (p = 2: one-tap screen-space
-// reflection with the fog colour as the fallback, foam on, no ripples) and, with BELOW, ProcWaterBelow for a submerged
+// reflection with the fog colour as the fallback, foam on, one ripple level) and, with BELOW, ProcWaterBelow for a submerged
 // camera. waterStyle 1, docs/BACKLOG_PORT.md "Cata water". Ported from wxl-water src/Shaders.hpp kPixel (@ 17cf9af)
 // minus the far sea, caustics, sun / land shadows, the last-frame depth reprojection (the copy here is this frame's,
 // taken before the first water draw) and the debug views; Cata decoded in water-research-W1-cata.md section 8.
@@ -9,19 +9,34 @@ sampler2D sNormal : register(s9);    // XTextures\ocean\newoceanbump.blp (Cata s
 sampler2D sFoam   : register(s10);   // XTextures\foam\waterchop7bw.blp (Cata s7)
 sampler2D sScene  : register(s12);   // the world viewport before the water (Cata s0 / s3)
 sampler2D sDepth  : register(s13);   // the raw scene depth before the water, R32F, whole window
-// Free for the follow-up pieces: s11 ripple height field (piece B), s14 planar reflection (piece D).
+sampler2D sRipple : register(s11);   // vfog's ripple height field: r = height, g = previous step (Cata s4)
+// Free for piece D: s14 planar reflection.
 
 float4 gFogColor : register(c4);     // stock
 row_major float4x4 gVP : register(c16);   // camera-relative world -> clip (the reflection lookup)
 float4 gDepthTex : register(c20);    // xy = 1 / depth texture size, z w = (A, B): view depth = B / (d - A)
 float4 gScreen   : register(c21);    // world viewport in window pixels (x, y, w, h)
 float4 gP        : register(c22);    // (P6 normal strength, P9 diffuse, P10 specular, P14 normal to world)
-float4 gMisc     : register(c23);    // x = deepest world depth (past it: sky), y = thickness fog strength (0 = off until piece C fills c24/c25)
-float4 gFogA     : register(c24);    // Cata fog A: (-1/(end-start), end/(end-start), exponent, P7 * 0.35)
+float4 gMisc     : register(c23);    // x = deepest world depth (past it: sky), y = thickness fog on (1) / off (0)
+float4 gFogA     : register(c24);    // Cata fog A from the zone's underwater fog: (-1/(end-start), end/(end-start), exponent, P7 * 0.35)
 float4 gFogAColor: register(c25);    // its colour
 float4 gLightW   : register(c26);    // world direction toward the light
 float4 gDiffuse  : register(c27);    // sun diffuse colour
 float4 gSpecular : register(c28);    // sun specular colour
+float4 gRipWin   : register(c29);    // ripple window origin - camera (xy), 1 / window size (zw)
+float4 gRipTex   : register(c30);    // (1/N, 1/N, step fraction, P15 ripple strength; 0 = off)
+
+// Cata ProcWaterAbove ripple slope (W1 8.2, wxl-water RippleSlope, one level): height interpolated between the last two
+// steps, finite differences at a lookup bent by the normal map, nothing outside the window.
+float RipH(float2 t) { float4 h = tex2D(sRipple, t); return lerp(h.g, h.r, gRipTex.z); }
+float2 RippleSlope(float3 world, float2 nn)
+{
+    float2 uv = (world.xy - gRipWin.xy) * gRipWin.zw - nn * 0.02 - 1e-6;
+    float  h0 = RipH(uv);
+    float  dx = RipH(uv + float2(gRipTex.x, 0.0)) - h0, dy = RipH(uv + float2(0.0, gRipTex.y)) - h0;
+    float2 sl = float2(dx, dy) / (sqrt(1.0 + dx * dx) * sqrt(1.0 + dy * dy)) * gRipTex.w;
+    return (max(abs(2.0 * uv.x - 1.0), abs(2.0 * uv.y - 1.0)) >= 1.0 - gRipTex.x) ? float2(0.0, 0.0) : sl;
+}
 
 // The viewport uv of a clip position, and the linear view depth of the scene there.
 float2 ScreenUv(float2 clipXy, float w) { return float2(clipXy.x / w * 0.5 + 0.5, 0.5 - clipXy.y / w * 0.5); }
@@ -42,7 +57,7 @@ float4 main(float4 col : COLOR0, float4 coarse : TEXCOORD0, float4 fine : TEXCOO
     float2 nB = (tex2D(sNormal, fine.xy).xy + tex2D(sNormal, fine.zw).xy - 1.0) * 1.4;
     float2 n  = lerp(nB, 2.0 * nA, saturate(dist * 0.001 + 0.2)) * gP.x;
     float2 N2 = n * rsqrt(dot(n, n) + 1.0);
-    // piece B: N2 += the ripple slope (W1 8.2, wxl-water RippleSlope) here.
+    N2 += RippleSlope(world, N2);
 
     // --- shading (Cata 8.3) -------------------------------------------------------------------------
     float3 Nw  = normalize(float3(gP.w * N2 + vnrm.xy, vnrm.z));

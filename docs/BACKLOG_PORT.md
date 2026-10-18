@@ -59,3 +59,42 @@ chosen, sampler s14 free.
 during the liquid pass), the screen uv from the clip position on each backend (D3D9 half-pixel), the normal map's
 channel layout (wxl-water reads `.xy` as 3.3.5a decodes the BLP), the light direction sign, and how it looks
 next to vfog's fog composite.
+
+### Cata water pieces B and C: ripples, thickness fog, underwater tint (2026-10-18)
+
+**Ripples (piece B).** No Cata simulation is ported: vfog's ripple sim (`VolumetricFogWaterRipples.cpp`, Gr1616F
+r = height / g = previous height, 0.125 yd texels, 512^2 around the camera target, the same format as Cata's level 0)
+is run by `CataWater::Arm` through `VolumetricFog::RippleFrame` (strength 1 only gates it; quality 2 = 512^2), with a
+`FrameInputs` holding only what it reads (camera target, map id), so it runs with the fog off. waterStyle 0 is
+untouched: the vfog water still calls `RippleFrame` from its own `Begin`, and Cata's `Arm` runs first only at style 1.
+The PS adds wxl-water's `RippleSlope` (W1 8.2, one level, no wide ship level) to N2 in both Above and Below:
+s11 = the map, c29 = (window origin - camera xy, 1 / extent), c30 = (1 / texels, step fraction, P15; 0 when the sim
+has no live map, s11 then gets the colour copy as a dummy). While the Cata ripples run, the client's splash / wake
+sprites are hidden as for the modern water (`WaterHidesClientRipples` asks `CataWater::DrawsRipples` first).
+**CVar** `waterCataRipples` (default **1**: the sim only runs while units are in water near the camera and is shared
+code already shipping with vfog water; the design ships A+B together), Advanced > Water "Cataclysm ripples".
+
+**Thickness fog (piece C).** `Arm` resolves Cata's fog A once per pass (wxl-water `ResolveThicknessFog`,
+water-stage2-fog-research.md 3.1): above water, the underwater LightParams of the base area light plus every area
+light whose falloff holds the light reference point, far to near, each by its falloff (`DayNight::BlendAreaLightColors`
+/ `BlendAreaLight` with underwater = 1, so storm blend and the game's own fog-mode rewrite come with it); under water,
+the game's current bands (already the underwater fog, liquid light included). Then Cata FUN_00648190: end = min(fog
+end, far clip), start = max(multiplier, 0) x end, exponent = fog rate x 2; c24.xyz = (-1/(end-start), end/(end-start),
+exponent), c25.rgb = the fog colour (LightIntBand 7), c23.y = 1. Zone lights, the override light and WMO fog are left
+out, as in wxl-water.
+
+**Underwater tint (piece C).** Cata FFXUnderWaterLow as wxl-water draws it: with style 1 and the camera in a water-
+material liquid, `CataWater::OnWorldDone` (called in `CGWorldFrame::OnWorldRender` before the chat bubbles and vfog's
+`OnWorldDone`) copies the world viewport and draws `CataWaterTint` over it: frame x (1 + (fog colour / its brightest
+channel - 1) x 0.3) x (1 - 0.45 x smoothstep(0.2, 2, |ndc|^2)). No caustics (separate backlog item). No CVar: it is
+part of Cata's under-water look, and costs one copy + one quad only while submerged.
+
+**Files.** `WorldClient/CataWater.{h,cpp}`, `WorldClient/VolumetricFogWater.cpp` (`WaterHidesClientRipples`),
+`Ui/WorldFrame.cpp` (tint call); `ShaderSrc/CataWaterPs.hlsl` (ripples), new `ShaderSrc/CataWaterTint.hlsl`,
+`build_shaders.py` (s11 on Above / Below, `CataWaterTint`), rebuilt `.bls` (ps_3_0 + ps_4_0); the checkbox in
+`VideoOptionsAdvanced.lua`. Vulkan: whole set re-translated and spirv-val'd (see the commit).
+
+**Unverified.** Nothing ran in game. The ripple slope sign against the normal map's (wxl-water's/Cata's convention,
+used as is on vfog's map; vfog's own shader negates its slope into N), the ripple height scale (vfog's footprints vs
+Cata's perturbTex splats: P15 1..2.5 here vs vfog's 3 x 0.5), the fog-rate exponent when the game's fog mode is not
+the rewriting one (then the exponent is 2), and whether the world viewport is still current where the tint draws.

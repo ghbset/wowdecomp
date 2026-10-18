@@ -1,5 +1,6 @@
 // Cata water (waterStyle 1): see CataWater.h and docs/BACKLOG_PORT.md "Cata water". Not in the 3.3.5a binary.
 #include "WoW/Source/WorldClient/CataWater.h"
+#include <algorithm>
 #include <cmath>
 #include "Engine/Source/Base/Status.h"
 #include "Engine/Source/ConsoleBase/ConsoleVar.h"
@@ -11,9 +12,14 @@
 #include "Engine/Source/Os/TimeManager.h"
 #include "Engine/Source/Services/Texture.h"
 #include "Engine/Source/Tempest/C2iVector.h"
+#include "Engine/Source/Tempest/CMath.h"
+#include "WoW/Source/DB/Rec/LightRec.h"
 #include "WoW/Source/DB/Rec/LiquidTypeRec.h"
 #include "WoW/Source/DB/WowClientDB.h"
 #include "WoW/Source/LiquidSystem/Liquid.h"
+#include "WoW/Source/WorldClient/DayNight.h"
+#include "WoW/Source/WorldClient/DayNight__DNInfo.h"
+#include "WoW/Source/WorldClient/FrameTime.h"
 #include "WoW/Source/WorldClient/VolumetricFogWater.h"
 #include "WoW/Source/WorldClient/World.h"
 
@@ -53,14 +59,17 @@ constexpr float kMinSize = 16.0f;
 // Texture stages (CataWaterPs.hlsl); stage 0 is the material's own depth-colour ramp.
 constexpr int kNormalStage = 9;
 constexpr int kFoamStage = 10;
+constexpr int kRippleStage = 11;
 constexpr int kSceneStage = 12;
 constexpr int kDepthStage = 13;
 
 CVar* s_style;
+CVar* s_ripples;
 CGxShader* s_vs;
 CGxShader* s_psAbove;
 CGxShader* s_psBelow;
 CGxShader* s_depthCopy;     // VFogDepthCopy: the raw scene depth into R32F
+CGxShader* s_psTint;        // CataWaterTint: FFXUnderWaterLow
 CTexture* s_normalTex;
 CTexture* s_foamTex;
 CGxTex* s_scene;
@@ -74,6 +83,10 @@ struct Pass {
     VolumetricFog::WorldViewport vp;
     float depthTex[4];      // c20
     float maxZ;
+    VolumetricFog::RippleShading ripples;   // map nullptr: no ripples this pass
+    float fogA[3];          // c24: Cata fog A from the zone's underwater fog
+    float fogColour[3];     // c25
+    bool fogValid;
 };
 Pass s_pass;
 
@@ -88,6 +101,8 @@ void __fastcall OnDeviceRestored() {
     VolumetricFog::DropInvalidShaders(&s_psAbove, 1);
     VolumetricFog::DropInvalidShaders(&s_psBelow, 1);
     VolumetricFog::DropInvalidShaders(&s_depthCopy, 1);
+    VolumetricFog::DropInvalidShaders(&s_psTint, 1);
+    VolumetricFog::RippleRelease();
     s_failed = false;
 }
 
@@ -177,10 +192,71 @@ bool CopyDepth() {
     return true;
 }
 
+float Channel(uint8_t c) {
+    return c / 255.0f;
+}
+
+// Cata's fog A (wxl-water ResolveThicknessFog, water-stage2-fog-research.md 3.1): the underwater light params of the
+// base light and of every area light around the light reference point, far to near, each by its falloff, at the
+// current time with the storm blend (DayNight's own resolve, so its fog mode decides the far-clip rewrite), then Cata
+// FUN_00648190: end at most the far clip, start = multiplier x end, exponent x 2. The override light, zone lights and
+// WMO fog are left out, as wxl-water does. Under water the game's own fog is the underwater one: that is used as is.
+bool ResolveFogA(bool below, float fogA[3], float colour[3]) {
+    DayNight::DNInfo& info = DayNight::g_dnInfo;
+    DayNight::CurrentLight light;
+    if (below) {
+        light = info.m_bands;
+    } else {
+        if (!DayNight::g_areaLights.m_count || !DayNight::g_areaLights.m_data[0]) {
+            return false;
+        }
+        DayNight::BlendAreaLightColors(&light, DayNight::g_areaLights.m_data[0], 1);
+        struct Near { const LightRec* light; float distanceSq; };
+        Near lights[32];
+        uint32_t count = 0;
+        for (uint32_t i = 1; i < DayNight::g_areaLights.m_count && count < 32; i++) {
+            const LightRec* rec = DayNight::g_areaLights.m_data[i];
+            if (!rec || rec->m_gameFalloffEnd < 3.0f) {
+                continue;
+            }
+            const float dx = info.m_lightRefPos.x - rec->m_gameCoords[0];
+            const float dy = info.m_lightRefPos.y - rec->m_gameCoords[1];
+            const float dz = info.m_lightRefPos.z - rec->m_gameCoords[2];
+            const float distanceSq = dx * dx + dy * dy + dz * dz;
+            if (distanceSq < rec->m_gameFalloffEnd * rec->m_gameFalloffEnd) {
+                lights[count++] = { rec, distanceSq };
+            }
+        }
+        std::sort(lights, lights + count, [](const Near& a, const Near& b) {
+            return a.distanceSq != b.distanceSq ? a.distanceSq > b.distanceSq : a.light->m_gameFalloffStart > b.light->m_gameFalloffStart;
+        });
+        for (uint32_t i = 0; i < count; i++) {
+            DayNight::BlendAreaLight(&light, lights[i].light, 1, 1.0f);
+        }
+    }
+    const float farClip = std::max(info.m_farClip, 50.0f);
+    const float end = std::min(light.m_fogEnd, farClip);
+    const float start = std::max(light.m_fogStartMul, 0.0f) * end;
+    const float span = std::max(end - start, 1.0e-3f);
+    fogA[0] = -1.0f / span;
+    fogA[1] = end / span;
+    fogA[2] = light.m_fogRate * 2.0f;
+    const CImVector& c = light.m_skyColors[5];     // LightIntBand 7: fog
+    colour[0] = Channel(c.r);
+    colour[1] = Channel(c.g);
+    colour[2] = Channel(c.b);
+    return std::isfinite(fogA[0] + fogA[1] + fogA[2]) && fogA[2] > 0.0f;
+}
+
+bool RipplesWanted() {
+    return s_style && s_style->m_intValue == 1 && s_ripples && s_ripples->m_intValue != 0;
+}
+
 }  // namespace
 
 void RegisterCVars() {
     s_style = CVar::Register("waterStyle", "Water look: 0 = modern (the volumetric fog's water, vfogWater), 1 = Cataclysm (its water surface, with or without the fog)", 1, "0", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    s_ripples = CVar::Register("waterCataRipples", "Cataclysm water (waterStyle 1): ripples and wakes where units move through or jump into water (0 = off)", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
 }
 
 bool Arm(Liquid::CInstance** instances, uint32_t count) {
@@ -218,6 +294,18 @@ bool Arm(Liquid::CInstance** instances, uint32_t count) {
         return false;
     }
     s_pass.below = World::SceneCamLiquidStatus(nullptr) != 0;
+    s_pass.fogValid = ResolveFogA(s_pass.below, s_pass.fogA, s_pass.fogColour);
+    s_pass.ripples = {};
+    if (RipplesWanted()) {
+        // vfog's ripple simulation (Cata's map format: Gr1616F height / previous height, 0.125 yd texels), run here
+        // when the Cata water draws; it needs only the camera target and the map from the frame inputs.
+        static VolumetricFog::FrameInputs s_in;
+        s_in.camTarget[0] = CWorldScene::camTarget.x;
+        s_in.camTarget[1] = CWorldScene::camTarget.y;
+        s_in.camTarget[2] = CWorldScene::camTarget.z;
+        s_in.mapId = World::QueryMapId();
+        VolumetricFog::RippleFrame(s_in, 1.0f, 2, FrameTime::s_curTimeMs * 0.001, vp, s_pass.ripples);
+    }
     s_pass.armed = true;
     return true;
 }
@@ -273,14 +361,22 @@ bool Bind(Liquid::CMaterialSettings* settings, bool specular, const C3Vector& ca
         { s_pass.depthTex[0], s_pass.depthTex[1], s_pass.depthTex[2], s_pass.depthTex[3] },
         { s_pass.vp.x, s_pass.vp.y, s_pass.vp.w, s_pass.vp.h },
         { lp->p6, lp->p9, specular ? lp->p10 : 0.0f, lp->p14 },     // the NoSpec material has no highlight
-        { s_pass.maxZ, 0.0f, 0.0f, 0.0f },                          // piece C: thickness fog strength in y
-        { 0.0f, 0.0f, 1.0f, lp->p7 * 0.35f },                       // piece C: the zone's fog A in xyz
-        { 0.0f, 0.0f, 0.0f, 0.0f },                                 // piece C: fog A colour
+        { s_pass.maxZ, s_pass.fogValid ? 1.0f : 0.0f, 0.0f, 0.0f },
+        { s_pass.fogA[0], s_pass.fogA[1], s_pass.fogA[2], lp->p7 * 0.35f },
+        { s_pass.fogColour[0], s_pass.fogColour[1], s_pass.fogColour[2], 0.0f },
         { -(sun.x * view.a0 + sun.y * view.a1 + sun.z * view.a2), -(sun.x * view.b0 + sun.y * view.b1 + sun.z * view.b2), -(sun.x * view.c0 + sun.y * view.c1 + sun.z * view.c2), 0.0f },
         { d[0], d[1], d[2], 1.0f },
         { s[0], s[1], s[2], 1.0f },
     };
     device->ShaderConstantsSet(GxSh_Pixel, 16, &pc[0][0], 13);
+    // c29 / c30: the ripple window (origin - camera, 1 / extent) and (1 / texels, step fraction, P15; 0 = off).
+    const VolumetricFog::RippleShading& rs = s_pass.ripples;
+    const float rc[2][4] = {
+        { static_cast<float>(static_cast<double>(rs.window[0]) - cameraPos.x), static_cast<float>(static_cast<double>(rs.window[1]) - cameraPos.y), rs.window[2], rs.window[2] },
+        { rs.window[3], rs.window[3], rs.shape[0], rs.map ? lp->p15 : 0.0f },
+    };
+    device->ShaderConstantsSet(GxSh_Pixel, 29, &rc[0][0], 2);
+    Bind(kRippleStage, rs.map ? rs.map : s_scene);  // off: any valid texture, its slope is scaled by 0
 
     Bind(kNormalStage, normal);
     Bind(kFoamStage, foam);
@@ -293,11 +389,60 @@ bool Bind(Liquid::CMaterialSettings* settings, bool specular, const C3Vector& ca
     return true;
 }
 
+// Cata FFXUnderWaterLow (wxl-water's underwater pass, Water.cpp CausticsUnder): with the camera in water, the frame
+// times the underwater fog's hue (brightness kept, 30 %) and darkened toward the corners (0.45). One copy of the world
+// viewport and one opaque quad over it, only under water.
+void OnWorldDone() {
+    CGxDevice* device = g_theGxDevicePtr;
+    const int32_t liquid = World::SceneCamLiquidStatus(nullptr);
+    if (!s_style || s_style->m_intValue != 1 || !liquid || !device || s_failed || !Liquid::s_liquidTypeDB) {
+        return;
+    }
+    const LiquidTypeRec* rec = Liquid::s_liquidTypeDB->GetRecord(liquid);
+    if (!rec || static_cast<uint32_t>(rec->m_materialID) != kMaterialWater || !VolumetricFog::Shader(s_psTint, "CataWaterTint")) {
+        return;
+    }
+    if (!s_callbackAdded) {
+        device->AddDeviceRestoredCallback(OnDeviceRestored);
+        s_callbackAdded = true;
+    }
+    const VolumetricFog::WorldViewport vp = VolumetricFog::LiveWorldViewport();
+    float fogA[3];
+    float colour[3];
+    if (vp.target || vp.w < kMinSize || vp.h < kMinSize || !ResolveFogA(true, fogA, colour)
+        || !Target(s_scene, static_cast<uint32_t>(vp.w), static_cast<uint32_t>(vp.h), GxTex_Argb8888, GxTex_Linear, "CataWaterScene")) {
+        return;
+    }
+    const C2iVector dest = { 0, 0 };
+    const C2iVector source = { static_cast<int32_t>(vp.x), static_cast<int32_t>(vp.y) };
+    const C2iVector size = { static_cast<int32_t>(vp.w), static_cast<int32_t>(vp.h) };
+    if (!GxTexCopy(s_scene, dest, source, size, 0, 0)) {
+        return;
+    }
+    const float brightest = std::max(std::max(colour[0], colour[1]), std::max(colour[2], 1.0e-3f));
+    float tint[4];
+    for (int i = 0; i < 3; i++) {
+        tint[i] = 1.0f + (colour[i] / brightest - 1.0f) * 0.3f;
+    }
+    tint[3] = 0.45f;
+    static VolumetricFog::SavedPassState s_saved;
+    VolumetricFog::BeginPasses(s_saved);
+    VolumetricFog::SetPs(0, tint, 1);
+    Bind(0, s_scene);
+    device->RsSet(GxRs_PixelShader, s_psTint);
+    VolumetricFog::DrawQuad(static_cast<uint32_t>(vp.w), static_cast<uint32_t>(vp.h), vp.minX, vp.maxX, vp.minY, vp.maxY);
+    VolumetricFog::EndPasses(s_saved, vp);
+}
+
+bool DrawsRipples() {
+    return RipplesWanted();
+}
+
 void Shutdown() {
     CGxDevice* device = g_theGxDevicePtr;
     if (device) {
         DropTargets();
-        for (CGxShader** slot : { &s_vs, &s_psAbove, &s_psBelow, &s_depthCopy }) {
+        for (CGxShader** slot : { &s_vs, &s_psAbove, &s_psBelow, &s_depthCopy, &s_psTint }) {
             if (*slot) {
                 device->ShaderDestroy(*slot);
                 *slot = nullptr;

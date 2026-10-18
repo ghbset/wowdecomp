@@ -22,6 +22,10 @@ void Done();                    // after the pass's last draw
 // CMaterialWater(NoSpec)::Render, after Liquid::SetShaderConstants, in place of the stock shader binds: our shaders,
 // textures and constants. False (not armed, no Cata data for this row, a texture still loading): bind the stock ones.
 bool Bind(Liquid::CMaterialSettings* settings, bool specular, const C3Vector& cameraPos);
+// CGWorldFrame::OnWorldRender, after the world (vfog's OnWorldDone), before the chat bubbles: Cata's underwater
+// screen tint with the camera in water.
+void OnWorldDone();
+bool DrawsRipples();            // waterStyle 1 with waterCataRipples: the client's splash sprites give way
 void Shutdown();
 
 }  // namespace CataWater

@@ -74,8 +74,9 @@ SHADERS = {
 # Cata water (waterStyle 1, docs/BACKLOG_PORT.md "Cata water"): the ProcWater VS and ProcWaterAbove / Below PS,
 # drawn by the liquid material in place of vsLiquidWater / psLiquidWater (WorldClient/CataWater.cpp).
 SHADERS['CataWater'] = ('vs_3_0', 0, 0, 0, 0, 'CataWater', {})
-SHADERS['CataWaterAbove'] = ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 9, 10, 12, 13), 0, 'CataWaterPs', {})
-SHADERS['CataWaterBelow'] = ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 9, 12, 13), 0, 'CataWaterPs', {'BELOW': 1})
+SHADERS['CataWaterAbove'] = ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 9, 10, 11, 12, 13), 0, 'CataWaterPs', {})
+SHADERS['CataWaterBelow'] = ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 9, 11, 12, 13), 0, 'CataWaterPs', {'BELOW': 1})
+SHADERS['CataWaterTint'] = ('ps_3_0', TEXCOORD0, COLOR0, samplers(0), 0, 'CataWaterTint', {})
 # VFogWater{1,2,3}: coa ps_vw_shade_low/mid/high (SSR_STEPS 0/16/32, cmake/WaterShaders.cmake)
 for _v, _ssr in ((1, 0), (2, 16), (3, 32)):
     SHADERS['VFogWater%d' % _v] = ('ps_3_0', TEXCOORD0, COLOR0, samplers(*range(0, 13), 14, 15), 0, 'VFogWater',

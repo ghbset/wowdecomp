@@ -66,6 +66,7 @@ local PAGES = {
 	  -- Cata water (waterStyle, WorldClient/CataWater.cpp): the settings below are the Modern style's.
 	  { "waterStyle", "drop", "Water style", "Modern: reflections, waves and foam from the volumetric fog (the settings below). Cataclysm: the Cataclysm water surface, with or without volumetric fog.",
 	    { { "0", "Modern" }, { "1", "Cataclysm" } } },
+	  { "waterCataRipples", "check", "Cataclysm ripples", "Cataclysm water style: rings and wakes where characters move through or jump into water." },
 	  { "vfogWater", "check", "Modern water", "Lakes, rivers, sea and pools get reflections, waves and foam. Needs volumetric fog on." },
 	  { "vfogWaterQuality", "drop", "Water quality", "Low reflects only the sky; Medium and High also reflect the world.",
 	    { { "1", "Low" }, { "2", "Medium" }, { "3", "High" } } },

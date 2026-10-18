@@ -85,6 +85,7 @@
 #include "WoW/Source/WorldClient/MapEntity.h"
 #include "WoW/Source/WorldClient/MapWeather.h"
 #include "WoW/Source/WorldClient/World.h"
+#include "WoW/Source/WorldClient/CataWater.h"
 #include "WoW/Source/WorldClient/VolumetricFog.h"
 #include <cfloat>
 #include <cmath>
@@ -1795,6 +1796,7 @@ void CGWorldFrame::OnWorldRender() {
 
     g_theGxDevicePtr->RsPop();
     SmartScreenRectClearGrid(1);
+    CataWater::OnWorldDone();   // CATA WATER: not in 12340 (underwater tint, waterStyle 1)
     CGChatBubbleFrame::OnWorldRender(this);
     VolumetricFog::OnWorldDone();   // VFOG: not in 12340; before the restore so it sees the world viewport
     GxXformSetViewport(minX, maxX, minY, maxY, minZ, maxZ);
