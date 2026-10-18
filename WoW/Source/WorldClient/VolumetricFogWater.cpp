@@ -998,7 +998,7 @@ void RegisterWaterCVars() {
     s_cvars.clarity = CVar::Register("vfogWaterClarity", "Modern water clarity, 0.25..4 (larger is clearer)", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.zoneColors = CVar::Register("vfogWaterZoneColors", "How much the zone's own water colours tint the modern water, 0..1", 1, "0.5", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.ripples = CVar::Register("vfogWaterRipples", "Modern water ripples and wakes where units move through or jump into water, 0..2 (0 = off)", 1, "0.5", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
-    s_cvars.clientSplashes = CVar::Register("vfogWaterClientSplashes", "Keep the client's own splash discs and wake trails on top of the modern water's ripples (0 = hidden while the ripples run)", 1, "0", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    s_cvars.clientSplashes = CVar::Register("vfogWaterClientSplashes", "Keep the client's own splash discs and wake trails on top of the modern water's ripples (0 = hidden while the ripples run with screen reflections; always kept at quality 1 or reflections 0)", 1, "0", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.stencil = CVar::Register("vfogWaterStencil", "Modern water: 1 = water classes tagged in the stencil as they draw and shaded after the liquid pass (coa), 0 = a depth copy per class marks its pixels", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.gpuWaves = CVar::Register("vfogWaterGpuWaves", "Modern water waves simulated on the GPU (1) or on CPU worker threads (0); the CPU also runs where the GPU lacks RGBA16F targets", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.debug = CVar::Register("vfogWaterDebug", "Modern water debug view: 0 off, 1 normal, 2 foam, 3 transmittance, 4 reflection, 5 class, 6 ripples", 1, "0", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
@@ -1119,7 +1119,11 @@ bool WaterArmed() {
 
 bool WaterHidesClientRipples() {
     const WaterConfig water = ReadWaterConfig();
-    return RipplesHideClientSprites(water.enable && water.ripples > 0.0f && !water.clientSplashes && !s_shaderMissing);
+    // Not coa: the sky-only variant (quality 1 or reflections 0) shows the ripple map only as a faint normal tilt
+    // against a flat sky, so the client's splash rings and wake trails stay on there; the screen-reflecting
+    // variants show the ripples clearly and replace them.
+    const bool screenReflections = water.quality > 1 && water.reflections > 0.0f;
+    return RipplesHideClientSprites(water.enable && water.ripples > 0.0f && screenReflections && !water.clientSplashes && !s_shaderMissing);
 }
 
 void WaterShutdown() {
