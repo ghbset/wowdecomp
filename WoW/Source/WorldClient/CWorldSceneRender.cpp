@@ -27,6 +27,7 @@
 #include "WoW/Source/WorldClient/ShadowQuery.h"
 #include "WoW/Source/WorldClient/SortTable.h"
 #include "WoW/Source/WorldClient/VolumetricFog.h"
+#include "WoW/Source/WorldClient/WorldParam.h"
 #include "Engine/Source/Gx/CGxMatrixStack.h"
 #include "Engine/Source/ShaderEffect/ShadowCache.h"
 #include "Engine/Source/Tempest/C44Matrix.h"
@@ -90,6 +91,8 @@ void CWorldScene::Render(const C3Vector& cameraPos, float time) {
 
     CGCamera* camera = CGWorldFrame::GetActiveCamera();
     CWorldScene::s_fogFovPadding = CWorld::farFog / cosf(camera->FOV() * 0.5f) - CWorld::farFog;
+    // LEGION objcull: pixels of projected height per (radius / distance), for AddDoodadDefModelToModelScene.
+    CWorldParam::s_lodObjectPixScale = (g_theGxDevicePtr->DeviceCurWindow().maxY - g_theGxDevicePtr->DeviceCurWindow().minY) / tanf(camera->FOV() * 0.5f);
 
     World::UpdateObjectFadeouts();
     CMapRenderChunk::UpdatePools();

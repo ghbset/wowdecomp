@@ -15,6 +15,8 @@ local PAGES = {
 	  { "renderThread", "check", "Render thread", "Hands finished frames to a second thread so the next frame can start sooner. Vulkan only." },
 	  { "particleGpuQuads", "check", "GPU particles", "Builds particle sprites on the graphics card instead of the processor. Vulkan only." },
 	  { "occlusionCulling", "check", "Occlusion culling", "Skips buildings and objects hidden behind others. Vulkan only; off by default because world models can flicker while moving." },
+	  { "lodObjectCull", "check", "Fade tiny far objects", "Small objects only a few pixels tall in the distance fade out instead of being drawn." },
+	  { "lodObjectCullSize", "slider", "Tiny object size", "How small an object must look before it fades out (5 = one pixel tall).", 5, 50, 1 },
 	  { "horizonStaticVB", "check", "Static horizon buffers", "Draws far building silhouettes from buffers kept on the graphics card." },
 	  { "componentThreads", "check", "Threaded character textures", "Builds character skins and armour textures on several processor cores." },
 	  { "mpqThreads", "check", "Threaded file loading", "Unpacks game files on several processor cores." },
