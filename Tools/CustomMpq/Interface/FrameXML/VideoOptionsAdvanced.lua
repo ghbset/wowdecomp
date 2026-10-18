@@ -167,6 +167,15 @@ for _, page in ipairs(PAGES) do
 	end
 end
 
+-- Lamp light (Legion lightMode, docs/LEGION_PORT.md "Legion lights"): its own page, placed before the last one.
+table.insert(PAGES, #PAGES, { name = "Lights", parent = "Advanced", title = "Lamps & Torches",
+	{ "lightMode", "drop", "Lamp light on the world", "Lamps, torches and braziers light the ground and walls around them.",
+	  { { "0", "Off" }, { "1", "Ground and buildings" }, { "2", "Also creatures and grass" } } },
+	{ "maxLightCount", "slider", "Most lamps at once", "How many of the nearest lamps light the world at the same time.", 1, 128, 1 },
+	{ "maxLightDist", "slider", "Lamp light distance (yards)", "How far away lamps still light the world.", 20, 2048, 20 },
+	{ "lightIntensity", "slider", "Lamp brightness", "How bright the lamp light on the world is.", 0, 4, 0.1 },
+})
+
 local function Num(v)
 	return tonumber(v) or 0
 end

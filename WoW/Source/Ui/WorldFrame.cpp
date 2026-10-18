@@ -86,6 +86,7 @@
 #include "WoW/Source/WorldClient/MapWeather.h"
 #include "WoW/Source/WorldClient/World.h"
 #include "WoW/Source/WorldClient/CataWater.h"
+#include "WoW/Source/WorldClient/LegionLights.h"
 #include "WoW/Source/WorldClient/VolumetricFog.h"
 #include <cfloat>
 #include <cmath>
@@ -1748,6 +1749,7 @@ void CGWorldFrame::OnWorldRender() {
 
     scene->SetFloat18(-CWorld::s_unk_CD7758);
     scene->m_passMask = CWorld::m_M2PassMask;
+    LegionLights::OnWorld(false);   // LEGION lights: not in 12340 (lightMode 1: terrain and WMO, before the models)
     scene->Draw(M2PASS_0);
     VolumetricFog::OnOpaqueDone();   // VFOG: not in 12340
 
@@ -1759,6 +1761,7 @@ void CGWorldFrame::OnWorldRender() {
     GxuFlushDrawList(GxuCat_0, *World::GetCamPos());
     CWorldScene::RenderDetailDoodads();
     VolumetricFog::OnSolidDone();   // not in 12340: shadowMask, the land's sun shadow over the opaque world
+    LegionLights::OnWorld(true);    // LEGION lights: not in 12340 (lightMode 2: the whole solid world)
 
     if (World::SceneCamLiquidStatus(nullptr)) {
         CWorldScene::RenderBarriers(this->m_elapsedSec);
