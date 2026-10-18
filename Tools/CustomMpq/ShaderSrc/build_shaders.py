@@ -22,7 +22,7 @@ plus VFogTemporal and VFogHistoryDepth, and the god rays VFogRayMask, VFogRayBlu
 Grading (coa vp_grade): VFogGrade.
 Water (coa vw_*): VFogWaterDepth, VFogWaterMask, VFogWater{1,2,3} (SSR_STEPS 0/16/32) and VFogRippleStep;
 GPU waves VFogWave{Evolve,Fft,Surface,Mip,Pack}.
-Fading models (wxl-vfog 0.6.3): VFogDepthCopy. MSAA sample split (coa): VFogSilhouette and VFogCompositeSplit{Q}[L][N].
+Fading models (wxl-vfog 0.6.3): VFogDepthCopy. Legion FFX post: LegionPost{0,1,2}. MSAA sample split (coa): VFogSilhouette and VFogCompositeSplit{Q}[L][N].
 """
 import argparse
 import concurrent.futures
@@ -70,6 +70,10 @@ SHADERS = {
     'VFogDepthCopy': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0), 0, 'VFogDepthCopy', {}),
     # MSAA silhouette samples marked in the stencil by an oDepth pass (coa vf_silhouette_mask; Vulkan: gl_FragDepth)
     'VFogSilhouette': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0), 0, 'VFogSilhouette', {}),
+    # Legion FFX post (docs/LEGION_PORT.md): colour shift only, FXAA low + colour shift, FXAA high + colour shift
+    'LegionPost0': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0), 0, 'LegionPost', {'FXAA_STEPS': 0}),
+    'LegionPost1': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0), 0, 'LegionPost', {'FXAA_STEPS': 5}),
+    'LegionPost2': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0), 0, 'LegionPost', {'FXAA_STEPS': 12}),
 }
 # VFogWater{1,2,3}: coa ps_vw_shade_low/mid/high (SSR_STEPS 0/16/32, cmake/WaterShaders.cmake)
 for _v, _ssr in ((1, 0), (2, 16), (3, 32)):

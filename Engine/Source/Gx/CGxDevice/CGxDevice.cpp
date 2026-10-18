@@ -90,6 +90,7 @@ uint32_t CGxDevice::m_logBytes;
 
 // STATIC: 0x00C5FFF8
 HSLOG CGxDevice::m_log;
+uint32_t CGxDevice::s_depthUsers = 0;   // LEGION SetDepthUser
 
 // STATIC: 0x00C5FFF0
 static float kWinAspect;

@@ -255,6 +255,12 @@ class CGxDevice {
     // VFOG: true where DeviceCopySceneDepth returns a snapshot that later draws do not change (D3D9 RESZ, D3D11,
     // Vulkan); false where it is the live depth-stencil (D3D9 INTZ), which the caller must copy to keep.
     virtual bool DeviceSceneDepthIsCopy() { return false; }
+    // LEGION: not in 12340 (7.3.5 SetDepthUser 0x006C4343, its users counted at 0x013CCDDC). One bit per scene-depth
+    // consumer, set from its CVar state each frame; while none is set every DeviceCopySceneDepth returns nullptr
+    // (transient), so no copy runs. A new consumer adds a bit here and one SetDepthUser call. docs/LEGION_PORT.md.
+    enum : uint32_t { DepthUser_Fog = 1u << 0, DepthUser_FadeStencil = 1u << 1, DepthUser_Water = 1u << 2 };
+    static uint32_t s_depthUsers;
+    static void SetDepthUser(uint32_t user, bool on) { s_depthUsers = on ? s_depthUsers | user : s_depthUsers & ~user; }
 
     static HSLOG m_log;
     static C2iVector s_clientAdjust;

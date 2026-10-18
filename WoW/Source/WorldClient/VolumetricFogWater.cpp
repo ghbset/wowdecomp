@@ -1006,6 +1006,7 @@ void RegisterWaterCVars() {
 
 bool WaterArm(Liquid::CInstance** instances, uint32_t count) {
     s_pass.armed = false;
+    CGxDevice::SetDepthUser(CGxDevice::DepthUser_Water, false);    // LEGION SetDepthUser: set again once armed
     const FrameInputs* in = nullptr;
     const Config* cfg = nullptr;
     CGxDevice* device = g_theGxDevicePtr;
@@ -1048,6 +1049,7 @@ bool WaterArm(Liquid::CInstance** instances, uint32_t count) {
     std::copy(s_sorted.begin(), s_sorted.end(), instances);
     s_pass = {};
     s_pass.armed = true;
+    CGxDevice::SetDepthUser(CGxDevice::DepthUser_Water, true);
     s_pass.in = in;
     s_pass.cfg = cfg;
     s_pass.water = water;
