@@ -728,3 +728,13 @@ casters: lit where the sun reaches, dark in shadow. The screen-space god rays (V
   Light & God Rays. Shadows off or low: the sun is unshadowed, as before.
 - Not done: band 0 (40 yd) is not read (one sampler less, the near 40 yd are a small part of a fog ray); no
   receiver-plane bias beyond the engine's own (the march points are in the air, not on surfaces).
+- **Also in vfog25** (merged, no shaders):
+  - `fix-texdecay` (`CGxDeviceVulkanTexture.cpp`): Vulkan remakes a recycled texture's image when its data format or
+    mip count differs (garbled letters / white textures after relogs).
+  - `fix-lowwater` (`VolumetricFogWater.cpp`): stock splash rings and wake trails are no longer hidden at sky-only
+    water quality or with reflections off.
+  - `fix-fogedge` (`VolumetricFogRenderer.cpp` `CompositePass`): the noise atlases s9/s10 are bound for the
+    composite's full-res fallback march (fog-coloured outlines on silhouettes near the fog start).
+
+custom.MPQ: 5121 files; the SPIR-V set regenerated (1633 records + 2 companions, spirv-val clean; only the 72 VFogMarch/
+VFogComposite* records changed), the SM4 pack from shadow-s1, our ps_3_0/ps_4_0 fog shaders rebuilt.
