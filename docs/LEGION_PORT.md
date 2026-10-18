@@ -180,3 +180,68 @@ shift, `I + E (I - sim)` with E = [[0,0,0],[0.7,1,0],[0.7,0,1]], folded into one
 labels CVar) is untouched and independent.
 
 Options: Video Options > Advanced > Post Processing ("Anti-Aliasing & Colour").
+
+## 2026-10-18: Legion lights (survey item 3, 2.8; FEATURE_BACKLOG #7 lamp lighting)
+
+Legion 7.3.5 draws light volumes into a light buffer that every material reads (light pre-pass). v1 here is the
+screen-space half of that: the frame's lamps resolved once from the scene depth and added onto the frame.
+
+**Pass** (`LegionLights.cpp`, shader `LegionLights.hlsl`). The lights are the CM2Scene light grid's visible point
+lights, the list vfog's fog scattering walks (`CaptureLocalLights`), without its 8-light cap: every M2 lamp, torch,
+brazier and candle. CPU: camera distance cull (`maxLightDist` + radius), behind-camera cull, nearest `maxLightCount`
+kept (`nth_element`), positions into view space. Radius = where the stock M2 attenuation (CM2Light: 0 / 0.7 / 0.03,
+the same for every M2 light) leaves 1/32 of the light's peak colour, capped at 40 yd (about 23 yd for a colour-1
+lamp). GPU: one full-screen quad per 16 lights (constants c10 control, c11-c58 three registers a light; literal
+indices, no relative addressing for the translators), position from the depth, normal rebuilt from the depth
+(VFogShadowMask's nearer-neighbour cross), per light `colour * min(stock attenuation, 1.5) * window^2 * N.L` with
+`window = saturate(1 - d^2 / r^2)` (northlight local_light_effects.hlsl's smooth window, MIT; modern-wow-renderer
+read for ideas only). Sky and the WDL horizon (depth past the world viewport's maxZ) are skipped; the light fades to
+0 over the last quarter of `maxLightDist`; pixels with less than 1/512 of light are discarded.
+Blend `GxBlend_ModAdd` (dst * src + dst): `colour += colour * light`, so the frame's own colour is the albedo proxy,
+black stays black, and a surface at most doubles. The light is divided by the stock light level (luma of DNInfo
+ambient + half the diffuse, at least 0.2), so a lamp adds about albedo x lamp as Legion's buffer does: strong at
+night, faint at noon. Depth through `DepthUser_Lights` (bit 4), set only while the pass draws.
+
+**Where, and the double-lighting question.** Stock 3.3.5a lights M2s (models, characters) and grass with up to 4
+of these point lights each, but never terrain or WMO (WMO interiors have baked vertex colours, MOCV).
+- `lightMode 1` runs right after `CWorld::Render` (terrain, WMO groups, horizon, sky) and before
+  `scene->Draw(M2PASS_0)`: the depth then holds only terrain and WMO, and every model drawn after covers its pixels
+  with its own stock-lit colour. So models are never double lit, and the lamps light exactly what stock leaves dark.
+- `lightMode 2` runs after the solid world (after `VolumetricFog::OnSolidDone`, so after the shadow mask): models
+  and grass take the lamps too, on top of their stock point lights (brighter near lamps). For a look closer to
+  Legion's "everything lit"; not the default choice.
+Both run before liquids, transparents and the fog composite, so the fog fogs the lit surfaces.
+
+**CVars** (LegionLights.cpp, Video Options > Advanced > Lights, "Lamps & Torches"):
+| CVar | Range | Default | |
+|---|---|---|---|
+| `lightMode` | 0/1/2 | 0 | 0 off, 1 terrain + WMO before the models, 2 the whole solid world (Legion "Quality of lighting" 0-2) |
+| `maxLightCount` | 1..128 | 32 | nearest lights kept (Legion 128); 16 a pass, so 32 = 2 passes |
+| `maxLightDist` | 20..2048 | 200 | yd; lights farther than this plus their radius are dropped, the light fades over the last quarter (Legion 2048) |
+| `lightIntensity` | 0..4 | 1 | scale on the added light |
+
+Default off: cost not measured (no rig by the rules), and it changes the look of every lit town at night. Estimate:
+per pass 5 depth taps and ~16 x 14 ALU a pixel over the world viewport, about 0.2-0.4 ms a pass at 1440p on a mid GPU
+(discarded pixels still pay the loop). With the shader cost confirmed, `lightMode 1` is the candidate default.
+
+**Backends.** SPIR-V through Tools/VulkanShaders (Vulkan), ps_4_0 through build_shaders.py (D3D11), ps_3_0 (D3D9)
+compiled by fxc.
+
+**Known limits (v1).**
+- Lights that are not M2 lights (WMO MOLT lights, spell lights) are not in the grid: not lit. Map lights are area
+  lighting (DNInfo), not points.
+- A lamp lights through walls (no shadowing); the N.L from rebuilt normals is per pixel and noisy on bumpy ground.
+- WMO interiors already carry baked lamp light in MOCV: the lamp adds on top (lower `lightIntensity` indoors if it
+  is too bright; no interior weight yet).
+- The stock fog is in the colour when vfog is off (`vfogStockFog 0` or vfog off): a fogged pixel within reach is
+  brightened with its fog. With vfog on the stock fog is pushed out, so the lit colour is unfogged here.
+- Every pass covers the whole world viewport. ponytail in LegionLights.cpp: scissor each pass to its lights' screen
+  rect if the cost shows.
+
+**Next phase: a light pre-pass the receivers read (Legion's shape).** Draw each light as a volume (sphere or screen
+rect) into an RGBA16F light buffer before the opaque world (needs a depth + normal pre-pass, or the normals rebuilt
+from the depth as here) and have the terrain, WMO and M2 pixel shaders add `albedo * lightBuffer` in their own
+lighting. That adds: true albedo (no division by the stock light level, so dark-textured and fogged surfaces are
+right), lamps lighting under the stock fog, specular, per-material response, no 2x ceiling, models lit by more than 4
+lights (their 4 stock point lights could be dropped), and spot lights (`lightbuffer_spotlight`). The cost is every
+receiver shader (terrain 4-layer, WMO, M2 families) getting one more tap: 3-4 pieces, the survey estimate.
