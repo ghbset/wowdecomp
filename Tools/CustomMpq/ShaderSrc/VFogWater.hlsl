@@ -50,6 +50,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
     [branch] if (tex2Dlod(sWaterDepth, float4(CopyUv(pixel), 0, 0)).r <= 0)
         return 0;
     WaterPixel w = ReconstructWaterPixel(pixel);
+    gLandSun = LandSunVisibility(w.position);
     RippleSample ripples = SampleRipples(w);
     WaveState waves = SampleWaves(w, ripples.slope);
     float4 foamAlbedo = FoamAlbedo(w, waves);

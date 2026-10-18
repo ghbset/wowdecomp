@@ -199,6 +199,8 @@ bool RenderFog(const FogParams& fog, const FrameInputs& in, const Config& cfg, u
 bool KeepDepthBehindFading();
 void InvalidateHistory();
 bool CompositeOverSceneCopy();              // last RenderFog blended over a scene copy (coa LinearOverSceneCopy)
+// shadowMask: the land's sun shadow over the opaque world (multiply). False = nothing drawn.
+bool RenderShadowMask(const FrameInputs& in, float softYards, bool stockFogInColour);
 void RenderGodRays();                       // OnWorldDone: the rays the last RenderFog masked, over the finished world
 void RendererShutdown();
 
@@ -208,6 +210,7 @@ bool Active();                              // fog will draw (or drew) this fram
 void OnWorldUpdate();                       // CWorld::Update, after CWorld::farFog is taken
 void OnViewerLiquid();                      // CWorldScene::Render, right after UpdateViewerLiquid
 void OnOpaqueDone();                        // after scene->Draw(M2PASS_0)
+void OnSolidDone();                         // after the detail doodads, before liquids: the shadow mask (shadowMask)
 void OnLiquidDone();                        // after RenderLiquidPass, above-water branch only
 void OnWorldDone();                         // end of CGWorldFrame::OnWorldRender
 void OnWorldRendered();                     // CGWorldFrame::RenderWorld, after OnWorldRender (glow done), before names
