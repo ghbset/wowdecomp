@@ -1180,6 +1180,7 @@ void World::ObjectDestroy(CMapEntity* entity) {
 // OFFSET: 0x00780860
 void World::PrepareAreaOfInterest(const C3Vector& position) {
     World::s_currentWorldPos = position;
+    AsyncFileReadSetViewPos(position.x, position.y);   // LEGION worldLoadSort
 
     CGCamera* camera = CGWorldFrame::GetActiveCamera();
     float farZ = camera->m_farZ;
@@ -2178,6 +2179,33 @@ void CWorldScene::AddDoodadDefModelToModelScene(CMapDoodadDef* doodadDef) {
                 alpha = 1.0f;
             } else if (alpha <= 0.0099999998f) {
                 return;
+            }
+        }
+    }
+
+    // LEGION objcull (7.3.5 0x00C6EE2D, not in 12340): doodads only a few pixels tall fade out instead of being drawn.
+    // Every doodad path (exterior, chunk, interior, reflection re-run) comes through here; the sun shadow maps gather
+    // doodads on their own (ShadowQuery.cpp), so culled doodads keep casting. Objects that never distance-fade
+    // (0x800) are left alone, and so is anything within lodObjectCullDist or with a radius of lodObjectMinSize / 10 yd.
+    if (CWorldParam::cvar_lodObjectCull && CWorldParam::cvar_lodObjectCull->m_intValue && !(flags & 0x800)) {
+        float r = doodadDef->m_sphere.r;
+        float minRadius = fclamp(CWorldParam::cvar_lodObjectMinSize->m_floatValue, 0.0f, 1000.0f) * 0.1f;
+        C3Vector delta = doodadDef->m_sphere.c - CWorldScene::s_activeWorldView;
+        float d = sqrtf(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z) - fclamp(CWorldParam::cvar_lodObjectCullDist->m_floatValue, 1.0f, 200.0f);
+
+        if (d > 0.0f && r < minRadius) {
+            // Projected height in pixels (r * H / (d * tan(fovy / 2))) against cullSize / 5 pixels, fading over a band
+            // fadeScale % of that above it. Legion form: cull when (3r)^2 < (d * k)^2 with k = 3 * px / pixScale.
+            float px = fclamp(CWorldParam::cvar_lodObjectCullSize->m_floatValue, 1.0f, 100.0f) * 0.2f;
+            float band = px * fclamp(CWorldParam::cvar_lodObjectFadeScale->m_floatValue, 50.0f, 300.0f) * 0.01f;
+            float a = (r * CWorldParam::s_lodObjectPixScale / d - px) / band;
+
+            if (a <= 0.01f) {
+                return;
+            }
+
+            if (a < 1.0f) {
+                alpha *= a;
             }
         }
     }

@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <new>
 #include "Engine/Source/Gx/CGxDevice/CGxDevice.h"
+#include "Engine/Source/Services/AsyncFile.h"
 #include "Engine/Source/Services/GfxSingletonManager.h"
 #include "Engine/Source/Services/Texture.h"
 #include "Engine/Source/ShaderEffect/ShaderEffect.h"
@@ -104,6 +105,12 @@ CVar* CWorldParam::cvar_objectFade;
 
 // STATIC: 0x00CD85D0
 CVar* CWorldParam::cvar_objectFadeZFill;
+CVar* CWorldParam::cvar_lodObjectCull;
+CVar* CWorldParam::cvar_lodObjectCullSize;
+CVar* CWorldParam::cvar_lodObjectCullDist;
+CVar* CWorldParam::cvar_lodObjectMinSize;
+CVar* CWorldParam::cvar_lodObjectFadeScale;
+float CWorldParam::s_lodObjectPixScale;
 
 // STATIC: 0x00CD85D4
 CVar* CWorldParam::cvar_environmentDetail;
@@ -660,6 +667,12 @@ void CWorldParam::Initialize() {
     CWorldParam::cvar_groundEffectDist = CVar::Register("groundEffectDist", "Ground effect dist", 1, "70.0", CWorldParam::GroundEffectDistCallback, CATEGORY_GRAPHICS, false, nullptr, false);
     CWorldParam::cvar_objectFade = CVar::Register("objectFade", "Fade objects into view", 1, "1", CWorldParam::ObjectFadeCallback, CATEGORY_GRAPHICS, false, nullptr, false);
     CWorldParam::cvar_objectFadeZFill = CVar::Register("objectFadeZFill", "Fade objects using ZFill pass ", 1, "0", CWorldParam::ObjectFadeZFillCallback, CATEGORY_GRAPHICS, false, nullptr, false);
+    // LEGION objcull: values are clamped to the Legion ranges where they are read (World.cpp).
+    CWorldParam::cvar_lodObjectCull = CVar::Register("lodObjectCull", "Fade out world doodads only a few pixels tall (0/1)", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    CWorldParam::cvar_lodObjectCullSize = CVar::Register("lodObjectCullSize", "Doodad cull size, 5 = 1 pixel of projected height (1-100)", 1, "15", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    CWorldParam::cvar_lodObjectCullDist = CVar::Register("lodObjectCullDist", "Doodads nearer than this (yards) are never size culled (1-200)", 1, "30", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    CWorldParam::cvar_lodObjectMinSize = CVar::Register("lodObjectMinSize", "Doodads with a radius of at least this / 10 yards are never size culled (0-1000)", 1, "100", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    CWorldParam::cvar_lodObjectFadeScale = CVar::Register("lodObjectFadeScale", "Size cull fade band, percent of the cull size (50-300)", 1, "100", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     CWorldParam::cvar_environmentDetail = CVar::Register("environmentDetail", "Environment detail", 1, "1.0", CWorldParam::EnvironmentDetailCallback, CATEGORY_GRAPHICS, false, nullptr, false);
     CWorldParam::cvar_hwPCF = CVar::Register("hwPCF", "Hardware PCF Filtering", 1, "1", CWorldParam::HWPCFCallback, CATEGORY_GRAPHICS, false, nullptr, false);
     CWorldParam::cvar_extShadowQuality = CVar::Register("extShadowQuality", "Quality of exterior shadows (0-5)", 1, "0", CWorldParam::ExtShadowQualityCallback, CATEGORY_GRAPHICS, false, nullptr, false);
@@ -670,6 +683,17 @@ void CWorldParam::Initialize() {
     // BENILLA: not in 12340. Ground spell quads drape the terrain (CM2Scene IsGroundDecalBatch); 0 = stock flat planes.
     CVar::Register("groundDecals", "Ground spell effects follow the terrain", 1, "1", [](CVar*, const char*, const char* value, void*) -> bool {
         CM2Scene::s_groundDecals = SStrToInt(value) != 0;
+        return true;
+    }, CATEGORY_GRAPHICS, false, nullptr, false);
+    // LEGION stream: not in 12340. Disk readers load the queued model/WMO nearest the camera first (Legion worldLoadSort).
+    CVar::Register("worldLoadSort", "Load world models nearest the camera first", 1, "1", [](CVar*, const char*, const char* value, void*) -> bool {
+        g_asyncLoadSort = SStrToInt(value) != 0;
+        return true;
+    }, CATEGORY_GRAPHICS, false, nullptr, false);
+    // LEGION stream: not in 12340. Most streamed textures created per frame in game (0 = unlimited; loading screens never capped).
+    CVar::Register("texUploadLimit", "Most streamed textures created per frame (0 = unlimited)", 1, "24", [](CVar*, const char*, const char* value, void*) -> bool {
+        int32_t limit = SStrToInt(value);
+        g_asyncTexUploadLimit = limit < 0 ? 0 : limit;
         return true;
     }, CATEGORY_GRAPHICS, false, nullptr, false);
     // BACKLOG: not in 12340. Rebuild building normals that disagree with their flat faces (wxl-light Normals.cpp);

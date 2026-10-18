@@ -1327,6 +1327,9 @@ CGxTex* CGxDeviceD3d11::DeviceCopySceneDepth(bool* transient) {
     bool dummy;
     bool& retry = transient ? *transient : dummy;
     retry = true;
+    if (!CGxDevice::s_depthUsers) {
+        return nullptr;     // LEGION SetDepthUser: no consumer this frame
+    }
 
     if (!this->m_context || !this->m_depthTexture) {
         return nullptr;

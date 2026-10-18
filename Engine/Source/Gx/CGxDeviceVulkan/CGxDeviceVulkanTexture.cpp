@@ -723,7 +723,7 @@ CGxTex* CGxDeviceVulkan::DeviceCopySceneDepth(bool* transient) {
     bool& passing = transient ? *transient : dummy;
     passing = true;
 
-    if (!this->m_context || !this->m_drawPath) {
+    if (!this->m_context || !this->m_drawPath || !CGxDevice::s_depthUsers) {    // LEGION SetDepthUser: no consumer this frame
         return nullptr;
     }
 

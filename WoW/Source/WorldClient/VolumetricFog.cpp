@@ -524,6 +524,69 @@ bool FogParticles() {
     return s_armed && s_cfg.transparentFog;
 }
 
+// LEGION FFX post (docs/LEGION_PORT.md): ffxAntiAliasingMode and FFXColorShift, decided at the end of the world (its
+// viewport), drawn after the grade, before names and the UI.
+struct PostCVars {
+    CVar* aa;           // ffxAntiAliasingMode 0 off, 1 FXAA low, 2 FXAA high
+    CVar* simulator;    // colorblindSimulator 0 off, 1 protan, 2 deutan, 3 tritan
+    CVar* weakness;     // colorblindWeaknessFactor 0..1 severity
+    CVar* daltonize;    // daltonize 0 = show the deficiency, 1 = correct for it
+} s_postCVars = {};
+
+struct PostFrame {
+    bool pending;
+    int aa;
+    float shift[3][4];
+    WorldViewport world;
+} s_post = {};
+
+// Machado, Oliveira and Fernandes 2009, severity 1.0, linear RGB (protanomaly, deuteranomaly, tritanomaly).
+constexpr float kDeficiency[3][3][3] = {
+    { { 0.152286f, 1.052583f, -0.204868f }, { 0.114503f, 0.786281f, 0.099216f }, { -0.003882f, -0.048116f, 1.051998f } },
+    { { 0.367322f, 0.860646f, -0.227968f }, { 0.280085f, 0.672501f, 0.047413f }, { -0.011820f, 0.042940f, 0.968881f } },
+    { { 1.255528f, -0.076749f, -0.178779f }, { -0.078411f, 0.930809f, 0.147602f }, { 0.004733f, 0.691367f, 0.303900f } },
+};
+// Daltonize (Fidaner, Lin and Ozguven 2005): the error the deficiency loses, shifted into the channels it keeps.
+constexpr float kErrorShift[3][3] = { { 0.0f, 0.0f, 0.0f }, { 0.7f, 1.0f, 0.0f }, { 0.7f, 0.0f, 1.0f } };
+
+// sim = I + f (M - I); daltonize: I + E (I - sim). Identity rows for type 0.
+void ColourShiftMatrix(int type, float severity, bool daltonize, float out[3][4]) {
+    float sim[3][3];
+    for (int r = 0; r < 3; r++) {
+        for (int c = 0; c < 3; c++) {
+            const float id = r == c ? 1.0f : 0.0f;
+            sim[r][c] = type ? id + severity * (kDeficiency[type - 1][r][c] - id) : id;
+        }
+    }
+    for (int r = 0; r < 3; r++) {
+        for (int c = 0; c < 4; c++) {
+            const float id = r == c ? 1.0f : 0.0f;
+            float v = c < 3 ? sim[r][c] : 0.0f;
+            if (daltonize && c < 3) {
+                v = id;
+                for (int k = 0; k < 3; k++) {
+                    v += kErrorShift[r][k] * ((k == c ? 1.0f : 0.0f) - sim[k][c]);
+                }
+            }
+            out[r][c] = v;
+        }
+    }
+}
+
+void PreparePost() {
+    s_post.pending = false;
+    const int aa = std::clamp(CVarInt(s_postCVars.aa, 0), 0, 2);
+    const int type = std::clamp(CVarInt(s_postCVars.simulator, 0), 0, 3);
+    const float severity = Clamp01(CVarFloat(s_postCVars.weakness, 0.5f));
+    if (!aa && !(type && severity > 0.0f)) {
+        return;
+    }
+    s_post.aa = aa;
+    ColourShiftMatrix(type, severity, CVarInt(s_postCVars.daltonize, 0) != 0, s_post.shift);
+    s_post.world = LiveWorldViewport();
+    s_post.pending = true;
+}
+
 }  // namespace
 
 void RegisterCVars() {
@@ -581,6 +644,12 @@ void RegisterCVars() {
 
     RegisterWaterCVars();
 
+    // LEGION FFX post (Legion 7.3.5 names and ranges; colour types limited to the three dichromacies).
+    s_postCVars.aa = reg("ffxAntiAliasingMode", "Anti-aliasing of the 3D view after it is drawn (not names or the UI): 0 = off, 1 = FXAA low, 2 = FXAA high", "0");
+    s_postCVars.simulator = reg("colorblindSimulator", "Type of color blindness for the 3D view: 0 = off, 1 = protanopia, 2 = deuteranopia, 3 = tritanopia (daltonize 1 corrects for it)", "0");
+    s_postCVars.weakness = reg("colorblindWeaknessFactor", "Strength of the color blindness simulation or correction, 0..1", "0.5");
+    s_postCVars.daltonize = reg("daltonize", "Color blindness: 0 = simulate the type colorblindSimulator names, 1 = correct the 3D view's colours for it", "0");
+
     g_vfogM2BatchFog = &BatchFog;
     g_vfogM2FogParticles = &FogParticles;
 }
@@ -590,6 +659,12 @@ bool Active() {
 }
 
 bool s_decidedInLiquid = false;    // the liquid status this frame's DecideFrame ran on
+
+// LEGION SetDepthUser (CGxDevice::s_depthUsers): the fog and the fading cross-fade read the scene depth while vfog draws.
+void SetDepthUsers() {
+    CGxDevice::SetDepthUser(CGxDevice::DepthUser_Fog, s_active);
+    CGxDevice::SetDepthUser(CGxDevice::DepthUser_FadeStencil, s_active && s_cfg.fadeEarly && s_cfg.fadeStencil);
+}
 void DecideFrame(bool inLiquid);
 
 void OnWorldUpdate() {
@@ -615,6 +690,7 @@ void OnWorldUpdate() {
 void DecideFrame(bool inLiquid) {
     s_decidedInLiquid = inLiquid;
     s_active = s_cfg.enable && g_theGxDevicePtr->MasterEnable(GxMasterEnable_Fog) && (!inLiquid || s_cfg.underwater) && RendererReady();
+    SetDepthUsers();
 
     if (!s_active) {
         if (s_wasActive) {
@@ -671,12 +747,14 @@ void OnViewerLiquid() {
     }
     s_active = false;
     s_wasActive = false;
+    SetDepthUsers();
 }
 
 void OnOpaqueDone() {
     // shadowMask needs the same frame inputs with the fog off (its DNInfo half is read here then: no push-out to undo).
     s_maskPending = false;
     const bool mask = TerrainSunShadow::MaskWanted() && RendererReady();
+    CGxDevice::SetDepthUser(CGxDevice::DepthUser_ShadowMask, mask);   // LEGION SetDepthUser: read in OnSolidDone
     if (!s_active && !mask) {
         return;
     }
@@ -847,17 +925,21 @@ void OnWorldDone() {
     // coa RenderGodRaysOverTheWorld: after the whole world, before FFX glow. Only a RenderFog this frame arms it.
     RenderGodRays();
     PrepareGrade();
+    PreparePost();
     s_armed = false;
     s_glareDrawn = false;
     RestoreStockFog();
 }
 
 void OnWorldRendered() {
-    if (!s_grade.pending) {
-        return;
+    if (s_grade.pending) {
+        s_grade.pending = false;
+        RenderGrade(s_grade.curve, s_grade.strength, s_cfg.dither, s_frame, s_grade.world);
     }
-    s_grade.pending = false;
-    RenderGrade(s_grade.curve, s_grade.strength, s_cfg.dither, s_frame, s_grade.world);
+    if (s_post.pending) {
+        s_post.pending = false;
+        RenderPost(s_post.aa, s_post.shift, s_post.world);
+    }
 }
 
 bool WaterFrame(const FrameInputs*& in, const Config*& cfg) {
