@@ -112,6 +112,13 @@ local PAGES = {
 	},
 }
 
+-- Lava and slime (backlog #10, docs/BACKLOG_PORT.md): on the Water page.
+for _, page in ipairs(PAGES) do
+	if page.name == "Water" then
+		table.insert(page, { "liquidProcMagma", "check", "Cataclysm lava and slime", "Lava and slime flow with layered, moving textures as in Cataclysm. Off keeps the stock look." })
+	end
+end
+
 local function Num(v)
 	return tonumber(v) or 0
 end

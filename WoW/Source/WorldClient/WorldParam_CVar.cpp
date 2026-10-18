@@ -13,6 +13,7 @@
 #include "WoW/Source/WorldClient/World.h"
 #include "WoW/Source/WorldClient/OcclusionCull.h"
 #include "WoW/Source/WorldClient/VolumetricFog.h"
+#include "WoW/Source/LiquidSystem/Liquid.h"
 #include "Engine/Source/ConsoleBase/ConsoleVar.h"
 #include "Engine/Source/Model2/M2Scene.h"
 #include "Engine/Source/ConsoleBase/IConsole.h"
@@ -662,6 +663,11 @@ void CWorldParam::Initialize() {
     // BENILLA: not in 12340. Ground spell quads drape the terrain (CM2Scene IsGroundDecalBatch); 0 = stock flat planes.
     CVar::Register("groundDecals", "Ground spell effects follow the terrain", 1, "1", [](CVar*, const char*, const char* value, void*) -> bool {
         CM2Scene::s_groundDecals = SStrToInt(value) != 0;
+        return true;
+    }, CATEGORY_GRAPHICS, false, nullptr, false);
+    // BACKLOG #10: not in 12340. Cata 4.3.4 ProcMagma lava and slime (MaterialMagma.cpp); 0 = the stock flipbook.
+    CVar::Register("liquidProcMagma", "Cataclysm procedural lava and slime", 1, "1", [](CVar*, const char*, const char* value, void*) -> bool {
+        Liquid::s_procMagma = SStrToInt(value) != 0;
         return true;
     }, CATEGORY_GRAPHICS, false, nullptr, false);
 
