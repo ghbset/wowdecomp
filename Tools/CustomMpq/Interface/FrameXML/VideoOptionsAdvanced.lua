@@ -47,6 +47,7 @@ local PAGES = {
 	  { "vfogUnderwater", "check", "Fog under water", "Keeps the volumetric fog on while the camera is under water." },
 	},
 	{ name = "Light & God Rays", parent = "Advanced", title = "Light & God Rays",
+	  { "gfxSunArc", "check", "Sun and moon cross the sky", "The sun rises in the east, passes through the south and sets in the west, and the moon does the same at night. The world's light, the shadows and the fog come from wherever the sun or moon is. Off uses the stock sky and light." },
 	  { "vfogGodRays", "slider", "God rays", "Light shafts from the sky around the sun. 0 turns them off.", 0, 4, 0.25 },
 	  { "vfogShadowedSun", "check", "Sun shafts through the scene", "Sunlight in the fog is blocked by trees and buildings, so beams fall through the fog where the sun reaches. Needs shadows above Low." },
 	  { "vfogCanopy", "slider", "Fog darkening in shade", "How much darker the fog is under trees and beside buildings while sun shafts are on.", 0, 1, 0.05 },
