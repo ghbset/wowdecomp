@@ -127,6 +127,15 @@ struct FadeDepth {
 };
 FadeDepth s_fade;
 
+
+CGxShader* VariantShader(CGxShader* (&table)[3][2][2], const char* base, int quality, bool lit, bool noisy) {
+    char name[32];
+    snprintf(name, sizeof(name), "%s%d%s%s", base, quality, lit ? "L" : "", noisy ? "N" : "");
+    return Shader(table[quality - 1][lit][noisy], name);
+}
+
+}  // namespace
+
 CGxShader* Shader(CGxShader*& slot, const char* name) {
     if (!slot) {
         g_theGxDevicePtr->ShaderCreate(&slot, GxSh_Pixel, "Shaders\\Pixel", name, 1);
@@ -135,10 +144,13 @@ CGxShader* Shader(CGxShader*& slot, const char* name) {
     return slot && slot->Valid() ? slot : nullptr;
 }
 
-CGxShader* VariantShader(CGxShader* (&table)[3][2][2], const char* base, int quality, bool lit, bool noisy) {
-    char name[32];
-    snprintf(name, sizeof(name), "%s%d%s%s", base, quality, lit ? "L" : "", noisy ? "N" : "");
-    return Shader(table[quality - 1][lit][noisy], name);
+void DropInvalidShaders(CGxShader** slots, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        if (slots[i] && !slots[i]->Valid()) {
+            g_theGxDevicePtr->ShaderDestroy(slots[i]);
+            slots[i] = nullptr;
+        }
+    }
 }
 
 void DestroyTex(CGxTex*& tex) {
@@ -147,6 +159,8 @@ void DestroyTex(CGxTex*& tex) {
         tex = nullptr;
     }
 }
+
+namespace {
 
 void DestroyTargets() {
     DestroyTex(s_targets.march);
@@ -162,17 +176,22 @@ void DestroyTargets() {
     s_targets.rayWidth = 0;
     s_targets.rayHeight = 0;
     s_godRays.pending = false;
-    DestroyTex(s_fade.behind);
-    DestroyTex(s_fade.with);
-    s_fade.armed = false;
 
     s_targets.width = 0;
     s_targets.height = 0;
     s_history.valid = false;
 }
 
+// Not in DestroyTargets: RenderFog rebuilds the fog targets after KeepDepthBehindFading armed s_fade.behind.
+void DestroyFadeDepth() {
+    DestroyTex(s_fade.behind);
+    DestroyTex(s_fade.with);
+    s_fade.armed = false;
+}
+
 void __fastcall OnDeviceRestored() {
     DestroyTargets();
+    DestroyFadeDepth();
     DestroyTex(s_densityNoise);
     DestroyTex(s_authoredNoise);
     s_depthUnsupported = false;     // MSAA may have changed with the reset
@@ -383,8 +402,12 @@ TexelRect LocalLightTexels(const float (*lights)[4], uint32_t count, const float
 }  // namespace
 
 // Shared with VolumetricFogWater.cpp (declared in VolumetricFogWater.h).
+// One past the highest pixel register written since the innermost BeginPasses: EndPasses restores only c0 up to it.
+uint32_t s_psHighWater = 0;
+
 void SetPs(uint32_t reg, const float* values, uint32_t count) {
     g_theGxDevicePtr->ShaderConstantsSet(GxSh_Pixel, reg, values, count);
+    s_psHighWater = std::max(s_psHighWater, reg + count);
 }
 
 void Bind(int stage, CGxTex* tex) {
@@ -448,6 +471,8 @@ WorldViewport LiveWorldViewport() {
 void BeginPasses(SavedPassState& saved) {
     CGxDevice* device = g_theGxDevicePtr;
     std::memcpy(saved.constants, CGxDevice::s_shadowConstants[0].constants, sizeof(saved.constants));     // [0] = pixel
+    saved.outerHighWater = s_psHighWater;
+    s_psHighWater = 0;
     GxXformProjection(saved.projection);
     GxXformView(saved.view);
     C44Matrix identity;
@@ -493,7 +518,12 @@ void EndPasses(const SavedPassState& saved, const WorldViewport& vp) {
     GxXformSetView(saved.view);
     GxXformSetProjection(saved.projection);
     GxXformSetViewport(vp.minX, vp.maxX, vp.minY, vp.maxY, vp.minZ, vp.maxZ);
-    SetPs(0, saved.constants, kSavedPixelRegisters);
+    const uint32_t written = std::min(s_psHighWater, kSavedPixelRegisters);
+    if (written) {
+        g_theGxDevicePtr->ShaderConstantsSet(GxSh_Pixel, 0, saved.constants, written);
+    }
+    // An enclosing pass group must still restore what this one wrote (to its own saved values).
+    s_psHighWater = std::max(saved.outerHighWater, written);
 }
 
 namespace {
@@ -699,7 +729,7 @@ bool RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg,
     // wxl-vfog 0.6.3 (vfogFadeStencil): with the fading models' depth behind them kept, the frame is fogged from that
     // depth, and the composite at the live depth goes over each model by its stencil-marked alpha (after the composite).
     CGxTex* fadeDepth = nullptr;
-    if (fadeArmed && !prevTarget && CopyRawDepth(s_fade.with, depth)) {
+    if (fadeArmed && s_fade.behind && !prevTarget && CopyRawDepth(s_fade.with, depth)) {
         fadeDepth = s_fade.with;
         depth = s_fade.behind;
     }
@@ -837,19 +867,34 @@ bool RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg,
     bool litAnywhere = lit && litTexels.right > litTexels.left && litTexels.bottom > litTexels.top;
     bool litEverywhere = litAnywhere && litTexels.left == 0 && litTexels.top == 0
         && litTexels.right == static_cast<int32_t>(lowW) && litTexels.bottom == static_cast<int32_t>(lowH);
-    DrawToTarget(s_targets.march, litEverywhere ? litMarch : unlitMarch);
     if (litAnywhere && !litEverywhere) {
+        // Each texel marched once: the unlit march as up to four bands around the lit rect, then the lit one in it.
         // With a target bound, Gx scissor y runs top-down (CGxDeviceD3d::IStateSyncScissorRect).
-        CRect scissor;
-        scissor.minX = static_cast<float>(litTexels.left) / lowW;
-        scissor.maxX = static_cast<float>(litTexels.right) / lowW;
-        scissor.minY = static_cast<float>(litTexels.top) / lowH;
-        scissor.maxY = static_cast<float>(litTexels.bottom) / lowH;
-        device->SetScissor(scissor);
+        GxRenderTargetSet(GxBuffers_Color, s_targets.march, 0);
         GxRsSet(GxRs_ScissorTest, 1);
-        device->RsSet(GxRs_PixelShader, litMarch);
-        DrawQuad(lowW, lowH);
+        auto drawRect = [&](CGxShader* shader, int32_t left, int32_t top, int32_t right, int32_t bottom) {
+            if (right <= left || bottom <= top) {
+                return;
+            }
+            CRect scissor;
+            scissor.minX = static_cast<float>(left) / lowW;
+            scissor.maxX = static_cast<float>(right) / lowW;
+            scissor.minY = static_cast<float>(top) / lowH;
+            scissor.maxY = static_cast<float>(bottom) / lowH;
+            device->SetScissor(scissor);
+            device->RsSet(GxRs_PixelShader, shader);
+            DrawQuad(lowW, lowH);
+        };
+        const int32_t w = static_cast<int32_t>(lowW), h = static_cast<int32_t>(lowH);
+        const TexelRect& r = litTexels;
+        drawRect(unlitMarch, 0, 0, w, r.top);
+        drawRect(unlitMarch, 0, r.bottom, w, h);
+        drawRect(unlitMarch, 0, r.top, r.left, r.bottom);
+        drawRect(unlitMarch, r.right, r.top, w, r.bottom);
+        drawRect(litMarch, r.left, r.top, r.right, r.bottom);
         GxRsSet(GxRs_ScissorTest, 0);
+    } else {
+        DrawToTarget(s_targets.march, litEverywhere ? litMarch : unlitMarch);
     }
 
     Bind(9, nullptr);
@@ -1082,6 +1127,7 @@ bool CompositeOverSceneCopy() {
 void RendererShutdown() {
     WaterShutdown();
     DestroyTargets();
+    DestroyFadeDepth();
     DestroyTex(s_densityNoise);
     DestroyTex(s_authoredNoise);
 

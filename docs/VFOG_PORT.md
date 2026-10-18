@@ -256,8 +256,10 @@ the shader maths with a float16 store at every target write, all 7 waterdata.bin
 waves 1) and the extremes (wind 10, waves 2), 12 steps of 70 ms at t = 3611 s (late loop phase, foam built). Measured:
 slopes max 9.8e-4 (1 half ulp at |slope| 1..2; 2.4e-4 at the defaults), RMS 2e-6..6e-5; state R/G max 1 unit (an
 8-bit rounding flip), RMS <= 0.035 (defaults) / 0.10 (extremes); foam/oxygen max 1 unit (defaults), 4 at the extremes,
-RMS <= 0.04, plus 6 texel-steps of tile 46 at 256/extremes where dt * oxygen rate (200/s * 70 ms) > 2 makes FoamStep a
-2-cycle at saturation (1 <-> 0.951) that flickers on the CPU as well and rounding picks the other phase.
+RMS <= 0.04. Deviation from coa: FoamStep integrates df/dt = a (1 - f) - b f exactly over dt (f_eq + (f - f_eq)
+e^-(a+b)dt, shader and CPU) instead of coa's explicit Euler step, which fell into a 2-cycle at saturation once
+dt (a + b) > 2 (oxygen 200/s at 70 ms: 1 <-> 0.951, crest texels shimmering); the check needs no exemption since
+(2026-10-18 audit M9: foam/oxygen max 1 unit at every setting).
 Without the coarse/residual split (plain 16F FFT texels) the same check gave slopes 1.7e-2 and oxygen 40 units off.
 **Expected savings**: the CPU path costs ~10 ms of worker time per 256 step per tile (threads, so the waves update at
 ~50-100 Hz) plus, per update, `GxTexUpdate` of 2 x 256^2 texels x 4 B with mips (~0.7 MB) per tile on the main thread.

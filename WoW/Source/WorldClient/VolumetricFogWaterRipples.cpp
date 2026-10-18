@@ -505,6 +505,7 @@ struct Ripples {
     double lastSeconds = -1.0;          // coa m_lastRippleSeconds
     int mapId = 0;
     double lastShaded = -1.0;           // client sprites (coa ClientRippleSprites m_lastShaded)
+    bool mapsFailed = false;            // the last Prepare could not create the maps: keep the client sprites
 };
 
 Ripples s_ripples;
@@ -536,17 +537,16 @@ bool Prepare(int texels) {
         s_ripples.unsupported = true;      // coa: "no filterable 16-bit floating-point render targets"
         return false;
     }
-    if (!s_ripples.step) {
-        device->ShaderCreate(&s_ripples.step, GxSh_Pixel, "Shaders\\Pixel", "VFogRippleStep", 1);
-    }
-    if (!s_ripples.step || !s_ripples.step->Valid()) {
+    if (!Shader(s_ripples.step, "VFogRippleStep")) {
         s_ripples.unsupported = true;
         return false;
     }
     if (s_ripples.maps[0] && s_ripples.maps[1] && s_ripples.texels == texels) {
+        s_ripples.mapsFailed = false;
         return true;
     }
     DestroyMaps();
+    s_ripples.mapsFailed = true;
     for (CGxTex*& map : s_ripples.maps) {
         // Clamped and bilinear (coa: point for the step, which reads texel centres only; linear for the shading).
         CGxTexFlags flags(GxTex_Linear, false, false, 0, 0, true, 1, 0, 0, 0);
@@ -557,6 +557,7 @@ bool Prepare(int texels) {
         }
     }
     s_ripples.texels = texels;
+    s_ripples.mapsFailed = false;
     return true;
 }
 
@@ -742,7 +743,7 @@ void RippleFrame(const FrameInputs& in, float strength, int quality, double seco
 // coa RingsReplaceClientSprites + ClientRippleSprites::Update: while the modern water and its ripples run, plus 1 s.
 bool RipplesHideClientSprites(bool allowed) {
     const double now = FrameTime::s_curTimeMs * 0.001;
-    return allowed && !s_ripples.unsupported && s_ripples.lastShaded >= 0.0 && now >= s_ripples.lastShaded
+    return allowed && !s_ripples.unsupported && !s_ripples.mapsFailed && s_ripples.lastShaded >= 0.0 && now >= s_ripples.lastShaded
         && now - s_ripples.lastShaded <= kClientSpriteGraceSeconds;
 }
 

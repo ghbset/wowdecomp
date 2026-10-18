@@ -20,7 +20,6 @@ using Complex = std::complex<float>;
 constexpr double kGravity = 9.80665;
 constexpr double kForeverInverseGravity = 0.10197161883115768;
 constexpr double kTwoPi = 6.2831854820251465;
-constexpr double kLoopSeconds = 1024.0;
 constexpr double kSmallestWaveNumber = 1.0e-3;
 constexpr double kFlatWaveNumber = 1.0e-16;
 constexpr double kLargestInversePeakLengthSquared = 1.0e30;
@@ -33,8 +32,6 @@ constexpr double kTowardsAngleOffset = 0.07;
 constexpr double kAwayRadiusOffset = 0.29;
 constexpr double kAwayAngleOffset = 0.19;
 constexpr int kReferenceResolution = 256;          // coa kFftReferenceResolution: the normalisation of every resolution
-constexpr float kWindDirection[2] = { 0.8f, 0.6f }; // coa water_renderer.cpp kWindDirection
-constexpr double kMaxFoamStepSeconds = 0.1;        // coa kMaxFoamStepSeconds
 // vw_surface.hlsli SampleMoments decodes with the same ranges.
 constexpr float kVarianceRange = 0.25f;
 constexpr float kWideRange = 1.0f;
@@ -95,6 +92,9 @@ struct Tile {
     std::vector<float> foam;
     std::vector<float> oxygen;
     std::vector<float> moments;         // 4 per texel per level
+    std::vector<Complex> height;        // Step scratch, kept so a step does not allocate
+    std::vector<Complex> twiddles;
+    std::vector<Complex> column;
     WaveMaps work;
     WaveMaps shown;
     bool shownValid = false;
@@ -212,7 +212,8 @@ void Step(Tile& t, double seconds) {
     const double loopFraction = Fract(seconds / kLoopSeconds);
 
     // Evolve + fold (coa WaterReferenceModes + WaterFoldModes): height and the choppy x/y modes, Hermitian halves.
-    std::vector<Complex> height(texels);
+    std::vector<Complex>& height = t.height;
+    height.resize(texels);
     for (size_t i = 0; i < texels; i++) {
         const double phase = kTwoPi * Fract(t.loopFrequency[i] * loopFraction);
         const Complex rotation(static_cast<float>(std::cos(phase)), static_cast<float>(std::sin(phase)));
@@ -246,12 +247,13 @@ void Step(Tile& t, double seconds) {
         }
     }
 
-    std::vector<Complex> twiddles(n / 2);
+    std::vector<Complex>& twiddles = t.twiddles;
+    twiddles.resize(n / 2);
     for (int k = 0; k < n / 2; k++) {
         const double angle = 6.283185307179586 * k / n;
         twiddles[k] = Complex(static_cast<float>(std::cos(angle)), static_cast<float>(std::sin(angle)));
     }
-    std::vector<Complex> column;
+    std::vector<Complex>& column = t.column;
     Transform2D(t.heightAndX, n, twiddles, column);
     Transform2D(t.alongY, n, twiddles, column);
 
@@ -296,10 +298,13 @@ void Step(Tile& t, double seconds) {
         y = (y % n + n) % n;
         return &t.disp[(static_cast<size_t>(y) * n + x) * 3];
     };
+    // df/dt = a (1 - f) - b f integrated exactly over dt (coa steps it explicitly, a 2-cycle once dt (a + b) > 2).
     auto foamStep = [dt](float previous, float jacobian, const float p[3]) {
         const float f = std::clamp(previous, 0.0f, 1.0f);
-        const float injection = std::max(p[0] + 1.0f - jacobian, 0.0f);
-        return std::clamp(f + dt * (p[1] * injection * (1.0f - f) - p[2] * f), 0.0f, 1.0f);
+        const float a = p[1] * std::max(p[0] + 1.0f - jacobian, 0.0f);
+        const float rate = std::max(a + p[2], 1e-6f);
+        const float equilibrium = a / rate;
+        return std::clamp(equilibrium + (f - equilibrium) * std::exp(-rate * dt), 0.0f, 1.0f);
     };
     for (int y = 0; y < n; y++) {
         for (int x = 0; x < n; x++) {
@@ -408,10 +413,8 @@ void WaveLaunch(const std::vector<WaterFftTile>& tiles, uint32_t tileMask, const
     if (s_busy.load() || !tileMask) {
         return;
     }
-    if (s_batch) {
-        s_batch->join();
-        delete s_batch;
-        s_batch = nullptr;
+    if (s_batch) {     // finished but not collected yet: WaveCollect takes it next frame
+        return;
     }
     uint32_t running = 0;
     for (int i = 0; i < kWaterMaxTiles && i < static_cast<int>(tiles.size()); i++) {

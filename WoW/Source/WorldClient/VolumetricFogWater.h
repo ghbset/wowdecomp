@@ -13,6 +13,7 @@
 #include "Engine/Source/Tempest/C44Matrix.h"
 #include "WoW/Source/WorldClient/VolumetricFog.h"
 
+class CGxShader;
 class CGxTex;
 
 namespace Liquid {
@@ -59,6 +60,11 @@ static_assert(sizeof(WaterPreset) == 204, "waterdata.bin preset record");
 struct WorldViewport;
 
 // ---- waves (VolumetricFogWaterWaves.cpp) ----------------------------------------------------------------------
+// Shared by the CPU and GPU paths.
+constexpr double kLoopSeconds = 1024.0;
+constexpr double kMaxFoamStepSeconds = 0.1;                     // coa kMaxFoamStepSeconds
+constexpr float kWindDirection[2] = { 0.8f, 0.6f };             // coa water_renderer.cpp kWindDirection
+
 // One tile's CPU maps, every mip level down to 1x1 back to back (level 0 first):
 //   slopes: Gr1616F texels (half slope x | half slope y << 16), the box-filtered mean slope (coa moments.xy);
 //   state:  Argb8888 texels, R = sqrt(variance / kVarianceRange), G = sqrt(wide slope^2 / kWideRange),
@@ -102,11 +108,11 @@ void ComputeWaveSpectrum(const WaterFftTile& tile, const WaveSettings& settings,
 // (no RGBA16F targets, a shader missing, a target failed); the caller runs the CPU path.
 bool WaveGpuStep(const std::vector<WaterFftTile>& tiles, uint32_t tileMask, const WaveSettings& settings, double seconds, const WorldViewport& vp);
 bool WaveGpuMaps(int tile, CGxTex*& slopes, CGxTex*& state);    // false: no GPU maps for it (bind the CPU ones)
-void WaveGpuRelease();                      // drops the GPU textures (device restored, CPU path chosen)
+void WaveGpuRelease();                      // drops the GPU textures (CPU path chosen)
+void WaveGpuDeviceRestored();               // drops them and retries the GPU path
 void WaveGpuShutdown();
 
 // ---- ripples and wakes (VolumetricFogWaterRipples.cpp) --------------------------------------------------------
-struct WorldViewport;
 struct RippleShading {
     CGxTex* map;            // nullptr: no ripples this frame (bind the flat texture)
     float window[4];        // c65: origin xy (yd), 1 / extent, 1 / texels
@@ -143,9 +149,13 @@ struct SavedPassState {
     float constants[kPassSavedPixelRegisters * 4];
     C44Matrix projection;
     C44Matrix view;
+    uint32_t outerHighWater;    // SetPs high-water of the enclosing pass group
 };
 
 void SetPs(uint32_t reg, const float* values, uint32_t count);
+CGxShader* Shader(CGxShader*& slot, const char* name);         // the pixel shader Shaders\Pixel\name, nullptr unless valid
+void DropInvalidShaders(CGxShader** slots, size_t count);       // device restored: a failed create is retried
+void DestroyTex(CGxTex*& tex);
 void Bind(int stage, CGxTex* tex);
 // One quad through the fixed-function VS over the Gx viewport [minX..maxX, minY..maxY] of a width x height target,
 // TEXCOORD0 = uv across it with (i + 0.5) / size at pixel centres on every backend.
@@ -167,7 +177,7 @@ bool RenderGrade(const float* curve32, float strength, int dither, uint32_t fram
 
 // Driver accessors (VolumetricFog.cpp): this frame's inputs once OnOpaqueDone captured them.
 bool WaterFrame(const FrameInputs*& in, const Config*& cfg);
-bool StockFogReplaced();
-bool WaterArmed();         // modern water draws in this liquid pass   // the stock fog is pushed out this frame (coa !stockFogApplies)
+bool StockFogReplaced();   // the stock fog is pushed out this frame (coa !stockFogApplies)
+bool WaterArmed();         // modern water draws in this liquid pass
 
 }  // namespace VolumetricFog

@@ -23,11 +23,14 @@ float3 Displacement(float2 texel)
     return scale * float3(hx.y, ay.x, -hx.x);
 }
 
+// df/dt = a (1 - f) - b f integrated exactly over dt (coa steps it explicitly, a 2-cycle once dt (a + b) > 2).
 float FoamStep(float previous, float jacobian, float3 p)
 {
     float f = saturate(previous);
-    float injection = max(p.x + 1 - jacobian, 0);
-    return saturate(f + cStencil.w * (p.y * injection * (1 - f) - p.z * f));
+    float a = p.y * max(p.x + 1 - jacobian, 0);
+    float rate = max(a + p.z, 1e-6);
+    float equilibrium = a / rate;
+    return saturate(equilibrium + (f - equilibrium) * exp(-rate * cStencil.w));
 }
 
 float4 main(float2 uv : TEXCOORD0) : COLOR0

@@ -79,8 +79,10 @@ def stencil_consts(c):
 
 def foam_step(prev, jac, p, dt):
     f = np.clip(prev, 0, 1)
-    inj = np.maximum(f32(p[0]) + f32(1) - jac, 0)
-    return np.clip(f + dt * (f32(p[1]) * inj * (f32(1) - f) - f32(p[2]) * f), 0, 1).astype(f32)
+    a = f32(p[1]) * np.maximum(f32(p[0]) + f32(1) - jac, 0)     # exact over dt, as VFogWaveSurface FoamStep
+    rate = np.maximum(a + f32(p[2]), f32(1e-6))
+    eq = a / rate
+    return np.clip(eq + (f - eq) * np.exp(-rate * f32(dt)), 0, 1).astype(f32)
 
 
 def shift(a, dx, dy):     # value at (x + dx, y + dy), wrapping
@@ -319,16 +321,14 @@ def split_for_half(states):
 def main():
     worst = dict(slope=0.0, state=0.0)
     ok = True
-    print(f"{'tile':>4} {'n':>3} {'set':>6} {'e':>2} {'slope max':>9} {'slope rms':>9} | state max/rms (8-bit units) R G B A | flicker")
+    print(f"{'tile':>4} {'n':>3} {'set':>6} {'e':>2} {'slope max':>9} {'slope rms':>9} | state max/rms (8-bit units) R G B A")
     for setting, (wind, waves) in {"dflt": (2.0, 1.0), "max": (10.0, 2.0)}.items():
         for tile in tiles():
             for n in (128, 256):
                 c = configure(tile, n, wind, waves * waves)
                 cpu, gpu = Cpu(c), Gpu(c)
-                history = []
                 sm, ss, sn = 0.0, 0.0, 0
                 stmax, stsq, stn = np.zeros(4), np.zeros(4), 0
-                flicker = 0     # foam/oxygen texel-steps off by > 3 units where the texel flickers
                 for k in range(12):
                     secs = 3611.37 + 0.07 * k       # 70 ms steps: foam builds; a late loop phase
                     cs, cst = cpu.step(secs)
@@ -338,28 +338,17 @@ def main():
                         sm, ss, sn = max(sm, float(d.max())), ss + float((d * d).sum()), sn + d.size
                     for level, (a, b) in enumerate(zip(cst, gst)):
                         d = np.abs(a - b).reshape(4, -1)
-                        if level == 0:
-                            # dt * rate > 2 (oxygen 200/s at 70 ms) makes FoamStep a 2-cycle at saturation (1 <-> 1 - decay
-                            # dt): a texel there flickers on either side (> 3 units in one of the last two steps) and any
-                            # rounding picks the other phase.
-                            history = (history + [(a, b)])[-3:]
-                            own = np.max([np.maximum(np.abs(x[0] - y[0]), np.abs(x[1] - y[1]))
-                                          for x, y in zip(history, history[1:])] or [0 * a], axis=0)
-                            osc = (d[2:] > 3) & (own.reshape(4, -1)[2:] > 3)
-                            flicker += int(osc.sum())
-                            d[2:][osc] = 0
                         stmax = np.maximum(stmax, d.max(1))
                         stsq += (d * d).sum(1)
                         stn += d.shape[1]
                 srms, strms = math.sqrt(ss / sn), np.sqrt(stsq / stn)
                 print(f"{tile[0]:>4} {n:>3} {setting:>6} {gpu.e:>2} {sm:9.2e} {srms:9.2e} | "
-                      + " ".join(f"{m:.0f}/{r:.3f}" for m, r in zip(stmax, strms)) + f" | {flicker}")
+                      + " ".join(f"{m:.0f}/{r:.3f}" for m, r in zip(stmax, strms)))
                 worst["slope"] = max(worst["slope"], sm)
                 worst["state"] = max(worst["state"], float(strms.max()))
                 # thresholds: slopes within 2e-3 (1 half ulp at |slope| 1..2), R/G at most 1 unit off (an 8-bit rounding
-                # flip), every channel RMS < 0.2 unit; foam/oxygen at most 4 units off except flickering texels (counted,
-                # at most 0.01 % of the texel-steps).
-                if sm > 2e-3 or stmax[:2].max() > 1 or strms.max() > 0.2 or stmax[2:].max() > 4 or flicker > 1e-4 * 12 * n * n:
+                # flip), every channel RMS < 0.2 unit; foam/oxygen at most 4 units off.
+                if sm > 2e-3 or stmax[:2].max() > 1 or strms.max() > 0.2 or stmax[2:].max() > 4:
                     ok = False
     print(f"worst slope max {worst['slope']:.2e}, worst state rms {worst['state']:.3f} units")
     print("PASS" if ok else "FAIL")
