@@ -58,7 +58,7 @@ struct Shaders {
     CGxShader* march[3][2][2];          // [quality-1][local lights][noise]
     CGxShader* composite[3][2][2];
     CGxShader* compositeSplit[3][2][2]; // VFogCompositeSplit: one side of an MSAA silhouette (vfogMsaaSplit)
-    CGxShader* silhouette;              // VFogSilhouette: oDepth, so D3D only (the Vulkan translator has no oDepth)
+    CGxShader* silhouette;              // VFogSilhouette: oDepth (Vulkan: gl_FragDepth)
     CGxShader* temporal;
     CGxShader* historyDepth;
     CGxShader* rayMask;
@@ -652,7 +652,7 @@ bool RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg,
     CGxShader* unlitMarch = VariantShader(s_shaders.march, "VFogMarch", quality, false, noiseVariant);
     CGxShader* litMarch = lit ? VariantShader(s_shaders.march, "VFogMarch", quality, true, noiseVariant) : unlitMarch;
     CGxShader* composite = VariantShader(s_shaders.composite, "VFogComposite", quality, lit, noiseVariant);
-    // vfogMsaaSplit: only with a multisampled depth (D3D9 RESZ / D3D11; Vulkan MSAA cannot load VFogSilhouette: no oDepth).
+    // vfogMsaaSplit: only with a multisampled depth (D3D9 RESZ, D3D11, Vulkan MSAA).
     CGxShader* splitComposite = cfg.msaaSplit && device->m_format.m_multisampleCount > 1 && StencilAvailable() && !vp.target
             && Shader(s_shaders.silhouette, "VFogSilhouette")
         ? VariantShader(s_shaders.compositeSplit, "VFogCompositeSplit", quality, lit, noiseVariant)

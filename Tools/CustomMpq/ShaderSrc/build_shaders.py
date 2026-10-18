@@ -61,7 +61,7 @@ SHADERS = {
     'VFogRippleStep': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0), 0, 'VFogRippleStep', {}),
     # fading models' cross-fade (wxl-vfog 0.6.3, vfogFadeStencil): the scene depth into R32F, behind and with them
     'VFogDepthCopy': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0), 0, 'VFogDepthCopy', {}),
-    # MSAA silhouette samples marked in the stencil by an oDepth pass (coa vf_silhouette_mask; D3D only)
+    # MSAA silhouette samples marked in the stencil by an oDepth pass (coa vf_silhouette_mask; Vulkan: gl_FragDepth)
     'VFogSilhouette': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0), 0, 'VFogSilhouette', {}),
 }
 # VFogWater{1,2,3}: coa ps_vw_shade_low/mid/high (SSR_STEPS 0/16/32, cmake/WaterShaders.cmake)

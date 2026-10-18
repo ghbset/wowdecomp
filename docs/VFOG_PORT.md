@@ -107,7 +107,7 @@ The decisions:
   writes, i.e. after the conversion back to display space in LinearOverSceneCopy. coa's own dither was removed earlier
   as an fps regression that was **never isolated** (wxl-vfog/wxl-light composites, 2026-10-10), so it is a CVar:
   `vfogDither 0` skips it on a uniform branch (c79.x = c79.z = 0), the old path.
-- **MSAA** (vfog9): see section 3, scene depth per backend; coa's sample split (`vfogMsaaSplit`, D3D only): section 3, MSAA.
+- **MSAA** (vfog9): see section 3, scene depth per backend; coa's sample split (`vfogMsaaSplit`, all three backends since vfog14): section 3, MSAA.
 - **Not ported:** the GPU density probe and the log (diagnostics only), the overlay (CVars), wxl's TopUp, coa's
   `Multisampling` setting + depth-copy self-test, NVAPI, FarClipMax (Ascension's cap; the decomp has none). See
   /root/d3d11-port/vfog-gap-audit.md.
@@ -350,10 +350,15 @@ depth test LESS, colour off, stencil ALWAYS ref 1, pass INVERT, zfail REPLACE: i
 silhouette's 3x3 neighbourhood (of the single-sample copy; non-planar or two depth classes), so per sample the far
 samples become 0xFF and the near ones 1, everything else stays 0 (clipped); (2) the plain composite, everywhere when it
 overwrites (over the scene copy) else on stencil 0; (3)/(4) **VFogCompositeSplit{Q}[L][N]** on stencil 1 / 0xFF, side in
-c80 (coa c99, the horizon band here), fogging each side at its own depth (own depth, nearest or farthest). Choice for
-oDepth: it is used as coa does, D3D9/D3D11 only. The Vulkan translator refuses VFogSilhouette ("refused x1: oDepth"),
-so `Shader()` fails there and the split is never armed: Vulkan (MSAA since vfog11) keeps sample 0's fog
-until the translator emits `gl_FragDepth`. Also off with no stencil bits, the world drawn into a target, or the CVar 0.
+c80 (coa c99, the horizon band here), fogging each side at its own depth (own depth, nearest or farthest). oDepth is used as coa does. **Vulkan (vfog14)**: the
+translator writes oDepth as `gl_FragDepth` (glslang adds `DepthReplacing`; a local `oDepth` starts at `gl_FragCoord.z`,
+written out clamped to [0, 1] after the alpha test), so VFogSilhouette translates and the split arms as on D3D11. Nothing
+else changed: the composite passes already draw inside the scene's multisampled pass, whose depth-stencil is LOADed and
+STOREd (CreatePassMs), the stencil clear is `vkCmdClearAttachments` on that attachment, and the stencil test runs per
+sample, so no sample shading, `gl_SampleID` or `sampler2DMS` is needed (the shaders read the sample-0 depth copy, as
+D3D11). The stencil state, colour mask and sample count are in the pipeline key already. Cost (as D3D): one stencil
+clear and four full-screen quads in place of one (the silhouette pass is depth/stencil only), plus one pipeline per
+split variant. Also off with no stencil bits, the world drawn into a target, or the CVar 0.
 Deviations: (1) the water is shaded from one depth sample per pixel (its class tags are per sample, section 2b). (2) No NVAPI (`NvAPI_D3D9_StretchRectEx`, coa's
 path on native Windows NVIDIA D3D9, where there is no RESZ): there D3D9 MSAA keeps the stock fog; D3D11 works. (3) No
 depth-copy self-test and no `Multisampling` setting: coa refuses MSAA unless its copy passes a test; here MSAA is never
@@ -451,7 +456,7 @@ match this exactly.
 What it needs: per-record pixel-constant rows `pconst` (stock records stay at 16, so their SPIR-V does not
 change; ours need 132), `rep/endrep`, `loop/endloop` if vkd3d emits them, `break/breakc`, `texldl`, and any
 other opcode the VFog shaders use. No vPos or volume samplers are needed, by design; oDepth only by
-VFogSilhouette (MSAA split, D3D only), which the translator refuses on purpose (section 3).
+VFogSilhouette (MSAA split): `gl_FragDepth` since vfog14 (section 3).
 
 ## 6. Data and custom.MPQ
 

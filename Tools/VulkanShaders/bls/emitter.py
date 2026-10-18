@@ -100,6 +100,7 @@ class Emitter(object):
         self.out_sems = collections.OrderedDict()  # output register name -> [semantic]
         self.samplers = {}                         # slot -> '2d' | 'cube'
         self.temps = set()
+        self.uses_odepth = False
         self.outregs = collections.OrderedDict()
         self.uses_a0 = False
         self.uses_aL = False
@@ -240,7 +241,8 @@ class Emitter(object):
                 raise Refused('oC%d: multiple render targets' % d.index)
             return 'oC0'
         if rt == ir.RT_DEPTHOUT:
-            raise Refused('oDepth')
+            self.uses_odepth = True     # -> gl_FragDepth (glslang adds DepthReplacing)
+            return 'oDepth'
         if rt in (ir.RT_RASTOUT, ir.RT_ATTROUT, ir.RT_TEXCRDOUT) and self.vs:
             nm = self.regname(d)
             self.outregs[nm] = True
@@ -701,6 +703,8 @@ class Emitter(object):
                 P('    vec4 %s = vec4(0.0);' % nm)
         else:
             P('    oC0 = vec4(0.0);')
+            if self.uses_odepth:
+                P('    vec4 oDepth = vec4(gl_FragCoord.z);   // oDepth -> gl_FragDepth (D3D: one write on every path)')
             for nm, sem in self.inputs.items():
                 if sem == 'fog0':
                     rhs = 'vec4(fog0, 0.0, 0.0, 0.0)'
@@ -730,6 +734,8 @@ class Emitter(object):
             P('    // misc.x = alphaRef / 255, off when 0; negative: gxAlphaToCoverage (alpha sharpened')
             P('    // to a one-pixel ramp around -misc.x for the coverage mask).')
             P(A2C_TEST.format(v='oC0'))
+            if self.uses_odepth:
+                P('    gl_FragDepth = clamp(oDepth.x, 0.0, 1.0);')
         P('}')
         return '\n'.join(L) + '\n'
 
