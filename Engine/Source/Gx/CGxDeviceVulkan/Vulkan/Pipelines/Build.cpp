@@ -424,6 +424,7 @@ namespace
         VkPipelineMultisampleStateCreateInfo multisample = {};
         multisample.sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
         multisample.rasterizationSamples = static_cast<VkSampleCountFlagBits>(k.samples);
+        multisample.alphaToCoverageEnable = k.alphaToCoverage ? VK_TRUE : VK_FALSE;
 
         // A depth write without a test is D3D's ZFUNC ALWAYS with ZWRITEENABLE: Vulkan writes only
         // when the test is enabled, so the test is on with compare ALWAYS.

@@ -88,6 +88,7 @@ class CGxDeviceD3d11 : public CGxDevice {
     ID3D11ShaderResourceView* m_backBufferSrv; // of IResolvedBackBuffer()
     uint32_t m_fanIndexBufferSize;
     ID3D11RenderTargetView* m_curRtv;
+    uint32_t m_curRtvSamples; // gxAlphaToCoverage: only an MSAA target takes it
     ID3D11DepthStencilView* m_curDsv;
     ID3D11DepthStencilView* m_savedDsv;
     ID3D11Buffer* m_curVertexBuf[8];

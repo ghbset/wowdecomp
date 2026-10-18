@@ -6,6 +6,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include "Engine/Source/ConsoleBase/ConsoleVar.h"
+#include "Engine/Source/ConsoleBase/Types.h"
 #include "Engine/Source/Gx/CGxDeviceVulkan/CGxDeviceVulkan.h"
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Frame.hpp"
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/ParticleQuads.hpp"
@@ -18,6 +20,16 @@
 namespace frame     = gxvk::vk::frame;
 namespace particles = gxvk::vk::particles;
 namespace pipelines = gxvk::vk::pipelines;
+
+static CVar* AlphaToCoverageCVar() {
+    static CVar* cvar;
+
+    if (!cvar) {
+        cvar = CVar::Register("gxAlphaToCoverage", "Vulkan/D3D11: 1 smooths alpha-tested cut-outs (leaves, grass, fences) with alpha-to-coverage under MSAA (gxMultisample > 1)", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    }
+
+    return cvar;
+}
 
 // GPUPARTICLES: the stream buf the engine said holds particle quad records (GxVkParticleQuadsBind), and the normal
 // its expanded vertices carry. Main thread.
@@ -247,7 +259,11 @@ void CGxDeviceVulkan::Draw(CGxBatch* batch, int32_t count) {
     const uint32_t alphaOp0 = this->m_appRenderStates[GxRs_AlphaOp0].m_value.m_data.u[0] & 7u;
     const uint32_t colourOp1 = this->m_appRenderStates[GxRs_ColorOp1].m_value.m_data.u[0] & 7u;
     const uint32_t alphaOp1 = this->m_appRenderStates[GxRs_AlphaOp1].m_value.m_data.u[0] & 7u;
-    d.params[0] = alphaRef > 0 ? static_cast<float>(alphaRef) : 0.0f;
+    // gxAlphaToCoverage (MSAA scene only): alpha-tested opaque / alpha-key cut-outs (M2 alpha key,
+    // WMO alpha-test materials, detail doodads, leaves) turn on alpha-to-coverage. The shaders take
+    // a negative reference as that mode and sharpen alpha to ~1 pixel around the reference.
+    d.alphaToCoverage = alphaRef > 0 && static_cast<uint32_t>(d.blend) <= GxBlend_AlphaKey && frame::PassSamples() > 1 && AlphaToCoverageCVar() && AlphaToCoverageCVar()->m_intValue != 0;
+    d.params[0] = alphaRef > 0 ? static_cast<float>(d.alphaToCoverage ? -alphaRef : alphaRef) : 0.0f;
     d.params[1] = static_cast<float>(d.textureMask & 3u);
     d.params[2] = static_cast<float>(colourOp0 | (colourOp1 << 3));
     d.params[3] = static_cast<float>(alphaOp0 | (alphaOp1 << 3));
