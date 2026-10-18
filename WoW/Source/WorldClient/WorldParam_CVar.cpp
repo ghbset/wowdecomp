@@ -9,6 +9,7 @@
 #include "WoW/Common/AaBsp.h"
 #include "WoW/Source/UIUtil/PortraitButton.h"
 #include "WoW/Source/WorldClient/Map.h"
+#include "WoW/Source/LoadingScreen.h"
 #include "WoW/Source/Magic/MagicClient/Spell_C.h"
 #include "WoW/Source/WorldClient/MapRenderChunk.h"
 #include "WoW/Source/WorldClient/Types.h"
@@ -680,6 +681,13 @@ void CWorldParam::Initialize() {
         s_spellQueueWindow = SStrToInt(value);
         return true;
     }, CATEGORY_GAME, false, nullptr, false);
+
+    // BACKLOG F5 (wxl-loading): no sleeping while a loading screen is up, and random loading screens per map.
+    CVar::Register("fastLoad", "Do not sleep while a loading screen is up (loads faster, one core busy)", 1, "1", [](CVar*, const char*, const char* value, void*) -> bool {
+        s_fastLoad = SStrToInt(value) != 0;
+        return true;
+    }, CATEGORY_GAME, false, nullptr, false);
+    CVar::Register("loadingScreens", "Random loading screens: <mapID>:<LoadingScreens id>,<id>;<mapID>:...", 1, "", nullptr, CATEGORY_GAME, false, nullptr, false);
 
     AddConsoleDeviceDefaultCallback(CWorldParam::SetDefaults);
 
