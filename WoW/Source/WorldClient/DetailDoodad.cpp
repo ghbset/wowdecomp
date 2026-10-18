@@ -22,7 +22,10 @@
 #include <cstring>
 #include "WoW/Source/DB/DBClient/DBClient.h"
 #include "WoW/Source/WorldClient/CDetailDoodadData.h"
+#include "WoW/Source/ObjectMgrClient/ObjectMgrClient.h"
+#include "WoW/Source/Object/ObjectClient/Player_C.h"
 #include "WoW/Source/WorldClient/DayNight.h"
+#include "WoW/Source/WorldClient/FrameTime.h"
 #include "WoW/Source/WorldClient/DayNight__DNInfo.h"
 #include "WoW/Source/WorldClient/Map.h"
 #include "WoW/Source/WorldClient/MapChunk.h"
@@ -81,6 +84,11 @@ TSGrowableArray<CDetailDoodadData*> CDetailDoodad::s_doodadList;
 
 // STATIC: 0x00D1C518
 CDetailDoodad::SShaderConstants CDetailDoodad::s_shaderConstants;
+
+int32_t CDetailDoodad::s_grassWind = 1;
+float CDetailDoodad::s_grassWindStrength = 1.0f;
+int32_t CDetailDoodad::s_grassParting = 1;
+float CDetailDoodad::s_grassConstants[8][4];
 
 // VERIFY: 1a974b50 auto
 // OFFSET: 0x007B1000
@@ -153,6 +161,71 @@ void CDetailDoodad::SetupVertexShader(const C44Matrix& world, uint32_t index) {
 
     CDetailDoodad::s_shaderConstants.m_worldView = world * view;
     g_theGxDevicePtr->ShaderConstantsSet(GxSh_Vertex, 0, reinterpret_cast<const float*>(&CDetailDoodad::s_shaderConstants), sizeof(CDetailDoodad::s_shaderConstants) / sizeof(C4Vector));
+    // GRASSWIND: the motion block (all zero = stock blade positions), c35-c42 after the shadow matrices
+    g_theGxDevicePtr->ShaderConstantsSet(GxSh_Vertex, 35, &CDetailDoodad::s_grassConstants[0][0], 8);
+}
+
+// GRASSWIND: not in 12340. wxl-grasswind GrassWind.cpp WriteFrameConstants with its default WindSettings /
+// PhysicsSettings, per detail-doodad pass: two travelling sine waves plus a downwind lean bend each blade by
+// 1 - uv.y (anchored, squared), and blades lean away from the player inside a radius. The shader turns the
+// view-space vertex back into camera-relative world space with the worldView rows, so the eye is taken from
+// this pass's own view (the water reflection pass included).
+void CDetailDoodad::UpdateGrassWind(const C44Matrix& view) {
+    constexpr float kTwoPi = 6.2831853f;
+    constexpr float kDirectionDeg = 45.0f, kSpeed = 3.0f, kAmplitude = 0.060f, kWavelength = 18.0f;
+    constexpr float kCrossAmplitude = 0.02f, kCrossWavelength = 6.5f, kCrossAngleDeg = 35.0f, kLean = 0.35f;
+    constexpr float kVariance = 0.6f, kDistanceFade = 0.015f, kAnchor = 0.3f;
+    constexpr float kRadius = 2.0f, kForceCenter = 0.5f, kForceEdge = 0.0f, kConeHeight = 0.5f, kMinHeight = 0.3f;
+    constexpr float kEps = 1.0e-3f, kJitter = 1.7f;
+
+    static uint32_t s_lastMs;
+    static float s_phase1;
+    static float s_phase2;
+
+    // phases advance by frequency * dt (no pop on clock wrap or retune); a hitch does not fast-forward the wind
+    float dt = (FrameTime::s_curTimeMs - s_lastMs) * 0.001f;
+    if (s_lastMs == 0 || dt > 0.25f) {
+        dt = 0.0f;
+    }
+    s_lastMs = FrameTime::s_curTimeMs;
+
+    const float k1 = kTwoPi / kWavelength;
+    const float k2 = kTwoPi / kCrossWavelength;
+    s_phase1 = std::fmod(s_phase1 + k1 * kSpeed * dt, kTwoPi);
+    s_phase2 = std::fmod(s_phase2 + k2 * kSpeed * 1.37f * dt, kTwoPi);
+
+    // eye = s_activeWorldView - t * R^T (the batches' world matrices are relative to s_activeWorldView)
+    C3Vector eye = CWorldScene::s_activeWorldView;
+    eye.x -= view.d0 * view.a0 + view.d1 * view.a1 + view.d2 * view.a2;
+    eye.y -= view.d0 * view.b0 + view.d1 * view.b1 + view.d2 * view.b2;
+    eye.z -= view.d0 * view.c0 + view.d1 * view.c1 + view.d2 * view.c2;
+
+    C3Vector player = eye;
+    CGPlayer_C* obj = ClntObjMgrGetActivePlayerObj();
+    if (obj) {
+        player = obj->GetPosition();
+    }
+
+    const float wind = CDetailDoodad::s_grassWind ? CDetailDoodad::s_grassWindStrength : 0.0f;
+    const float amp1 = kAmplitude * wind;
+    const float amp2 = kCrossAmplitude * wind;
+    const float a1 = kDirectionDeg * (kTwoPi / 360.0f);
+    const float a2 = (kDirectionDeg + kCrossAngleDeg) * (kTwoPi / 360.0f);
+    const bool rep = CDetailDoodad::s_grassWind && CDetailDoodad::s_grassParting && obj;
+    const float center = rep ? kForceCenter : 0.0f;
+    const float edge = rep ? kForceEdge : 0.0f;
+
+    const float c[8][4] = {
+        { eye.x, eye.y, eye.z, -s_phase2 },
+        { 1.0f / kConeHeight, 1.0f / kRadius, kMinHeight, kEps },
+        { player.x, player.y, player.z, kLean * wind },
+        { edge - center, center, kRadius, -s_phase1 },
+        { std::cos(a1) * amp1, std::sin(a1) * amp1, std::cos(a1) * k1, std::sin(a1) * k1 },
+        { std::cos(a2) * amp2, std::sin(a2) * amp2, std::cos(a2) * k2, std::sin(a2) * k2 },
+        { 0.737f, 1.311f, kJitter, kDistanceFade },
+        { 1.0f - kVariance * 0.5f, kVariance, -kAnchor, 1.0f / (1.0f - kAnchor) },
+    };
+    memcpy(CDetailDoodad::s_grassConstants, c, sizeof(c));
 }
 
 // VERIFY: f3428d3d manual
@@ -312,6 +385,8 @@ void CDetailDoodad::InitializeShaderConstants() {
     consts.m_fade.y = dist * fade;
     consts.m_fade.z = 0.0f;
     consts.m_fade.w = 0.0f;
+
+    CDetailDoodad::UpdateGrassWind(view);   // GRASSWIND
 }
 
 // VERIFY: 7ec422be manual

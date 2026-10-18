@@ -15,6 +15,7 @@
 #include "WoW/Source/WorldClient/VolumetricFog.h"
 #include "Engine/Source/ConsoleBase/ConsoleVar.h"
 #include "Engine/Source/Model2/M2Scene.h"
+#include "WoW/Source/WorldClient/DetailDoodad.h"
 #include "Engine/Source/ConsoleBase/IConsole.h"
 #include "Engine/Source/Storm/H/storm.h"
 #include "WoW/Source/ConsoleDevice/ConsoleDevice.h"
@@ -662,6 +663,22 @@ void CWorldParam::Initialize() {
     // BENILLA: not in 12340. Ground spell quads drape the terrain (CM2Scene IsGroundDecalBatch); 0 = stock flat planes.
     CVar::Register("groundDecals", "Ground spell effects follow the terrain", 1, "1", [](CVar*, const char*, const char* value, void*) -> bool {
         CM2Scene::s_groundDecals = SStrToInt(value) != 0;
+        return true;
+    }, CATEGORY_GRAPHICS, false, nullptr, false);
+
+    // GRASSWIND: not in 12340 (wxl-grasswind). Grass sways in the wind and parts around the player; our
+    // DetailDoodad.bls in custom.MPQ reads the constants (0 = zero motion, the stock blade positions).
+    CVar::Register("grassWind", "Grass sways in the wind", 1, "1", [](CVar*, const char*, const char* value, void*) -> bool {
+        CDetailDoodad::s_grassWind = SStrToInt(value) != 0;
+        return true;
+    }, CATEGORY_GRAPHICS, false, nullptr, false);
+    CVar::Register("grassWindStrength", "How far grass sways in the wind (1 = default)", 1, "1.0", [](CVar*, const char*, const char* value, void*) -> bool {
+        float v = SStrToFloat(value);
+        CDetailDoodad::s_grassWindStrength = v < 0.0f ? 0.0f : (v > 4.0f ? 4.0f : v);
+        return true;
+    }, CATEGORY_GRAPHICS, false, nullptr, false);
+    CVar::Register("grassParting", "Grass parts around the player", 1, "1", [](CVar*, const char*, const char* value, void*) -> bool {
+        CDetailDoodad::s_grassParting = SStrToInt(value) != 0;
         return true;
     }, CATEGORY_GRAPHICS, false, nullptr, false);
 

@@ -112,6 +112,13 @@ local PAGES = {
 	},
 }
 
+-- Grass wind (wxl-grasswind, DetailDoodad.hlsl): its own page, placed before Debug.
+table.insert(PAGES, #PAGES, { name = "Grass", parent = "Advanced", title = "Grass",
+	{ "grassWind", "check", "Grass sways in the wind", "Grass moves gently in the wind." },
+	{ "grassWindStrength", "slider", "Wind strength", "How far the grass sways.", 0, 4, 0.1 },
+	{ "grassParting", "check", "Grass parts as you walk", "Grass leans away from your character and settles back behind you." },
+})
+
 local function Num(v)
 	return tonumber(v) or 0
 end
