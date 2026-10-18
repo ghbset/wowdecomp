@@ -10,6 +10,7 @@
 // the water are both off (coa Underwater=0).
 #include "WoW/Source/WorldClient/VolumetricFogWater.h"
 #include "WoW/Source/WorldClient/VolumetricFogModel.h"
+#include "WoW/Source/WorldClient/TerrainSunShadow.h"
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -50,6 +51,8 @@ constexpr int kRippleStage = 12;
 constexpr int kShoreFoamMaskStage = 14;
 constexpr int kDepthFoamMaskStage = 15;
 constexpr int kLastStage = 15;
+constexpr int kLandShadowStage = 13;      // shadowMask: TerrainSunShadow's lit-height texture (free slot)
+constexpr uint32_t kLandShadowRegister = 68;   // its row (u0, v0, k, 1/soft), w = 0: off
 constexpr int kShoreFoamSlot = 3;
 constexpr int kDepthFoamSlot = 4;
 constexpr int kWaveFoamMaskSlots = 3;
@@ -968,6 +971,17 @@ void ShadeClass(WaterClass waterClass, CGxTex* waterDepth = nullptr) {
     Bind(kShoreFoamMaskStage, MaskTex(SingleMask(preset->masks[kShoreFoamSlot])));
     Bind(kDepthFoamMaskStage, MaskTex(SingleMask(preset->masks[kDepthFoamSlot])));
     Bind(kRippleStage, s_pass.ripples.map ? s_pass.ripples.map : FlatTex());
+    // shadowMask: the land's sun shadow on the glint, foam and in-scatter sun (VFogWater.hlsl LandSunVisibility).
+    float land[4] = {};
+    CGxTex* landTex = nullptr;
+    if (TerrainSunShadow::MaskWanted()) {
+        TerrainSunShadow::Update(s_pass.in->toLight, s_pass.in->camPos, landTex, land);
+    }
+    if (!landTex) {
+        land[3] = 0.0f;
+    }
+    SetPs(kLandShadowRegister, land, 1);
+    Bind(kLandShadowStage, landTex);
     // coa ShadingVariant: the quality's reflection march, or sky reflections only when reflections are off.
     const int variant = s_pass.water.reflections > 0.0f ? s_pass.water.quality - 1 : 0;
     GxRsSet(GxRs_BlendingMode, GxBlend_Alpha);

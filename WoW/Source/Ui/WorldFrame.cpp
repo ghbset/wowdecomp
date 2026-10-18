@@ -1757,6 +1757,7 @@ void CGWorldFrame::OnWorldRender() {
     GxuSortDrawList(GxuCat_0, GxuSort_VtxStream, *World::GetCamPos());
     GxuFlushDrawList(GxuCat_0, *World::GetCamPos());
     CWorldScene::RenderDetailDoodads();
+    VolumetricFog::OnSolidDone();   // not in 12340: shadowMask, the land's sun shadow over the opaque world
 
     if (World::SceneCamLiquidStatus(nullptr)) {
         CWorldScene::RenderBarriers(this->m_elapsedSec);

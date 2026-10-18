@@ -136,6 +136,7 @@ bool s_pushed = false;
 bool s_active = false;
 bool s_wasActive = false;
 bool s_opaqueValid = false;
+bool s_maskPending = false;      // shadowMask: OnOpaqueDone captured this frame's inputs for OnSolidDone
 bool s_armed = false;          // the composite is on the frame: later batches take the fitted fog
 GradeFrame s_grade = {};
 uint32_t s_frame = 0;
@@ -750,8 +751,15 @@ void OnViewerLiquid() {
 }
 
 void OnOpaqueDone() {
-    if (!s_active) {
+    // shadowMask needs the same frame inputs with the fog off (its DNInfo half is read here then: no push-out to undo).
+    s_maskPending = false;
+    const bool mask = TerrainSunShadow::MaskWanted() && RendererReady();
+    CGxDevice::SetDepthUser(CGxDevice::DepthUser_ShadowMask, mask);   // LEGION SetDepthUser: read in OnSolidDone
+    if (!s_active && !mask) {
         return;
+    }
+    if (!s_active) {
+        ReadDayNightInputs(s_in);
     }
 
     FrameInputs& in = s_in;
@@ -790,10 +798,20 @@ void OnOpaqueDone() {
     in.horizonBand[3] = World::s_horizonFarClipScale * farClip;
 
     ReadLightDirection(in);
-    CaptureLocalLights(in, s_cfg);
+    if (s_active) {
+        CaptureLocalLights(in, s_cfg);
+    }
 
     s_opaqueValid = in.viewport[1] > in.viewport[0] && in.viewport[3] > in.viewport[2] && IsPerspective(in.glProjection) &&
                     Finite(in.cameraRelativeView, 16) && Finite(in.camPos, 3) && std::isfinite(in.fogStart) && std::isfinite(in.fogEnd);
+    s_maskPending = mask && s_opaqueValid;
+}
+
+void OnSolidDone() {
+    if (s_maskPending) {
+        s_maskPending = false;
+        RenderShadowMask(s_in, TerrainSunShadow::MaskSoftYards(), !s_pushed);
+    }
 }
 
 namespace {
