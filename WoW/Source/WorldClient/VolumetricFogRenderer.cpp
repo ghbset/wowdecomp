@@ -807,6 +807,11 @@ void CompositePass(FogFrame& f, CGxTex* fogResult) {
     Bind(2, nullptr);
     Bind(3, sceneCopy);
     Bind(4, s_targets.march);
+    // The full-res fallback march (vf_composite FogWithoutMatchingTap, at silhouettes no low-res tap matches) samples
+    // the noise as the march does (coa leaves them bound). Unbound, Vulkan's white slot doubled the density there and
+    // D3D's black one dropped it: a fog-coloured outline round objects in front of the fog.
+    Bind(9, f.densityNoise);
+    Bind(10, f.authoredNoise);
     f.device->RsSet(GxRs_PixelShader, f.composite);
     // VFogComposite reads TEXCOORD0 as uv across the world viewport (vf_common FullPixelFromUv: c0.xy + uv * c0.zw).
     if (f.splitComposite) {
@@ -842,6 +847,8 @@ void CompositePass(FogFrame& f, CGxTex* fogResult) {
         GxRsSet(GxRs_StencilTest, 0);
         Bind(0, f.depth);
     }
+    Bind(9, nullptr);
+    Bind(10, nullptr);
 }
 
 void GodRayPass(const FogFrame& f) {
