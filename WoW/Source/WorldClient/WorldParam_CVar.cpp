@@ -9,6 +9,7 @@
 #include "WoW/Common/AaBsp.h"
 #include "WoW/Source/UIUtil/PortraitButton.h"
 #include "WoW/Source/WorldClient/Map.h"
+#include "WoW/Source/WorldClient/MapRenderChunk.h"
 #include "WoW/Source/WorldClient/Types.h"
 #include "WoW/Source/WorldClient/World.h"
 #include "WoW/Source/WorldClient/OcclusionCull.h"
@@ -662,6 +663,14 @@ void CWorldParam::Initialize() {
     // BENILLA: not in 12340. Ground spell quads drape the terrain (CM2Scene IsGroundDecalBatch); 0 = stock flat planes.
     CVar::Register("groundDecals", "Ground spell effects follow the terrain", 1, "1", [](CVar*, const char*, const char* value, void*) -> bool {
         CM2Scene::s_groundDecals = SStrToInt(value) != 0;
+        return true;
+    }, CATEGORY_GRAPHICS, false, nullptr, false);
+
+    // BACKLOG F3: terrain VB/IB pool budget in MB (0 = stock farclip^2 sizing). Rebuilds the pools on change.
+    CVar::Register("terrainPoolMaxMB", "Terrain vertex/index pool budget in MB (0 = uncapped)", 1, CMapRenderChunk::s_poolMaxMB ? "128" : "0", [](CVar*, const char*, const char* value, void*) -> bool {
+        int32_t mb = SStrToInt(value);
+        CMapRenderChunk::s_poolMaxMB = mb > 0 ? static_cast<uint32_t>(mb) : 0;
+        CMapRenderChunk::SetDirty();
         return true;
     }, CATEGORY_GRAPHICS, false, nullptr, false);
 
