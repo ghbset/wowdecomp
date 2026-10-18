@@ -259,7 +259,7 @@ class CGxDevice {
     // consumer, set from its CVar state each frame; while none is set every DeviceCopySceneDepth returns nullptr
     // (transient), so no copy runs. A new consumer adds a bit here and one SetDepthUser call. docs/LEGION_PORT.md.
     enum : uint32_t { DepthUser_Fog = 1u << 0, DepthUser_FadeStencil = 1u << 1, DepthUser_Water = 1u << 2,
-        DepthUser_ShadowMask = 1u << 3 };
+        DepthUser_ShadowMask = 1u << 3, DepthUser_SoftParticles = 1u << 4 };
     static uint32_t s_depthUsers;
     static void SetDepthUser(uint32_t user, bool on) { s_depthUsers = on ? s_depthUsers | user : s_depthUsers & ~user; }
 

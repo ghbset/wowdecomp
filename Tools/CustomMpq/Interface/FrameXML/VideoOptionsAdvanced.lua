@@ -154,6 +154,14 @@ for _, page in ipairs(PAGES) do
 	end
 end
 
+-- Soft particles (backlog #4, docs/BACKLOG_PORT.md): on the World Effects page.
+for _, page in ipairs(PAGES) do
+	if page.name == "World Effects" then
+		table.insert(page, { "softParticles", "check", "Soft particles", "Smoke, fire and spell effects fade where they meet the ground, walls and water instead of cutting a hard line." })
+		table.insert(page, { "softParticlesDistance", "slider", "Soft particle fade (yards)", "How far in front of the ground an effect starts to fade.", 0.1, 5, 0.1 })
+	end
+end
+
 local function Num(v)
 	return tonumber(v) or 0
 end

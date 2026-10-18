@@ -1,4 +1,5 @@
 #include "WorldFrame.h"
+#include "WoW/Source/WorldClient/SoftParticles.h"   // SOFTPARTICLES
 #include "Engine/Source/Base/ConvertUTF.h"
 #include <cstring>
 #include <typeinfo>
@@ -1761,17 +1762,25 @@ void CGWorldFrame::OnWorldRender() {
 
     if (World::SceneCamLiquidStatus(nullptr)) {
         CWorldScene::RenderBarriers(this->m_elapsedSec);
+        SoftParticles::BeginPass();   // SOFTPARTICLES: not in 12340
         scene->Draw(M2PASS_1);
+        SoftParticles::EndPass();
         CWorldScene::RenderWeather();
         CWorldScene::RenderLiquidPass();
+        SoftParticles::BeginPass();   // SOFTPARTICLES: not in 12340
         scene->Draw(M2PASS_2);
+        SoftParticles::EndPass();
     } else {
+        SoftParticles::BeginPass();   // SOFTPARTICLES: not in 12340
         scene->Draw(M2PASS_2);
+        SoftParticles::EndPass();
         CWorldScene::RenderLiquidPass();
         VolumetricFog::OnLiquidDone();   // VFOG: not in 12340 (early composite, above water only)
         CWorldScene::RenderWeather();
         CWorldScene::RenderBarriers(this->m_elapsedSec);
+        SoftParticles::BeginPass();   // SOFTPARTICLES: not in 12340
         scene->Draw(M2PASS_1);
+        SoftParticles::EndPass();
     }
 
     if (s_spellShadowStyle < 2) {

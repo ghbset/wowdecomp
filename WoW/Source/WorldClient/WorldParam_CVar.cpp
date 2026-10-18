@@ -23,6 +23,7 @@
 #include "Engine/Source/Model2/M2Scene.h"
 #include "Engine/Source/Model2/M2TreeSway.h"
 #include "WoW/Source/WorldClient/TreeLeaves.h"
+#include "WoW/Source/WorldClient/SoftParticles.h"
 #include "WoW/Source/WorldClient/DetailDoodad.h"
 #include "Engine/Source/ConsoleBase/IConsole.h"
 #include "Engine/Source/Storm/H/storm.h"
@@ -720,6 +721,17 @@ void CWorldParam::Initialize() {
     CVar::Register("treeLeavesDensity", "Falling leaf slots per tree (1..48, 18 = wxl-treewind)", 1, "18", [](CVar*, const char*, const char* value, void*) -> bool {
         float v = SStrToFloat(value);
         TreeLeaves::s_perTree = v < 1.0f ? 1.0f : (v > 48.0f ? 48.0f : v);
+        return true;
+    }, CATEGORY_GRAPHICS, false, nullptr, false);
+
+    // SOFTPARTICLES: not in 12340 (wxl-light Soft.cpp). Blended particles and ribbons fade into the scene behind them.
+    CVar::Register("softParticles", "Particles and ribbons fade where they meet the scene behind them", 1, "1", [](CVar*, const char*, const char* value, void*) -> bool {
+        SoftParticles::s_enabled = SStrToInt(value) != 0;
+        return true;
+    }, CATEGORY_GRAPHICS, false, nullptr, false);
+    CVar::Register("softParticlesDistance", "Soft particle fade distance in yards (0.05..20, 1 = wxl-light)", 1, "1", [](CVar*, const char*, const char* value, void*) -> bool {
+        float v = SStrToFloat(value);
+        SoftParticles::s_distance = v < 0.05f ? 0.05f : (v > 20.0f ? 20.0f : v);
         return true;
     }, CATEGORY_GRAPHICS, false, nullptr, false);
 

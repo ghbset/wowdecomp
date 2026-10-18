@@ -171,6 +171,9 @@ class CParticleEmitter2 {
     // GxParticleQuad records, which the Vulkan backend expands on the GPU, instead of four vertices per quad. Main
     // thread only.
     static uint8_t s_quads;
+    // SOFTPARTICLES: not in 12340. Set by CM2SceneRender::DrawParticle: the emitter's material is blended (M2 blend
+    // 2 and up), so it may fade into the scene behind it (g_softParticleDraw). Main thread only.
+    static uint8_t s_soft;
 
     static void Destroy();
     static void Init();
@@ -367,5 +370,9 @@ class CSplineParticleEmitter : public CParticleEmitter2 {
     void SetEmissionRate(float rate) override;
     void SetSpline(const C3Vector* points, uint32_t count);
 };
+
+// SOFTPARTICLES: not in 12340. Set by WoW's SoftParticles while an M2 pass has the scene depth: called right
+// before (true) and after (false) a soft-capable particle or ribbon draw, after its SetDefaultShaders. Null: stock.
+extern void (*g_softParticleDraw)(bool before);
 
 #endif

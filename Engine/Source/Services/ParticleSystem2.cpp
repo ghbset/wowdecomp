@@ -80,6 +80,8 @@ thread_local CSortableParticleQueue CParticleEmitter2::s_pq(s_pqParams);
 const CParticleEmitter2::Prebuilt* CParticleEmitter2::s_prebuilt;
 C44Matrix CParticleEmitter2::s_prebuiltView;
 uint8_t CParticleEmitter2::s_quads;
+uint8_t CParticleEmitter2::s_soft;
+void (*g_softParticleDraw)(bool before) = nullptr;
 
 // STATIC: 0x00DCE8C4
 void* ParticleSystemManager::sm_projectParam;
@@ -876,7 +878,17 @@ void __stdcall CParticleEmitter2::RenderParticleVertices(CGxBuf* buf, EGxVertexB
         GxVkParticleQuadsBind(buf, &s_particleNormal.x);
     }
 
+    void (*soft)(bool) = CParticleEmitter2::s_soft ? g_softParticleDraw : nullptr;   // SOFTPARTICLES
+
+    if (soft) {
+        soft(true);
+    }
+
     g_theGxDevicePtr->Draw(&batch, 1);
+
+    if (soft) {
+        soft(false);
+    }
 
     if (CParticleEmitter2::s_quads) {
         GxVkParticleQuadsBind(nullptr, nullptr);

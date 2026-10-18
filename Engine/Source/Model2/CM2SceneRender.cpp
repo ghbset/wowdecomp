@@ -1075,6 +1075,7 @@ uint32_t CM2SceneRender::DrawParticle(uint32_t index, M2Element* elements, uint3
 
     this->m_curMaterial = &material;
     this->m_prevMaterial = nullptr;
+    CParticleEmitter2::s_soft = material.m_blendMode >= 2;   // SOFTPARTICLES: opaque and alpha-keyed stay hard
 
     if (this->m_cache->m_flags & 0x80) {
         return this->DrawBatchedParticle(index, elements, indices, count);

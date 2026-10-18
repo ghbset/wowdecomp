@@ -204,3 +204,44 @@ Branch `bl-fixes`, one commit per item. No shaders.
 All CVars are registered in `CWorldParam::Initialize` (WorldParam_CVar.cpp); their C++ defaults hold before
 registration. Unverified: nothing run in game. F3's skipped chunks at a small budget, F4 against the live
 server, F5's busy-spin on async readers (same as the plugin) are untested in the decomp.
+
+## Soft particles (2026-10-18)
+
+Backlog #4, ported from wxl-light `src/Soft.cpp` (a35) and its shader rewrite (`tools/rxrewrite.py`
+`rewrite_soft_vertex` / `rewrite_soft_pixel`). Blended M2 particles and ribbons fade where they come within a fade
+distance in front of the scene behind them: by alpha for the alpha and additive blends, by colour towards the
+blend's neutral for the others (NoAlphaAdd to 0, Mod to 1, Mod2x to 0.5). Opaque and alpha-keyed emitters stay hard.
+
+- **Depth.** `SoftParticles::BeginPass` / `EndPass` (new `WoW/Source/WorldClient/SoftParticles.h/.cpp`) wrap both
+  `scene->Draw(M2PASS_1)` and `scene->Draw(M2PASS_2)` in `CGWorldFrame::OnWorldRender`, in both branches (above and
+  under water): the scene depth as drawn so far, like the plugin's `MidWorld` copy at each blended pass. It is
+  `DeviceCopySceneDepth`, so no second copy: Vulkan (`frame::DepthWritten`) and D3D11 (`m_sceneDepthFresh`) hand
+  back the snapshot they already hold when nothing wrote depth since. Above water the pass-2 copy is the one
+  shadowMask takes in `OnSolidDone` and the pass-1 copy is vfog/water's after the liquid (`OnLiquidDone`), when
+  those are on. It registers `CGxDevice::DepthUser_SoftParticles` (new bit 4) every pass from the CVar.
+- **Draw.** `g_softParticleDraw` (Engine, ParticleSystem2.h) is armed for the pass and called right before/after
+  the particle draw in `CParticleEmitter2::RenderParticleVertices` (only when `CParticleEmitter2::s_soft`, set by
+  `CM2SceneRender::DrawParticle` for M2 blend >= 2) and the ribbon draw in `CRibbonEmitter::Render`. It keys the
+  fade by the draw's Gx blend, swaps in our pixel shader, binds the depth on s12 and puts c30 / s12 back after.
+  The `particleGpuQuads` path is covered: the Vulkan compute pass only expands quads into vertices, the draw then
+  goes through the same `RenderParticleVertices` with the stock VS and our PS.
+- **Shaders.** Only the pixel shader is ours: `Tools/CustomMpq/ShaderSrc/SoftParticle.hlsl`, built as
+  `SoftParticle0` (= `Combiners_Mod:0`, the particle/ribbon PS without shadow) and `SoftParticle1` (= `Combiners_Mod:8`,
+  texkill on `c2.w`) for ps_3_0 and ps_4_0 (`build_shaders.py`). The plugin rewrote the stock vertex shaders to pass
+  view depth in FOG.y; the Vulkan translation carries FOG as one float, so instead the vertex fog row c30 is set to
+  `(-1/16384, 1, 1)` for the draw (FOG = 1 - z / 16384, every CDiffuse_T1 / Color_T1 permutation computes FOG the
+  same way) and the PS redoes the stock fog from the real c30 (c43). Screen position is `VPOS`: the Vulkan emitter
+  (`Tools/VulkanShaders/bls/emitter.py`) now maps `dcl vPos` to `gl_FragCoord.xy - 0.5` (shader-xlate already did).
+  Constants: c40 (1 / fade yd, rgb fade, alpha fade), c41 (neutral rgb, 16384), c42 (1/w, 1/h, depth decode as
+  vfog's c3), c43 (real c30.xyz, the world viewport's maxZ: deeper is horizon/sky, never fades).
+- **Reflection pass.** Nothing to skip: the decomp's water reflections are screen-space, no second model pass.
+- **CVars** (WorldParam_CVar.cpp): `softParticles` (default 1: the plugin's default; the copy is usually one vfog
+  or shadowMask already made, and the cost is one point fetch per particle pixel), `softParticlesDistance` (yards,
+  0.05..20, default 1 = the plugin's `soft_distance`). The plugin's `soft_debug` view was not ported.
+  Advanced > World Effects: "Soft particles" check and "Soft particle fade (yards)" slider (0.1..5).
+
+Not covered, by design or for now: shadowed particle permutations (`Combiners_Mod` 1..3, `s_shadowValue != 0`) keep
+the stock shader and stay hard; D3D9 without MSAA (live INTZ depth, no copy) has no soft particles; a world drawn
+to a target of another size than the depth (the plugin's size check) stays hard.
+Unverified: nothing run in game; the view-depth sign/units match between the fog row and the vfog depth decode by
+reading, not by test.
