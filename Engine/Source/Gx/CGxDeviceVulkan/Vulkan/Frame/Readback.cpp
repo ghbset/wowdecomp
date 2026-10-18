@@ -39,6 +39,16 @@ namespace
     }
 
     constexpr VkPipelineStageFlags kDepthStages = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+
+    /// A whole-target clear asked for with no pass open is only pending (the next pass's load op).
+    /// A copy or read-back recorded now would run before it and read the target as the PREVIOUS
+    /// frame left it (the scene image persists between frames): the clear goes in first, as D3D's
+    /// Clear is ordered before a later StretchRect / GetRenderTargetData.
+    VkCommandBuffer OutsideAfterClears()
+    {
+        if (s.open && !s.passOpen && (s.clearColourPending || s.clearDepthPending)) BeginPass();
+        return gxvk::vk::frame::Outside();
+    }
 }
 
 namespace gxvk::vk::frame
@@ -48,7 +58,7 @@ namespace gxvk::vk::frame
         // An active query pins the pass, and Outside() would hand out the pre-pass, which runs ahead
         // of the draws whose colour is wanted: refused, as CopyDepthFromScene does.
         if (dst.handle == VK_NULL_HANDLE || layer >= dst.layers || level >= dst.levels || s.queryActive) return false;
-        VkCommandBuffer cmd = Outside();
+        VkCommandBuffer cmd = OutsideAfterClears();
         if (!cmd || s.scene.handle == VK_NULL_HANDLE || s.scene.layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) return false;
 
         // The scene from its resting layout to a copy source; the destination from whatever it
@@ -104,7 +114,7 @@ namespace gxvk::vk::frame
             if (s.depths[i].extent.width == s.scene.extent.width && s.depths[i].extent.height == s.scene.extent.height) depth = &s.depths[i];
         if (!depth || !depth->initialised || !UsedThisFrame(depth->lastUsed)) return false;
 
-        VkCommandBuffer cmd = Outside();
+        VkCommandBuffer cmd = OutsideAfterClears();
         if (!cmd) return false;
 
         // The depth buffer from its resting layout (the pass's finalLayout) to a copy source, after
@@ -145,7 +155,7 @@ namespace gxvk::vk::frame
     bool ReadScene(const VkRect2D& rect, uint8_t* out)
     {
         if (!out || rect.extent.width == 0 || rect.extent.height == 0 || s.queryActive) return false;   // see CopyFromScene
-        VkCommandBuffer cmd = Outside();
+        VkCommandBuffer cmd = OutsideAfterClears();
         if (!cmd || s.scene.handle == VK_NULL_HANDLE || s.scene.layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) return false;
         if (rect.offset.x < 0 || rect.offset.y < 0 || rect.offset.x + rect.extent.width > s.scene.extent.width
             || rect.offset.y + rect.extent.height > s.scene.extent.height)
