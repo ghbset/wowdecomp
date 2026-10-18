@@ -317,3 +317,24 @@ lighting. That adds: true albedo (no division by the stock light level, so dark-
 right), lamps lighting under the stock fog, specular, per-material response, no 2x ceiling, models lit by more than 4
 lights (their 4 stock point lights could be dropped), and spot lights (`lightbuffer_spotlight`). The cost is every
 receiver shader (terrain 4-layer, WMO, M2 families) getting one more tap: 3-4 pieces, the survey estimate.
+
+## 2026-10-18: vfog34, integration of SSAO, refraction, lights (+ bl-soft, bl-catarefl)
+
+Branch legion-int2 on vfog e62d446: legion-ssao 49f36ef, legion-refract 0e0b4b8, legion-lights e2246fd, bl-soft 8fbb852
+(soft particles, docs/BACKLOG_PORT.md) and bl-catarefl 4199897 (Cata water planar reflection, docs/BACKLOG_PORT.md).
+Each item took depth-user bit 4; the merge gives one bit each in `CGxDevice.h`: `DepthUser_Ssao` 1u << 4,
+`DepthUser_Refraction` 1u << 5, `DepthUser_Lights` 1u << 6, `DepthUser_SoftParticles` 1u << 7 (each set by one caller).
+
+| CVar | default | |
+|---|---|---|
+| `SSAO` / `SSAODistance` / `SSAOBlur` / `SSAOStrength` | 0 / 100 / 2 / 1 | off until the look gets a verdict |
+| `refraction` / `refractionStrength` | 1 / 1 | heat haze over tagged fire emitters |
+| `lightMode` / `maxLightCount` / `maxLightDist` / `lightIntensity` | 0 / 32 / 200 / 1 | lamp light, own options page |
+| `softParticles` / `softParticlesDistance` | 1 / 1 | |
+| `waterCataReflection` / `waterCataReflScale` | 3 / 0.6 | waterStyle 1 only |
+
+Shaders: the committed ps_3_0 / ps_4_0 .bls of each branch (no rebuild); SPIR-V translated in full with the merged
+translator (bl-soft's `dcl vPos` emitter patch): 1653 records + 2 companions, spirv-val clean, 9 new pixel modules
+(LegionSsao x4, LegionRefraction, LegionLights, SoftParticle0/1, CataWaterAboveP). custom.MPQ 5234 files (SM4 pack
+shadow-s1); against vfog33's only the lua, the 18 new .bls, their 27 SPIR-V files and manifest/index differ (plus the
+.spvasm disassembly text, whose header names the output folder; every .spv and .glsl is byte-identical).
