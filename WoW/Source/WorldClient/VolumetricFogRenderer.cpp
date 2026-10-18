@@ -342,7 +342,7 @@ bool SameSettings(const Config& a, const Config& b) {
         && a.classicNoise == b.classicNoise && a.glowCompensation == b.glowCompensation
         && a.maxDistance == b.maxDistance && a.startOffset == b.startOffset && a.temporal == b.temporal
         && a.debugView == b.debugView && a.interiorFarFog == b.interiorFarFog && a.underwater == b.underwater
-        && a.stockFog == b.stockFog && a.sunMarker == b.sunMarker;
+        && a.stockFog == b.stockFog && a.sunMarker == b.sunMarker && a.shadowedSun == b.shadowedSun && a.canopy == b.canopy;
 }
 
 // wxl-vfog ec1c66b TangentSpan: tangents (lateral over depth) of the directions ahead that can meet a circle.
@@ -800,7 +800,9 @@ void MarchPass(const FogFrame& f) {
 // Returns the fog the composite reads: the march, or with vfogTemporal the filtered history.
 CGxTex* TemporalPass(const FogFrame& f) {
     // ---- temporal + history depth (coa FilterWithHistory :980-1004) ---------------------------------
-    bool adaptive = f.lit || s_history.localLightCount > 0 || f.cfg.noiseAmount > 0.0f || f.noisy;
+    // The shadowed sun (shadow[6].x) counts as changing light: its shafts are in the air, not on the surface the history
+    // is reprojected by, so where the orbit camera's move shifts them the stale ones are rejected, not blended in (ghosts).
+    bool adaptive = f.lit || s_history.localLightCount > 0 || f.cfg.noiseAmount > 0.0f || f.noisy || f.shadow[6][0] > 0.0f;
     CGxTex* fogResult = s_targets.march;
     if (f.temporal) {
         int read = s_history.index;
@@ -1142,7 +1144,9 @@ bool RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg,
     NoiseRegisters(fog, noiseRegisters);
 
     float celestialLight[4] = { toLightInView[0], toLightInView[1], toLightInView[2], fog.lightAboveHorizon };
-    float march[4] = { temporal ? 1.0f : 0.0f, fog.maxDistance, fog.horizonStart, fog.farClip };
+    // c11.x, the march jitter (vf_integrate StepJitter): animated with vfogTemporal; without it, spatial only when the
+    // shadowed sun may be on (its fixed mid-step compares draw shells of the scene in the fog), else none (coa).
+    float march[4] = { temporal ? 1.0f : cfg.shadowedSun ? 0.5f : 0.0f, fog.maxDistance, fog.horizonStart, fog.farClip };
     float localControl[4] = { static_cast<float>(lightCount), marchLightLimit, cfg.localLightPhase, 0.0f };
 
     // Sun position for c98 and the god rays (coa :1338-1347), and vfogSunMarker's dot (coa sunInFront).
