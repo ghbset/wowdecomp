@@ -828,7 +828,7 @@ bug despite its comment; coa-vfog has no fade pass.)
 
 custom.MPQ: 5121 files; the 24 VFogComposite*/VFogCompositeSplit* records rebuilt (ps_3_0, ps_4_0, SPIR-V, spirv-val
 clean), the SM4 pack from shadow-s1.
-## 2026-10-18: vfog28, temporal filter and the shadowed sun (fix-temporal)
+## 2026-10-18: vfog31, temporal filter and the shadowed sun (fix-temporal)
 
 What the user saw on vfog25 (Vulkan, Wow64): with `vfogTemporal` on, turning the camera left a ghosted image of the
 area in the fog that flickered and settled; with `vfogTemporal 0` a warped, fogged copy of the background stayed fixed
