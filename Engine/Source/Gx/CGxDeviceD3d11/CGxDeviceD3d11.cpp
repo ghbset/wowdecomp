@@ -7,6 +7,7 @@
 #include <cstring>
 #include <unordered_set>
 #include "Engine/Source/Gx/CGxDeviceD3d11/CGxDeviceD3d11.h"
+#include "Engine/Source/Gx/CGxDeviceD3d11/D3d11Util.h"
 #include "Engine/Source/ConsoleBase/ConsoleVar.h"
 #include "Engine/Source/ConsoleBase/Types.h"
 #include "Engine/Source/Gx/CGxDeviceD3d11/FfShaders.h"
@@ -77,62 +78,7 @@ const D3D11_PRIMITIVE_TOPOLOGY CGxDeviceD3d11::s_primitiveConversion[GxPrims_Las
     D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST
 };
 
-// Every line flushed: an exit hang otherwise loses gx.log's tail (VkLog pattern, shared Log untouched).
-static void D3d11Log(const char* format, ...) {
-    va_list args;
-    va_start(args, format);
-    CGxDevice::Log(format, args);
-    va_end(args);
 
-    if (CGxDevice::m_log) {
-        SLogFlush(CGxDevice::m_log);
-    }
-}
-
-// 16-bit texel data -> Argb8888 (B8G8R8A8 in memory), channels widened by bit replication; 565 gets alpha 0xFF.
-// Returns 0 for any other data format so the caller falls through to the shared Blit (D3D9's tables stay stock).
-static int32_t ConvertTexels16To8888(const C2iVector& size, const void* in, uint32_t inStride, EGxTexFormat inFormat, void* out, uint32_t outStride) {
-    if (inFormat != GxTex_Argb4444 && inFormat != GxTex_Argb1555 && inFormat != GxTex_Rgb565) {
-        return 0;
-    }
-
-    for (int32_t y = 0; y < size.y; y++) {
-        const uint16_t* src = reinterpret_cast<const uint16_t*>(static_cast<const uint8_t*>(in) + y * inStride);
-        uint32_t* dst = reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(out) + y * outStride);
-
-        for (int32_t x = 0; x < size.x; x++) {
-            uint32_t p = src[x];
-            uint32_t a, r, g, b;
-
-            if (inFormat == GxTex_Argb4444) {
-                a = ((p >> 12) & 0xF) * 0x11;
-                r = ((p >> 8) & 0xF) * 0x11;
-                g = ((p >> 4) & 0xF) * 0x11;
-                b = (p & 0xF) * 0x11;
-            } else if (inFormat == GxTex_Argb1555) {
-                a = (p & 0x8000) ? 0xFF : 0;
-                r = (p >> 10) & 0x1F;
-                g = (p >> 5) & 0x1F;
-                b = p & 0x1F;
-                r = (r << 3) | (r >> 2);
-                g = (g << 3) | (g >> 2);
-                b = (b << 3) | (b >> 2);
-            } else {
-                a = 0xFF;
-                r = (p >> 11) & 0x1F;
-                g = (p >> 5) & 0x3F;
-                b = p & 0x1F;
-                r = (r << 3) | (r >> 2);
-                g = (g << 2) | (g >> 4);
-                b = (b << 3) | (b >> 2);
-            }
-
-            dst[x] = (a << 24) | (r << 16) | (g << 8) | b;
-        }
-    }
-
-    return 1;
-}
 
 // d3d11DumpFrame 1: log every draw of the next frame to gx.log, one line each, then the CVar resets to 0.
 static bool s_dumpFrame;
@@ -157,31 +103,11 @@ static const char* DumpShaderName(const void* shader, bool ff) {
     return name ? name : "?";
 }
 
-// Once per distinct message, so a failure repeated every frame shows up once in gx.log.
-static void D3d11LogOnce(const char* format, ...) {
-    static std::unordered_set<std::string> s_seen;
-    char buffer[512];
-    va_list args;
-    va_start(args, format);
-    vsnprintf(buffer, sizeof(buffer), format, args);
-    va_end(args);
-
-    if (s_seen.insert(buffer).second) {
-        D3d11Log("%s", buffer);
-    }
-}
 
 // Set when IDestroyD3d's final device Release leaves references: DeviceDestroy then keeps d3d11/dxgi loaded, since
 // unloading them under a live device (and its driver/DXVK threads) can hang or crash the exit.
 static bool s_deviceLeaked;
 
-template <class T>
-static void SafeRelease(T*& p) {
-    if (p) {
-        p->Release();
-        p = nullptr;
-    }
-}
 
 CGxDevice* CreateCGxDeviceD3d11() {
     void* mem = SMemAlloc(sizeof(CGxDeviceD3d11), __FILE__, __LINE__, 0);
@@ -218,6 +144,10 @@ CGxDeviceD3d11::CGxDeviceD3d11() {
     this->m_sceneDepthCopy = nullptr;
     this->m_constantBuffers[0] = nullptr;
     this->m_constantBuffers[1] = nullptr;
+    this->m_resolveValid = false;
+    memset(this->m_cbBytes, 0, sizeof(this->m_cbBytes));
+    memset(this->m_cbSent, 0, sizeof(this->m_cbSent));
+    this->m_a2cVar = nullptr;
     memset(this->m_gpuConstants, 0, sizeof(this->m_gpuConstants));
     this->m_ffConstantBuffers[0] = nullptr;
     this->m_ffConstantBuffers[1] = nullptr;
@@ -868,6 +798,7 @@ int32_t CGxDeviceD3d11::ICreateD3dDevice(const CGxFormat& format) {
     // b0 for app and FF stages (4 KB each, the size every shader declares), b1 shared by both stages. Zero-filled so
     // registers nobody set read 0, as on D3D9.
     static const float s_zeroConstants[256 * 4] = {};
+    this->m_a2cVar = CVar::Register("gxAlphaToCoverage", "Vulkan/D3D11: 1 smooths alpha-tested cut-outs (leaves, grass, fences) with alpha-to-coverage under MSAA (gxMultisample > 1)", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     ID3D11Buffer** cbuffers[5] = { &this->m_constantBuffers[0], &this->m_constantBuffers[1], &this->m_ffConstantBuffers[0], &this->m_ffConstantBuffers[1], &this->m_devConstantBuffer };
 
     for (uint32_t i = 0; i < 5; i++) {
@@ -882,6 +813,10 @@ int32_t CGxDeviceD3d11::ICreateD3dDevice(const CGxFormat& format) {
 
         if (FAILED(this->m_d3dDevice->CreateBuffer(&cbDesc, &init, cbuffers[i]))) {
             return 0;
+        }
+
+        if (i < 2) {
+            this->m_cbSent[i] = kConstantBufferBytes;
         }
     }
 
@@ -1187,7 +1122,7 @@ void CGxDeviceD3d11::IReleaseBackBuffer() {
     this->m_curRtv = nullptr;
     this->m_curRtvSamples = 1;
     this->m_curDsv = nullptr;
-    this->m_savedDsv = nullptr;
+    SafeRelease(this->m_savedDsv);
     SafeRelease(this->m_backBufferRtv);
     SafeRelease(this->m_backBuffer);
     SafeRelease(this->m_depthSrv);
@@ -1207,7 +1142,13 @@ void CGxDeviceD3d11::IBindRenderTargets() {
     ID3D11RenderTargetView* rtv = this->m_backBufferRtv;
     ID3D11DepthStencilView* dsv = this->m_depthDsv;
 
-    if (this->m_textureTarget[GxBuffers_Color].m_apiSpecific) {
+    // A colour texture target without a view (failed create, plane past its levels, dropped by a recreate) binds no
+    // colour and no back-buffer depth, rather than letting the offscreen pass draw onto the screen.
+    if (this->m_textureTarget[GxBuffers_Color].m_texture && !this->m_textureTarget[GxBuffers_Color].m_apiSpecific) {
+        D3d11LogOnce("CGxDeviceD3d11: colour target %ux%u plane %u has no view: its draws are dropped", this->m_textureTarget[GxBuffers_Color].m_texture->m_width, this->m_textureTarget[GxBuffers_Color].m_texture->m_height, this->m_textureTarget[GxBuffers_Color].m_plane);
+        rtv = nullptr;
+        dsv = nullptr;
+    } else if (this->m_textureTarget[GxBuffers_Color].m_apiSpecific) {
         rtv = static_cast<ID3D11RenderTargetView*>(this->m_textureTarget[GxBuffers_Color].m_apiSpecific);
 
         if (!this->m_textureTarget[GxBuffers_Depth].m_apiSpecific) {
@@ -1320,7 +1261,7 @@ void CGxDeviceD3d11::DeviceSetRenderTarget(EGxBuffer buffer, CGxTex* texture, ui
 
         if (!texture->m_needsCreation && api) {
             if (buffer == GxBuffers_Color) {
-                target.m_apiSpecific = api->m_rtv[plane < 16 ? plane : 0];
+                target.m_apiSpecific = plane < 16 ? api->m_rtv[plane] : nullptr;     // past its levels: no view (IBindRenderTargets)
             } else {
                 target.m_apiSpecific = api->m_dsv;
             }
@@ -1337,6 +1278,11 @@ void CGxDeviceD3d11::DeviceSetRenderTarget(EGxBuffer buffer, CGxTex* texture, ui
 
 void CGxDeviceD3d11::DeviceSaveDepthSurface() {
     if (this->m_context) {
+        // Holds a reference: the view it names (a scratch depth, a depth texture) may be released before the restore.
+        if (this->m_curDsv) {
+            this->m_curDsv->AddRef();
+        }
+        SafeRelease(this->m_savedDsv);
         this->m_savedDsv = this->m_curDsv;
     }
 }
@@ -1376,6 +1322,11 @@ void CGxDeviceD3d11::DeviceResolveDepthBuffer(CGxTex* texture) {
 // m_depthDsv stays the DSV. Resize/device recreate: ITexForceRecreation releases it (render-target flag), and a
 // size or kind change makes a new one here.
 CGxTex* CGxDeviceD3d11::DeviceCopySceneDepth(bool* transient) {
+    // Only a format or feature gap (no depth SRV, no R32F target, the copy shader) is final; the rest retries.
+    bool dummy;
+    bool& retry = transient ? *transient : dummy;
+    retry = true;
+
     if (!this->m_context || !this->m_depthTexture) {
         return nullptr;
     }
@@ -1391,6 +1342,7 @@ CGxTex* CGxDeviceD3d11::DeviceCopySceneDepth(bool* transient) {
         uint32_t ms = desc.SampleDesc.Count > 1 ? 1 : 0;
 
         if (!this->m_depthSrv || !this->m_caps.m_rttFormat[GxTex_R32F]) {
+            retry = false;
             return nullptr;
         }
 
@@ -1400,6 +1352,7 @@ CGxTex* CGxDeviceD3d11::DeviceCopySceneDepth(bool* transient) {
             if (FAILED(this->m_d3dDevice->CreatePixelShader(blob.data, blob.size, nullptr, &this->m_blitDepthPs[ms]))) {
                 this->m_blitDepthPs[ms] = nullptr;
                 D3d11LogOnce("CGxDeviceD3d11: VFOG depth copy shader failed (ms %u)", ms);
+                retry = false;
                 return nullptr;
             }
         }
@@ -1436,6 +1389,7 @@ CGxTex* CGxDeviceD3d11::DeviceCopySceneDepth(bool* transient) {
         return nullptr;
     }
 
+    retry = false;
     return texture;
 }
 
@@ -1446,6 +1400,11 @@ ID3D11Texture2D* CGxDeviceD3d11::IResolvedBackBuffer() {
 
     if (desc.SampleDesc.Count <= 1) {
         return this->m_backBuffer;
+    }
+
+    // TexCopy/TexStretch/ReadPixels with no draw or clear in between share one resolve.
+    if (this->m_resolveTexture && this->m_resolveValid) {
+        return this->m_resolveTexture;
     }
 
     if (!this->m_resolveTexture) {
@@ -1461,6 +1420,7 @@ ID3D11Texture2D* CGxDeviceD3d11::IResolvedBackBuffer() {
     }
 
     this->m_d3dContext->ResolveSubresource(this->m_resolveTexture, 0, this->m_backBuffer, 0, desc.Format);
+    this->m_resolveValid = true;
 
     return this->m_resolveTexture;
 }
@@ -1528,6 +1488,7 @@ void CGxDeviceD3d11::ScenePresent() {
     if (this->m_context) {
         int32_t scrShotClick = this->m_scrShotClick;
 
+        this->m_resolveValid = false;
         CGxDevice::ScenePresent();
         // Software cursor (no hardware cursor in D3D11). Draws through the normal path, so it shows from phase 2 on.
         this->ICursorDraw();
@@ -1598,19 +1559,28 @@ void CGxDeviceD3d11::SceneClear(uint32_t mask, CImVector color) {
         return;
     }
 
+    this->m_resolveValid = false;
+
     if (this->m_viewportDirty) {
         this->IXformSetViewport();
     }
 
-    // DECOMP: stencil clear, the whole surface (D3D9 clips it to the viewport)
-    if ((mask & GxBufferBit_Stencil) && this->m_curDsv && this->m_caps.m_stencilBits) {
-        this->m_d3dContext->ClearDepthStencilView(this->m_curDsv, D3D11_CLEAR_STENCIL, 1.0f, 0);
+    // Depth and stencil only as the mask asks, as D3D9's Clear flags (a depth clear keeps the stencil).
+    UINT dsFlags = (mask & GxBufferBit_Depth) ? D3D11_CLEAR_DEPTH : 0;
+
+    if ((mask & GxBufferBit_Stencil) && this->m_caps.m_stencilBits) {
+        dsFlags |= D3D11_CLEAR_STENCIL;
     }
 
     const CBoundingBox& vp = this->m_viewport;
     bool partial = vp.m_x.m_l > 0.0f || vp.m_y.m_l > 0.0f || vp.m_x.m_h < 1.0f || vp.m_y.m_h < 1.0f;
 
     if (partial && (mask & 0x3)) {
+        // DECOMP: stencil clear, the whole surface (D3D9 clips it to the viewport)
+        if ((dsFlags & D3D11_CLEAR_STENCIL) && this->m_curDsv) {
+            this->m_d3dContext->ClearDepthStencilView(this->m_curDsv, D3D11_CLEAR_STENCIL, 1.0f, 0);
+        }
+
         this->ISceneClearQuad(mask, color);
         return;
     }
@@ -1620,8 +1590,8 @@ void CGxDeviceD3d11::SceneClear(uint32_t mask, CImVector color) {
         this->m_d3dContext->ClearRenderTargetView(this->m_curRtv, rgba);
     }
 
-    if ((mask & 0x2) && this->m_curDsv) {
-        this->m_d3dContext->ClearDepthStencilView(this->m_curDsv, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
+    if (dsFlags && this->m_curDsv) {
+        this->m_d3dContext->ClearDepthStencilView(this->m_curDsv, dsFlags, 1.0f, 0);
     }
 }
 
@@ -1986,20 +1956,6 @@ void CGxDeviceD3d11::IStateSyncVertexPtrs() {
 // ---------------------------------------------------------------------------------------------------------------
 // Pipeline state (phase 2) and fixed function (FfShaders.h, /root/d3d11-port/ffshaders)
 
-enum {
-    Dirty_Raster = 0x1,
-    Dirty_Blend = 0x2,
-    Dirty_Depth = 0x4,
-};
-
-enum {
-    State_Raster,
-    State_Blend,
-    State_Depth,
-    State_Sampler,
-    State_InputLayout,
-};
-
 // D3D9 s_srcBlend / s_dstBlend per GxBlend mode. Alpha uses the same factors, colour ones swapped for alpha ones
 // (D3D11 rejects colour factors in the alpha slots).
 static const D3D11_BLEND s_srcBlend11[12] = { D3D11_BLEND_ONE, D3D11_BLEND_ONE, D3D11_BLEND_SRC_ALPHA, D3D11_BLEND_SRC_ALPHA, D3D11_BLEND_DEST_COLOR, D3D11_BLEND_DEST_COLOR, D3D11_BLEND_DEST_COLOR, D3D11_BLEND_INV_SRC_ALPHA, D3D11_BLEND_INV_SRC_ALPHA, D3D11_BLEND_SRC_ALPHA, D3D11_BLEND_ONE, D3D11_BLEND_BLEND_FACTOR };
@@ -2039,11 +1995,11 @@ static uint64_t Fnv64(const void* data, size_t size, uint64_t hash = 0xCBF29CE48
     return hash;
 }
 
-// Hash of the DXBC input signature (ISGN chunk), so input layouts are shared by every VS with the same inputs.
-static uint64_t DxbcInputSignatureHash(const void* code, uint32_t size) {
+// A DXBC chunk's body, or nullptr.
+static const uint8_t* DxbcChunk(const void* code, uint32_t size, const char* tag, uint32_t& chunkSize) {
     const uint8_t* bytes = static_cast<const uint8_t*>(code);
 
-    if (size >= 32 && !memcmp(bytes, "DXBC", 4)) {
+    if (bytes && size >= 32 && !memcmp(bytes, "DXBC", 4)) {
         uint32_t chunks;
         memcpy(&chunks, bytes + 28, 4);
 
@@ -2051,18 +2007,66 @@ static uint64_t DxbcInputSignatureHash(const void* code, uint32_t size) {
             uint32_t offset;
             memcpy(&offset, bytes + 32 + i * 4, 4);
 
-            if (offset + 8 <= size && !memcmp(bytes + offset, "ISGN", 4)) {
-                uint32_t chunkSize;
+            if (offset + 8 <= size && !memcmp(bytes + offset, tag, 4)) {
                 memcpy(&chunkSize, bytes + offset + 4, 4);
 
                 if (offset + 8 + chunkSize <= size) {
-                    return Fnv64(bytes + offset + 8, chunkSize);
+                    return bytes + offset + 8;
                 }
             }
         }
     }
 
-    return Fnv64(code, size);
+    return nullptr;
+}
+
+// Hash of the DXBC input signature (ISGN chunk), so input layouts are shared by every VS with the same inputs.
+static uint64_t DxbcInputSignatureHash(const void* code, uint32_t size) {
+    uint32_t chunkSize;
+    const uint8_t* isgn = DxbcChunk(code, size, "ISGN", chunkSize);
+    return isgn ? Fnv64(isgn, chunkSize) : Fnv64(code, size);
+}
+
+// Bytes of b0 the shader declares (dcl_constantbuffer cb0[n] in SHDR/SHEX; shader-xlate's cbuffers()), so
+// IShaderConstantsFlush maps no more than it reads. Not found: all 4 KB.
+static uint32_t DxbcCb0Bytes(const void* code, uint32_t size) {
+    constexpr uint32_t kAll = 256 * 16;
+    uint32_t chunkSize = 0;
+    const uint8_t* shdr = DxbcChunk(code, size, "SHDR", chunkSize);
+
+    if (!shdr) {
+        shdr = DxbcChunk(code, size, "SHEX", chunkSize);
+    }
+
+    if (!shdr) {
+        return kAll;
+    }
+
+    uint32_t count = chunkSize / 4;
+    auto tok = [shdr](uint32_t i) { uint32_t t; memcpy(&t, shdr + i * 4, 4); return t; };
+
+    for (uint32_t i = 2; i < count;) {
+        uint32_t t = tok(i);
+        uint32_t op = t & 0x7FF;
+        uint32_t length = (t >> 24) & 0x7F;
+
+        if (op == 0x35 && length == 0 && i + 1 < count) {   // customdata (immediate constant buffer)
+            length = tok(i + 1);
+        }
+
+        if (op == 0x59 && i + 3 < count && tok(i + 2) == 0) {   // dcl_constantbuffer cb0[n]
+            uint32_t bytes = tok(i + 3) * 16;
+            return bytes && bytes < kAll ? bytes : kAll;
+        }
+
+        if (!length) {
+            break;
+        }
+
+        i += length;
+    }
+
+    return kAll;
 }
 
 static void ColorToFloat4(uint32_t value, float* out, float alpha = -1.0f) {
@@ -2085,14 +2089,6 @@ static float TexLodBias() {
     return cvar ? cvar->m_floatValue : 0.0f;
 }
 
-static void UploadConstants(ID3D11DeviceContext* context, ID3D11Buffer* buffer, const void* data, uint32_t size) {
-    D3D11_MAPPED_SUBRESOURCE mapped;
-
-    if (buffer && SUCCEEDED(context->Map(buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
-        memcpy(mapped.pData, data, size);
-        context->Unmap(buffer, 0);
-    }
-}
 
 // Live bisect switch for world-look differences against D3D9, read every draw.
 static int32_t D3d11Debug() {
@@ -2380,8 +2376,9 @@ void CGxDeviceD3d11::IStateSyncInputLayout() {
     this->m_d3dContext->IASetInputLayout(layout);
 }
 
-// D3D9 semantics: copy the dirty range into the mirror, then send the mirror (a DISCARD map needs the whole buffer).
-// d3d11Debug 1 re-sends every draw; 4 turns FLT_MAX (written by ShaderConstantsClear, never by the app) into 0.
+// D3D9 semantics: copy the dirty range into the mirror, then send the mirror. A DISCARD map leaves the rest of b0
+// undefined, so only the part the bound shader declares is sent (m_cbBytes; FF reads its own buffers: 0), and a
+// later shader that declares more than was sent re-sends. d3d11Debug 1 re-sends every draw; 4 turns FLT_MAX (written by ShaderConstantsClear, never by the app) into 0.
 void CGxDeviceD3d11::IShaderConstantsFlush() {
     int32_t debug = D3d11Debug();
 
@@ -2396,8 +2393,15 @@ void CGxDeviceD3d11::IShaderConstantsFlush() {
             }
         }
 
-        if (dirty || debug == 1) {
-            UploadConstants(this->m_d3dContext, this->m_constantBuffers[stage], mirror, sizeof(this->m_gpuConstants[stage]));
+        uint32_t bytes = this->m_cbBytes[stage];
+
+        if (dirty) {
+            this->m_cbSent[stage] = 0;
+        }
+
+        if (bytes > this->m_cbSent[stage] || (debug == 1 && bytes)) {
+            UploadConstants(this->m_d3dContext, this->m_constantBuffers[stage], mirror, bytes);
+            this->m_cbSent[stage] = bytes;
         }
 
         shadow.dirtyMin = 255;
@@ -2681,6 +2685,7 @@ bool CGxDeviceD3d11::IStateSyncShaders() {
         this->m_curVsCode = vsCode;
         this->m_curVsCodeSize = vsCodeSize;
         this->m_curVsSig = DxbcInputSignatureHash(vsCode, vsCodeSize);
+        this->m_cbBytes[0] = ffVs ? 0 : DxbcCb0Bytes(vsCode, vsCodeSize);
     }
 
     void* psObject;
@@ -2700,6 +2705,7 @@ bool CGxDeviceD3d11::IStateSyncShaders() {
     if (psObject != this->m_curPs) {
         this->m_d3dContext->PSSetShader(static_cast<ID3D11PixelShader*>(psObject), nullptr, 0);
         this->m_curPs = psObject;
+        this->m_cbBytes[1] = ffPs ? 0 : DxbcCb0Bytes(ps->m_code.m_data, ps->m_code.Count());
     }
 
     ID3D11Buffer* cb[2] = { ffVs ? this->m_ffConstantBuffers[0] : this->m_constantBuffers[0], ffPs ? this->m_ffConstantBuffers[1] : this->m_constantBuffers[1] };
@@ -3017,8 +3023,7 @@ void CGxDeviceD3d11::IStateSync() {
 
     // gxAlphaToCoverage: alpha-tested opaque / alpha-key draws into an MSAA target. Plain A2C: the SM4 pack's
     // alpha test (discard below the reference) stays, alpha above it is not sharpened (the Vulkan path sharpens).
-    static CVar* a2cVar = CVar::Register("gxAlphaToCoverage", "Vulkan/D3D11: 1 smooths alpha-tested cut-outs (leaves, grass, fences) with alpha-to-coverage under MSAA (gxMultisample > 1)", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
-    const BOOL a2c = this->m_curRtvSamples > 1 && a2cVar && a2cVar->m_intValue != 0 && this->m_appRenderStates[GxRs_AlphaRef].m_value.m_data.i[0] > 0
+    const BOOL a2c = this->m_curRtvSamples > 1 && this->m_a2cVar && this->m_a2cVar->m_intValue != 0 && this->m_appRenderStates[GxRs_AlphaRef].m_value.m_data.i[0] > 0
         && static_cast<uint32_t>(this->m_appRenderStates[GxRs_BlendingMode].m_value.m_data.i[0]) <= GxBlend_AlphaKey;
 
     if (this->m_blendDesc.AlphaToCoverageEnable != a2c) {
@@ -3063,6 +3068,7 @@ void CGxDeviceD3d11::Draw(CGxBatch* batch, int32_t count) {
         return;
     }
 
+    this->m_resolveValid = false;
     this->IStateSync();
 
     if (s_dumpFrame) {
@@ -3209,979 +3215,6 @@ void CGxDeviceD3d11::Draw(CGxBatch* batch, int32_t count) {
     }
 
     this->m_d3dContext->DrawIndexed(indexCount, 0, 0);
-}
-
-// ---------------------------------------------------------------------------------------------------------------
-// Textures
-
-void CGxDeviceD3d11::ITexRelease(CGxTex* texId) {
-    TexApi* api = static_cast<TexApi*>(texId->m_apiSpecificData);
-
-    if (!api) {
-        return;
-    }
-
-    for (uint32_t i = 0; i < 16; i++) {
-        SafeRelease(api->m_rtv[i]);
-    }
-
-    SafeRelease(api->m_srv);
-    SafeRelease(api->m_dsv);
-    SafeRelease(api->m_texture);
-    delete api;
-    texId->m_apiSpecificData = nullptr;
-}
-
-// The texture ITexCreate makes for texId as it stands now (flags, format, base mip).
-void CGxDeviceD3d11::ITexDesc(CGxTex* texId, D3D11_TEXTURE2D_DESC& desc) {
-    uint32_t width;
-    uint32_t height;
-    uint32_t baseMip;
-    uint32_t mipCount;
-    this->ITexWHDStartEnd(texId, width, height, baseMip, mipCount);
-
-    bool cube = texId->m_target == GxTex_CubeMap;
-    bool depth = texId->m_format == GxTex_D24X8;
-    // GENERATE_MIPS needs RENDER_TARGET, which BC formats cannot have: DXT textures keep their uploaded mips.
-    bool compressed = texId->m_format >= GxTex_Dxt1 && texId->m_format <= GxTex_Dxt5;
-    bool generateMips = texId->m_flags.m_generateMipMaps && !depth && !compressed;
-
-    memset(&desc, 0, sizeof(desc));
-    desc.Width = width ? width : 1;
-    desc.Height = height ? height : 1;
-    desc.MipLevels = depth ? 1 : (generateMips ? 0 : mipCount - baseMip);
-    desc.ArraySize = cube ? 6 : 1;
-    desc.Format = s_GxTexFmtToDxgiFmt[texId->m_format];
-    desc.SampleDesc.Count = 1;
-    desc.Usage = D3D11_USAGE_DEFAULT;
-    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-    desc.MiscFlags = cube ? D3D11_RESOURCE_MISC_TEXTURECUBE : 0;
-
-    if (depth) {
-        desc.BindFlags |= D3D11_BIND_DEPTH_STENCIL;
-    } else if (texId->m_flags.m_renderTarget || generateMips) {
-        desc.BindFlags |= D3D11_BIND_RENDER_TARGET;
-    }
-
-    if (generateMips) {
-        desc.MiscFlags |= D3D11_RESOURCE_MISC_GENERATE_MIPS;
-    }
-}
-
-// Byte offset, row pitch and row count of subresource sub (D3D11CalcSubresource order) in a TexShadow's texels.
-static uint32_t TexShadowLayout(const D3D11_TEXTURE2D_DESC& desc, uint32_t levels, EGxTexFormat format, uint32_t sub, uint32_t& pitch, uint32_t& rows) {
-    bool compressed = format >= GxTex_Dxt1 && format <= GxTex_Dxt5;
-    uint32_t offset = 0;
-
-    for (uint32_t i = 0;; i++) {
-        uint32_t level = i % levels;
-        uint32_t width = desc.Width >> level ? desc.Width >> level : 1;
-        uint32_t height = desc.Height >> level ? desc.Height >> level : 1;
-
-        if (compressed) {
-            pitch = ((width + 3) >> 2) * CGxDevice::s_texFormatBytesPerBlock[format];
-            rows = (height + 3) >> 2;
-        } else {
-            pitch = (width * CGxDevice::s_texFormatBitDepth[format] + 7) >> 3;
-            rows = height;
-        }
-
-        if (i == sub) {
-            return offset;
-        }
-
-        offset += pitch * rows;
-    }
-}
-
-// texId's shadow, made (zeroed) on its first upload when make is set. A shadow that no longer fits the texture is
-// dropped. None for render targets, depth and file-backed textures, whose callback reloads the file on GxTex_Lock:
-// those are most of the texture memory and a copy would only double it (Wow32 address space).
-CGxDeviceD3d11::TexShadow* CGxDeviceD3d11::ITexShadow(CGxTex* texId, const TexApi* api, bool make) {
-    TexShadow* shadow = static_cast<TexShadow*>(texId->m_apiSpecificData2);
-    bool fileBacked = texId->m_userFunc == UpdateBlpTextureAsync || texId->m_userFunc == UpdateTgaTexture || texId->m_userFunc == UpdateBlobTexture;
-    bool wanted = !fileBacked && !texId->m_flags.m_renderTarget && texId->m_format != GxTex_D24X8;
-
-    if (shadow && (!wanted || shadow->m_levels != api->m_levels || memcmp(&shadow->m_wanted, &api->m_wanted, sizeof(shadow->m_wanted)) != 0)) {
-        free(shadow);
-        shadow = nullptr;
-        texId->m_apiSpecificData2 = nullptr;
-    }
-
-    if (!shadow && wanted && make) {
-        uint32_t pitch;
-        uint32_t rows;
-        uint32_t size = TexShadowLayout(api->m_wanted, api->m_levels, texId->m_format, api->m_levels * api->m_wanted.ArraySize, pitch, rows);
-        shadow = static_cast<TexShadow*>(calloc(1, sizeof(TexShadow) + size));
-
-        if (shadow) {
-            shadow->m_wanted = api->m_wanted;
-            shadow->m_levels = api->m_levels;
-            texId->m_apiSpecificData2 = shadow;
-        }
-    }
-
-    return shadow;
-}
-
-// 4.3.4 ITexCreate (0x0086B0C0) shape: colour textures typed, D24X8 typeless with a DSV and an SRV.
-void CGxDeviceD3d11::ITexCreate(CGxTex* texId) {
-    this->ITexRelease(texId);
-
-    texId->m_format = s_GxTexFormatToUse[texId->m_format];
-
-    bool cube = texId->m_target == GxTex_CubeMap;
-    bool depth = texId->m_format == GxTex_D24X8;
-    bool renderTarget = texId->m_flags.m_renderTarget;
-
-    D3D11_TEXTURE2D_DESC desc;
-    this->ITexDesc(texId, desc);
-
-    ID3D11Texture2D* texture = nullptr;
-    HRESULT hr = this->m_d3dDevice->CreateTexture2D(&desc, nullptr, &texture);
-
-    if (FAILED(hr)) {
-        // 4.3.4 logs the failure (D3d11Error 0x0086B0A0) with these fields.
-        D3d11LogOnce("CGxDeviceD3d11: CreateTexture2D failed 0x%08X: gx format %d dxgi %d %ux%u mips %u array %u bind 0x%X misc 0x%X", static_cast<uint32_t>(hr), texId->m_format, desc.Format, desc.Width, desc.Height, desc.MipLevels, desc.ArraySize, desc.BindFlags, desc.MiscFlags);
-
-        if (renderTarget || depth) {
-            return;
-        }
-
-        EGxTexFormat from = texId->m_format;
-
-        // Only this texture falls back; the next one of the same format tries its own format again. BC level 0 must
-        // be a multiple of 4 in D3D10+ (D3D9 allowed 1x1/2x2 DXT): decode to 8888, Blit has Dxt -> Argb8888.
-        if (from >= GxTex_Dxt1 && from <= GxTex_Dxt5) {
-            texId->m_format = GxTex_Argb8888;
-        } else {
-            texId->m_format = s_tolerableTexFmtMapping[from];
-        }
-
-        if (texId->m_format == from) {
-            return;
-        }
-
-        D3d11LogOnce("CGxDeviceD3d11: texture format remap %d -> %d (%ux%u, this texture only)", from, texId->m_format, desc.Width, desc.Height);
-        this->ITexDesc(texId, desc);
-        hr = this->m_d3dDevice->CreateTexture2D(&desc, nullptr, &texture);
-
-        if (FAILED(hr)) {
-            D3d11LogOnce("CGxDeviceD3d11: CreateTexture2D fallback failed 0x%08X: gx format %d dxgi %d %ux%u mips %u bind 0x%X", static_cast<uint32_t>(hr), texId->m_format, desc.Format, desc.Width, desc.Height, desc.MipLevels, desc.BindFlags);
-            return;
-        }
-    }
-
-    D3D11_TEXTURE2D_DESC wanted = desc;
-    texture->GetDesc(&desc);
-
-    TexApi* api = new TexApi;
-    memset(api, 0, sizeof(*api));
-    api->m_texture = texture;
-    api->m_levels = desc.MipLevels;
-    api->m_wanted = wanted;
-
-    D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc;
-    memset(&srvDesc, 0, sizeof(srvDesc));
-    srvDesc.Format = depth ? DXGI_FORMAT_R24_UNORM_X8_TYPELESS : desc.Format;
-
-    if (cube) {
-        srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURECUBE;
-        srvDesc.TextureCube.MipLevels = desc.MipLevels;
-    } else {
-        srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-        srvDesc.Texture2D.MipLevels = desc.MipLevels;
-    }
-
-    hr = this->m_d3dDevice->CreateShaderResourceView(texture, &srvDesc, &api->m_srv);
-
-    if (FAILED(hr)) {
-        D3d11LogOnce("CGxDeviceD3d11: CreateShaderResourceView failed 0x%08X: gx format %d dxgi %d %ux%u mips %u dim %d", static_cast<uint32_t>(hr), texId->m_format, srvDesc.Format, desc.Width, desc.Height, desc.MipLevels, srvDesc.ViewDimension);
-    }
-
-    if (depth) {
-        D3D11_DEPTH_STENCIL_VIEW_DESC dsvDesc;
-        memset(&dsvDesc, 0, sizeof(dsvDesc));
-        dsvDesc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
-        dsvDesc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
-        this->m_d3dDevice->CreateDepthStencilView(texture, &dsvDesc, &api->m_dsv);
-    } else if (renderTarget) {
-        // RTT MIPS: a 2D target gets one RTV per mip level (slot = level), a cube one per face at level 0.
-        uint32_t views = cube ? desc.ArraySize : (desc.MipLevels < 16 ? desc.MipLevels : 16);
-
-        for (uint32_t face = 0; face < views; face++) {
-            D3D11_RENDER_TARGET_VIEW_DESC rtvDesc;
-            memset(&rtvDesc, 0, sizeof(rtvDesc));
-            rtvDesc.Format = desc.Format;
-
-            if (cube) {
-                rtvDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DARRAY;
-                rtvDesc.Texture2DArray.FirstArraySlice = face;
-                rtvDesc.Texture2DArray.ArraySize = 1;
-            } else {
-                rtvDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
-                rtvDesc.Texture2D.MipSlice = face;
-            }
-
-            this->m_d3dDevice->CreateRenderTargetView(texture, &rtvDesc, &api->m_rtv[face]);
-        }
-    }
-
-    texId->m_apiSpecificData = api;
-    texId->m_needsCreation = 0;
-
-    // Refill from the shadow: a full device recreate released the texture and its callback may not have the texels.
-    if (TexShadow* shadow = this->ITexShadow(texId, api, false)) {
-        const uint8_t* bits = reinterpret_cast<const uint8_t*>(shadow + 1);
-
-        for (uint32_t sub = 0; sub < api->m_levels * desc.ArraySize; sub++) {
-            uint32_t pitch;
-            uint32_t rows;
-            uint32_t offset = TexShadowLayout(shadow->m_wanted, shadow->m_levels, texId->m_format, sub, pitch, rows);
-            this->m_d3dContext->UpdateSubresource(texture, sub, nullptr, bits + offset, pitch, 0);
-        }
-
-        if ((desc.MiscFlags & D3D11_RESOURCE_MISC_GENERATE_MIPS) && api->m_srv) {
-            this->m_d3dContext->GenerateMips(api->m_srv);
-        }
-    }
-}
-
-// CGxDeviceD3d::ITexUpload with LockRect replaced by Blit into a scratch block + UpdateSubresource.
-void CGxDeviceD3d11::ITexUpload(CGxTex* texId) {
-    uint32_t texelStrideInBytes;
-    const void* texels = nullptr;
-    texId->m_userFunc(GxTex_Lock, texId->m_width, texId->m_height, 0, 0, texId->m_userArg, texelStrideInBytes, texels);
-
-    uint32_t width;
-    uint32_t height;
-    uint32_t baseMip;
-    uint32_t mipCount;
-    this->ITexWHDStartEnd(texId, width, height, baseMip, mipCount);
-
-    TexApi* api = static_cast<TexApi*>(texId->m_apiSpecificData);
-    int32_t compressed = texId->m_dataFormat >= GxTex_Dxt1 && texId->m_dataFormat <= GxTex_Dxt5;
-    int32_t destCompressed = texId->m_format >= GxTex_Dxt1 && texId->m_format <= GxTex_Dxt5;
-    uint32_t faceCount = texId->m_target == GxTex_CubeMap ? 6 : 1;
-    TexShadow* shadow = this->ITexShadow(texId, api, true);
-
-    for (uint32_t face = 0; face < faceCount; face++) {
-        uint32_t mipWidth = width;
-        uint32_t mipHeight = height;
-        uint32_t level = 0;
-
-        for (uint32_t mip = baseMip; mip != mipCount && level < api->m_levels; mip++, level++) {
-            texels = nullptr;
-            texId->m_userFunc(GxTex_Latch, mipWidth, mipHeight, face, mip, texId->m_userArg, texelStrideInBytes, texels);
-
-            if (texels && !texId->m_flags.m_renderTarget) {
-                RECT rect;
-                rect.left = texId->m_updateRect.minX >> mip;
-                rect.top = texId->m_updateRect.minY >> mip;
-                // 4.3.4: 0x0086C210/0x1405A0450 rounds the end up per mip; flooring dropped odd edge rows/columns.
-                rect.bottom = ((texId->m_updateRect.maxY - 1) >> mip) + 1;
-                rect.right = ((texId->m_updateRect.maxX - 1) >> mip) + 1;
-
-                if (rect.bottom > static_cast<int32_t>(mipHeight)) {
-                    rect.bottom = mipHeight;
-                }
-
-                if (rect.right > static_cast<int32_t>(mipWidth)) {
-                    rect.right = mipWidth;
-                }
-
-                if (rect.bottom <= rect.top) {
-                    rect.bottom = rect.top + 1;
-                }
-
-                if (rect.right <= rect.left) {
-                    rect.right = rect.left + 1;
-                }
-
-                if (destCompressed) {
-                    rect.left &= ~3;
-                    rect.top &= ~3;
-                    rect.right = (rect.right + 3) & ~3;
-                    rect.bottom = (rect.bottom + 3) & ~3;
-
-                    if (rect.bottom > static_cast<int32_t>(mipHeight)) {
-                        rect.bottom = mipHeight;
-                    }
-
-                    if (rect.right > static_cast<int32_t>(mipWidth)) {
-                        rect.right = mipWidth;
-                    }
-                }
-
-                const uint8_t* src = static_cast<const uint8_t*>(texels);
-
-                if (!texId->m_flags.m_bit15) {
-                    EGxTexFormat dataFormat = texId->m_dataFormat;
-
-                    if (compressed) {
-                        src += s_texFormatBytesPerBlock[dataFormat] * (rect.left >> 2) + texelStrideInBytes * (rect.top >> 2);
-                    } else {
-                        src += ((rect.left * s_texFormatBitDepth[dataFormat]) >> 3) + texelStrideInBytes * rect.top;
-                    }
-                }
-
-                C2iVector size;
-                size.x = rect.right - rect.left;
-                size.y = rect.bottom - rect.top;
-
-                uint32_t pitch;
-                uint32_t rows;
-
-                if (destCompressed) {
-                    pitch = ((size.x + 3) >> 2) * s_texFormatBytesPerBlock[texId->m_format];
-                    rows = (size.y + 3) >> 2;
-                } else {
-                    pitch = (size.x * s_texFormatBitDepth[texId->m_format] + 7) >> 3;
-                    rows = size.y;
-                }
-
-                void* scratch = malloc(pitch * rows);
-
-                if (!scratch) {
-                    goto done;
-                }
-
-                int32_t converted = (texId->m_format == GxTex_Argb8888 && ConvertTexels16To8888(size, src, texelStrideInBytes, texId->m_dataFormat, scratch, pitch))
-                    || Blit(size, BlitAlpha_0, src, texelStrideInBytes, GxGetBlitFormat(texId->m_dataFormat), scratch, pitch, GxGetBlitFormat(texId->m_format));
-
-                if (!converted) {
-                    D3d11LogOnce("CGxDeviceD3d11: texture upload has no conversion %d -> %d (%dx%d mip %u)", texId->m_dataFormat, texId->m_format, size.x, size.y, mip);
-                }
-
-                if (shadow) {
-                    uint32_t shadowPitch;
-                    uint32_t shadowRows;
-                    uint8_t* dest = reinterpret_cast<uint8_t*>(shadow + 1) + TexShadowLayout(shadow->m_wanted, shadow->m_levels, texId->m_format, D3D11CalcSubresource(level, face, api->m_levels), shadowPitch, shadowRows);
-                    uint32_t x = destCompressed ? (rect.left >> 2) * s_texFormatBytesPerBlock[texId->m_format] : (rect.left * s_texFormatBitDepth[texId->m_format]) >> 3;
-                    uint32_t y = destCompressed ? rect.top >> 2 : rect.top;
-
-                    for (uint32_t row = 0; row < rows; row++) {
-                        memcpy(dest + (y + row) * shadowPitch + x, static_cast<uint8_t*>(scratch) + row * pitch, pitch);
-                    }
-                }
-
-                D3D11_BOX box = { static_cast<UINT>(rect.left), static_cast<UINT>(rect.top), 0, static_cast<UINT>(rect.right), static_cast<UINT>(rect.bottom), 1 };
-                this->m_d3dContext->UpdateSubresource(api->m_texture, D3D11CalcSubresource(level, face, api->m_levels), &box, scratch, pitch, 0);
-                free(scratch);
-            }
-
-            mipHeight >>= 1;
-            mipWidth >>= 1;
-
-            if (!mipWidth) {
-                mipWidth = 1;
-            }
-
-            if (!mipHeight) {
-                mipHeight = 1;
-            }
-        }
-    }
-
-    if (texId->m_flags.m_generateMipMaps && !destCompressed && api->m_srv && api->m_levels > 1) {
-        this->m_d3dContext->GenerateMips(api->m_srv);
-    }
-
-done:
-    texels = nullptr;
-    texId->m_userFunc(GxTex_Unlock, texId->m_width, texId->m_height, 0, 0, texId->m_userArg, texelStrideInBytes, texels);
-}
-
-void CGxDeviceD3d11::ITexMarkAsUpdated(CGxTex* texId) {
-    if (!this->m_context) {
-        return;
-    }
-
-    // Not stock: D3D9 textures take new flags as sampler state, a D3D11 texture's mip count, bind flags and format
-    // are fixed at creation. A CGxTex given new flags (TexSetFlags, or reused by the texture cache) whose texture no
-    // longer matches is made again and re-uploaded. Current render targets are left alone.
-    TexApi* api = static_cast<TexApi*>(texId->m_apiSpecificData);
-
-    if (api && !texId->m_needsCreation && this->m_textureTarget[0].m_texture != texId && this->m_textureTarget[1].m_texture != texId) {
-        D3D11_TEXTURE2D_DESC wanted;
-        this->ITexDesc(texId, wanted);
-
-        if (memcmp(&wanted, &api->m_wanted, sizeof(wanted)) != 0) {
-            D3d11LogOnce("CGxDeviceD3d11: texture recreated for new flags: %ux%u -> %ux%u, dxgi %d -> %d, mips %u -> %u, bind 0x%X -> 0x%X, misc 0x%X -> 0x%X", api->m_wanted.Width, api->m_wanted.Height, wanted.Width, wanted.Height, api->m_wanted.Format, wanted.Format, api->m_wanted.MipLevels, wanted.MipLevels, api->m_wanted.BindFlags, wanted.BindFlags, api->m_wanted.MiscFlags, wanted.MiscFlags);
-            this->ITexRelease(texId);
-            texId->m_needsCreation = 1;
-            static CiRect s_updateRect;
-            this->TexMarkForUpdate(texId, s_updateRect, 0);
-        }
-    }
-
-    if (!texId->m_needsUpdate) {
-        return;
-    }
-
-    if (texId->m_needsCreation || !texId->m_apiSpecificData) {
-        this->ITexCreate(texId);
-
-        // An empty rect is ITexForceRecreation's "refilled from the shadow". The shadow did not fit the new texture
-        // (base mip change): refill it through the callback instead.
-        if (!texId->m_apiSpecificData2 && texId->m_updateRect.maxX <= texId->m_updateRect.minX) {
-            texId->m_updateRect = CiRect(0, 0, texId->m_height, texId->m_width);
-        }
-    }
-
-    if (!texId->m_needsCreation && texId->m_apiSpecificData) {
-        if (texId->m_userFunc && texId->m_updateRect.maxX > texId->m_updateRect.minX) {
-            this->ITexUpload(texId);
-        }
-
-        CGxDevice::ITexMarkAsUpdated(texId);
-    }
-}
-
-void CGxDeviceD3d11::ITexForceRecreation(int32_t all) {
-    // 4.3.4 (0x0086C590) walks every texture, created or not. Skipping those without a D3D object (never bound yet,
-    // or released by an earlier recreation) left them with whatever partial update rect they had and without the
-    // GxTex_3 regen notice, so after a device recreate they came back with only part of their texels.
-    for (CGxTex* texId = this->m_textures.Head(); texId; texId = this->m_textures.Next(texId)) {
-        if (!(all || texId->m_flags.m_renderTarget)) {
-            continue;
-        }
-
-        static CiRect s_updateRect;
-
-        // Unbind it if it is a current target, so no stale view stays bound.
-        for (uint32_t i = 0; i < 2; i++) {
-            if (this->m_textureTarget[i].m_texture == texId) {
-                this->m_textureTarget[i].m_apiSpecific = nullptr;
-            }
-        }
-
-        this->ITexRelease(texId);
-        texId->m_needsCreation = 1;
-        int8_t pending = texId->m_needsUpdate;
-        this->TexMarkForUpdate(texId, s_updateRect, 0);
-
-        // Shadowed: ITexCreate refills it, so nothing to upload until the app updates it again. An update still
-        // pending is not in the shadow yet: that one keeps the full re-upload through the callback.
-        if (texId->m_apiSpecificData2 && !pending) {
-            texId->m_updateRect = CiRect(0, 0, 0, 0);
-        }
-
-        uint32_t texelStrideInBytes;
-        const void* texels;
-
-        if (texId->m_userFunc) {
-            texId->m_userFunc(GxTex_3, texId->m_width, texId->m_height, 0, 0, texId->m_userArg, texelStrideInBytes, texels);
-        }
-    }
-
-    if (this->m_hwnd && this->m_d3dDevice) {
-        this->NotifyOnTextureRecreation();
-    }
-}
-
-void CGxDeviceD3d11::TexDestroy(CGxTex* texId) {
-    // Not stock: IStateSyncTextures dereferences every bound CGxTex* on every draw; D3D9 only touches a slot when it
-    // changes. CWorld::Destroy -> CShadowCache::Destroy frees the shadow maps while GxRs_Texture4 (and 5..7 above
-    // SHADOW_MEDIUM) still hold them, and glue never rebinds those slots, so after a logout every glue draw read a
-    // freed CGxTex, ran ITexMarkAsUpdated/ITexCreate on whatever reused the memory and bound its SRV. Forget it here.
-    for (uint32_t i = 0; i < 16; i++) {
-        if (this->m_appRenderStates[GxRs_Texture0 + i].m_value.m_data.p == texId) {
-            this->m_appRenderStates[GxRs_Texture0 + i].m_value.m_data.p = nullptr;
-        }
-
-        if (this->m_hwRenderStates[GxRs_Texture0 + i].m_data.p == texId) {
-            this->m_hwRenderStates[GxRs_Texture0 + i].m_data.p = nullptr;
-        }
-    }
-
-    for (uint32_t i = 0; i < this->m_pushedStates.Count(); i++) {
-        CGxPushedRenderState& pushed = this->m_pushedStates[i];
-
-        if (pushed.m_which >= GxRs_Texture0 && pushed.m_which < GxRs_Texture0 + 16 && pushed.m_value.m_data.p == texId) {
-            pushed.m_value.m_data.p = nullptr;
-        }
-    }
-
-    // m_texture too: a new CGxTex at the same address set as a target would hit DeviceSetRenderTarget's early return
-    // and never get its RTV bound.
-    for (uint32_t i = 0; i < 2; i++) {
-        if (this->m_textureTarget[i].m_texture == texId) {
-            bool bound = this->m_textureTarget[i].m_apiSpecific != nullptr;
-            this->m_textureTarget[i].m_texture = nullptr;
-            this->m_textureTarget[i].m_apiSpecific = nullptr;
-
-            if (bound && this->m_d3dContext) {
-                this->IBindRenderTargets();
-            }
-        }
-    }
-
-    this->ITexRelease(texId);
-    free(texId->m_apiSpecificData2);
-    texId->m_apiSpecificData2 = nullptr;
-    CGxDevice::TexDestroy(texId);
-}
-
-void CGxDeviceD3d11::DeviceSetBaseMipLevel(uint32_t level) {
-    this->ITexForceRecreation(1);
-    CGxDevice::DeviceSetBaseMipLevel(level);
-}
-
-void CGxDeviceD3d11::DeviceCopyTex(CGxTex* source, uint32_t sourcePlane, CGxTex* dest, uint32_t destPlane) {
-    if (!this->m_context || !source || !dest) {
-        return;
-    }
-
-    if (source->m_needsCreation || !source->m_apiSpecificData) {
-        this->ITexCreate(source);
-    }
-
-    if (dest->m_needsCreation || !dest->m_apiSpecificData) {
-        this->ITexCreate(dest);
-    }
-
-    TexApi* src = static_cast<TexApi*>(source->m_apiSpecificData);
-    TexApi* dst = static_cast<TexApi*>(dest->m_apiSpecificData);
-
-    if (!src || !dst) {
-        return;
-    }
-
-    bool same = src->m_wanted.Format == dst->m_wanted.Format && src->m_wanted.Width == dst->m_wanted.Width && src->m_wanted.Height == dst->m_wanted.Height;
-
-    // Other format or size: D3D9 StretchRect converts and scales, CopySubresourceRegion would drop it.
-    if (!same && src->m_srv && src->m_wanted.ArraySize == 1 && this->IBlit(src->m_srv, src->m_wanted.Width, src->m_wanted.Height, nullptr, dest, 0, destPlane, nullptr, true)) {
-        return;
-    }
-
-    if (!this->ITexMatchFormat(dest, src->m_wanted.Format)) {
-        return;
-    }
-
-    dst = static_cast<TexApi*>(dest->m_apiSpecificData);
-
-    if (dst) {
-        this->m_d3dContext->CopySubresourceRegion(dst->m_texture, D3D11CalcSubresource(0, destPlane, dst->m_levels), 0, 0, 0, src->m_texture, D3D11CalcSubresource(0, sourcePlane, src->m_levels), nullptr);
-    }
-}
-
-// CopySubresourceRegion needs both sides in one format group and drops the copy silently otherwise (black). A copy
-// target in another format is made again in the source's (it holds nothing a copy is not about to overwrite).
-bool CGxDeviceD3d11::ITexMatchFormat(CGxTex* texId, DXGI_FORMAT format) {
-    TexApi* api = static_cast<TexApi*>(texId->m_apiSpecificData);
-
-    if (!api) {
-        return false;
-    }
-
-    if (api->m_wanted.Format == format) {
-        return true;
-    }
-
-    for (uint32_t f = GxTex_Abgr8888; f < GxTexFormats_Last; f++) {
-        if (s_GxTexFmtToDxgiFmt[f] == format && f != GxTex_D24X8) {
-            D3d11LogOnce("CGxDeviceD3d11: copy target %ux%u remapped dxgi %d -> %d (gx format %d -> %u) to match its source", api->m_wanted.Width, api->m_wanted.Height, api->m_wanted.Format, format, texId->m_format, f);
-            texId->m_format = static_cast<EGxTexFormat>(f);
-            this->ITexCreate(texId);
-            api = static_cast<TexApi*>(texId->m_apiSpecificData);
-            return api && api->m_wanted.Format == format;
-        }
-    }
-
-    D3d11LogOnce("CGxDeviceD3d11: copy dropped, target dxgi %d cannot take source dxgi %d", api->m_wanted.Format, format);
-    return false;
-}
-
-// Back buffer region -> texture (D3D9 StretchRect with equal rects).
-int32_t CGxDeviceD3d11::TexCopy(CGxTex* dest, const C2iVector& destPos, const C2iVector& sourcePos, const C2iVector& size, uint32_t level, uint32_t plane) {
-    if (!this->m_context) {
-        return 0;
-    }
-
-    if (dest->m_needsCreation || !dest->m_apiSpecificData) {
-        this->ITexCreate(dest);
-    }
-
-    ID3D11Texture2D* source = this->IResolvedBackBuffer();
-
-    if (dest->m_needsCreation || !dest->m_apiSpecificData || !source) {
-        return 0;
-    }
-
-    D3D11_TEXTURE2D_DESC sourceDesc;
-    source->GetDesc(&sourceDesc);
-    TexApi* api = static_cast<TexApi*>(dest->m_apiSpecificData);
-
-    // Another format (a 10-bit back buffer into an 8888 texture): convert through the blit when the target can be
-    // drawn to, else remap the target to the back buffer's format as before.
-    if (api->m_wanted.Format != sourceDesc.Format && (api->m_wanted.BindFlags & D3D11_BIND_RENDER_TARGET)) {
-        CiRect sourceRect = { sourcePos.y, sourcePos.x, sourcePos.y + size.y, sourcePos.x + size.x };
-        CiRect destRect = { destPos.y, destPos.x, destPos.y + size.y, destPos.x + size.x };
-
-        if (this->IBlitBackBuffer(dest, level, plane, &sourceRect, &destRect, false)) {
-            return 1;
-        }
-    }
-
-    if (!this->ITexMatchFormat(dest, sourceDesc.Format)) {
-        return 0;
-    }
-
-    api = static_cast<TexApi*>(dest->m_apiSpecificData);
-
-    // A box past the back buffer edge makes CopySubresourceRegion drop the whole copy.
-    D3D11_BOX box = { static_cast<UINT>(sourcePos.x), static_cast<UINT>(sourcePos.y), 0, static_cast<UINT>(sourcePos.x + size.x), static_cast<UINT>(sourcePos.y + size.y), 1 };
-    box.right = box.right < sourceDesc.Width ? box.right : sourceDesc.Width;
-    box.bottom = box.bottom < sourceDesc.Height ? box.bottom : sourceDesc.Height;
-
-    if (box.left >= box.right || box.top >= box.bottom) {
-        return 0;
-    }
-
-    this->m_d3dContext->CopySubresourceRegion(api->m_texture, D3D11CalcSubresource(level, plane, api->m_levels), destPos.x, destPos.y, 0, source, 0, &box);
-
-    return 1;
-}
-
-// Equal-size stretches are copies; scaled ones need a blit shader.
-int32_t CGxDeviceD3d11::TexStretch(CGxTex* dest, const CiRect* destRect, const CiRect* sourceRect, uint32_t level, uint32_t face) {
-    if (!this->m_context) {
-        return 0;
-    }
-
-    if (destRect && sourceRect && destRect->maxX - destRect->minX == sourceRect->maxX - sourceRect->minX && destRect->maxY - destRect->minY == sourceRect->maxY - sourceRect->minY) {
-        C2iVector destPos;
-        destPos.x = destRect->minX;
-        destPos.y = destRect->minY;
-        C2iVector sourcePos;
-        sourcePos.x = sourceRect->minX;
-        sourcePos.y = sourceRect->minY;
-        C2iVector size;
-        size.x = sourceRect->maxX - sourceRect->minX;
-        size.y = sourceRect->maxY - sourceRect->minY;
-
-        return this->TexCopy(dest, destPos, sourcePos, size, level, face);
-    }
-
-    // Scaled, or a null rect (whole back buffer / whole target level): StretchRect through the blit shader.
-    if (dest->m_needsCreation || !dest->m_apiSpecificData) {
-        this->ITexCreate(dest);
-    }
-
-    if (dest->m_needsCreation || !dest->m_apiSpecificData) {
-        return 0;
-    }
-
-    return this->IBlitBackBuffer(dest, level, face, sourceRect, destRect, true);
-}
-
-int32_t CGxDeviceD3d11::IBlitBackBuffer(CGxTex* dest, uint32_t level, uint32_t face, const CiRect* sourceRect, const CiRect* destRect, bool linear) {
-    ID3D11Texture2D* source = this->IResolvedBackBuffer();
-
-    if (!source) {
-        return 0;
-    }
-
-    if (!this->m_backBufferSrv && FAILED(this->m_d3dDevice->CreateShaderResourceView(source, nullptr, &this->m_backBufferSrv))) {
-        this->m_backBufferSrv = nullptr;
-        D3d11LogOnce("CGxDeviceD3d11: back buffer SRV failed, blits from it dropped");
-        return 0;
-    }
-
-    D3D11_TEXTURE2D_DESC desc;
-    source->GetDesc(&desc);
-
-    return this->IBlit(this->m_backBufferSrv, desc.Width, desc.Height, sourceRect, dest, level, face, destRect, linear);
-}
-
-// D3D9 StretchRect: one triangle into `dest` (level, face), sampling `source` over sourceRect (null = all of it).
-// Draws with its own state, then marks everything IStateSync caches as stale.
-int32_t CGxDeviceD3d11::IBlit(ID3D11ShaderResourceView* source, uint32_t sourceWidth, uint32_t sourceHeight, const CiRect* sourceRect, CGxTex* dest, uint32_t level, uint32_t face, const CiRect* destRect, bool linear, ID3D11PixelShader* ps) {
-    TexApi* api = static_cast<TexApi*>(dest->m_apiSpecificData);
-
-    if (!api || !source || !sourceWidth || !sourceHeight) {
-        return 0;
-    }
-
-    D3D11_TEXTURE2D_DESC desc;
-    api->m_texture->GetDesc(&desc);
-
-    if (!(desc.BindFlags & D3D11_BIND_RENDER_TARGET) || level >= desc.MipLevels || face >= desc.ArraySize) {
-        D3d11LogOnce("CGxDeviceD3d11: blit dropped, target %ux%u dxgi %d is not a render target", desc.Width, desc.Height, desc.Format);
-        return 0;
-    }
-
-    if (!this->m_blitVs) {
-        static const float s_zero[4] = {};
-        D3D11_BUFFER_DESC cbDesc;
-        memset(&cbDesc, 0, sizeof(cbDesc));
-        cbDesc.ByteWidth = 16;
-        cbDesc.Usage = D3D11_USAGE_DYNAMIC;
-        cbDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-        cbDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-        D3D11_SUBRESOURCE_DATA init = { s_zero, 0, 0 };
-
-        if (FAILED(this->m_d3dDevice->CreateVertexShader(g_blitVs.data, g_blitVs.size, nullptr, &this->m_blitVs))
-            || FAILED(this->m_d3dDevice->CreatePixelShader(g_blitPs.data, g_blitPs.size, nullptr, &this->m_blitPs))
-            || FAILED(this->m_d3dDevice->CreateBuffer(&cbDesc, &init, &this->m_blitConstantBuffer))) {
-            D3d11LogOnce("CGxDeviceD3d11: blit shaders failed");
-            SafeRelease(this->m_blitVs);
-            SafeRelease(this->m_blitPs);
-            SafeRelease(this->m_blitConstantBuffer);
-            return 0;
-        }
-    }
-
-    ID3D11RenderTargetView* rtv = level == 0 ? api->m_rtv[face] : nullptr;
-    bool ownRtv = false;
-
-    if (!rtv) {
-        D3D11_RENDER_TARGET_VIEW_DESC rtvDesc;
-        memset(&rtvDesc, 0, sizeof(rtvDesc));
-        rtvDesc.Format = desc.Format;
-
-        if (desc.ArraySize > 1) {
-            rtvDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DARRAY;
-            rtvDesc.Texture2DArray.MipSlice = level;
-            rtvDesc.Texture2DArray.FirstArraySlice = face;
-            rtvDesc.Texture2DArray.ArraySize = 1;
-        } else {
-            rtvDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
-            rtvDesc.Texture2D.MipSlice = level;
-        }
-
-        if (FAILED(this->m_d3dDevice->CreateRenderTargetView(api->m_texture, &rtvDesc, &rtv))) {
-            return 0;
-        }
-
-        ownRtv = true;
-    }
-
-    uint32_t destWidth = desc.Width >> level ? desc.Width >> level : 1;
-    uint32_t destHeight = desc.Height >> level ? desc.Height >> level : 1;
-    bool hasDest = destRect && destRect->maxX > destRect->minX && destRect->maxY > destRect->minY;
-    bool hasSource = sourceRect && sourceRect->maxX > sourceRect->minX && sourceRect->maxY > sourceRect->minY;
-
-    D3D11_VIEWPORT viewport;
-    viewport.TopLeftX = hasDest ? static_cast<float>(destRect->minX) : 0.0f;
-    viewport.TopLeftY = hasDest ? static_cast<float>(destRect->minY) : 0.0f;
-    viewport.Width = hasDest ? static_cast<float>(destRect->maxX - destRect->minX) : static_cast<float>(destWidth);
-    viewport.Height = hasDest ? static_cast<float>(destRect->maxY - destRect->minY) : static_cast<float>(destHeight);
-    viewport.MinDepth = 0.0f;
-    viewport.MaxDepth = 1.0f;
-
-    float uv[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
-
-    if (hasSource) {
-        uv[0] = static_cast<float>(sourceRect->minX) / sourceWidth;
-        uv[1] = static_cast<float>(sourceRect->minY) / sourceHeight;
-        uv[2] = static_cast<float>(sourceRect->maxX) / sourceWidth;
-        uv[3] = static_cast<float>(sourceRect->maxY) / sourceHeight;
-    }
-
-    UploadConstants(this->m_d3dContext, this->m_blitConstantBuffer, uv, sizeof(uv));
-
-    D3D11_SAMPLER_DESC samplerDesc;
-    memset(&samplerDesc, 0, sizeof(samplerDesc));
-    samplerDesc.Filter = linear ? D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT : D3D11_FILTER_MIN_MAG_MIP_POINT;
-    samplerDesc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
-    samplerDesc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
-    samplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
-    samplerDesc.MaxAnisotropy = 1;
-    samplerDesc.ComparisonFunc = D3D11_COMPARISON_NEVER;
-    ID3D11SamplerState* sampler = static_cast<ID3D11SamplerState*>(this->IStateGet(State_Sampler, &samplerDesc, sizeof(samplerDesc)));
-
-    // Target first, so a source that is the bound RTV (the back buffer) is unbound before it is read.
-    ID3D11ShaderResourceView* noSrvs[16] = {};
-    this->m_d3dContext->PSSetShaderResources(0, 16, noSrvs);
-    this->m_d3dContext->OMSetRenderTargets(1, &rtv, nullptr);
-    this->m_d3dContext->RSSetViewports(1, &viewport);
-    this->m_d3dContext->RSSetState(nullptr);
-    this->m_d3dContext->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
-    this->m_d3dContext->OMSetDepthStencilState(nullptr, 0);
-    this->m_d3dContext->IASetInputLayout(nullptr);
-    this->m_d3dContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    this->m_d3dContext->VSSetShader(this->m_blitVs, nullptr, 0);
-    this->m_d3dContext->VSSetConstantBuffers(2, 1, &this->m_blitConstantBuffer);
-    this->m_d3dContext->PSSetShader(ps ? ps : this->m_blitPs, nullptr, 0);
-    this->m_d3dContext->PSSetShaderResources(0, 1, &source);
-    this->m_d3dContext->PSSetSamplers(0, 1, &sampler);
-    this->m_d3dContext->Draw(3, 0);
-    this->m_d3dContext->PSSetShaderResources(0, 1, noSrvs);
-
-    if (ownRtv) {
-        rtv->Release();
-    }
-
-    // Back to the app's targets (also drops the SRV cache); the next IStateSync resends the rest.
-    this->IBindRenderTargets();
-    this->m_curVs = nullptr;
-    this->m_curPs = nullptr;
-    this->m_curLayoutKey = 0;
-    this->m_curTopology = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
-    this->m_stateDirty |= Dirty_Raster | Dirty_Blend | Dirty_Depth;
-    this->m_samplerDirty |= 1;
-    this->m_viewportDirty = 1;
-    this->m_scissorRectDirty = 1;
-
-    return 1;
-}
-
-// ---------------------------------------------------------------------------------------------------------------
-// Read back
-
-void CGxDeviceD3d11::DeviceReadPixels(CiRect& rect, TSGrowableArray<CImVector>& pixels) {
-    this->ClampRectToWindow(rect);
-
-    uint32_t width = rect.maxX - rect.minX;
-    uint32_t height = rect.maxY - rect.minY;
-    pixels.SetCount(width * height);
-
-    if (!this->m_context || !width || !height) {
-        return;
-    }
-
-    ID3D11Texture2D* source = this->IResolvedBackBuffer();
-
-    if (!source) {
-        return;
-    }
-
-    D3D11_TEXTURE2D_DESC desc;
-    source->GetDesc(&desc);
-    desc.Width = width;
-    desc.Height = height;
-    desc.MipLevels = 1;
-    desc.ArraySize = 1;
-    desc.SampleDesc.Count = 1;
-    desc.SampleDesc.Quality = 0;
-    desc.Usage = D3D11_USAGE_STAGING;
-    desc.BindFlags = 0;
-    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    desc.MiscFlags = 0;
-
-    ID3D11Texture2D* staging = nullptr;
-
-    if (FAILED(this->m_d3dDevice->CreateTexture2D(&desc, nullptr, &staging))) {
-        return;
-    }
-
-    D3D11_BOX box = { static_cast<UINT>(rect.minX), static_cast<UINT>(rect.minY), 0, static_cast<UINT>(rect.maxX), static_cast<UINT>(rect.maxY), 1 };
-    this->m_d3dContext->CopySubresourceRegion(staging, 0, 0, 0, 0, source, 0, &box);
-
-    D3D11_MAPPED_SUBRESOURCE mapped;
-
-    if (SUCCEEDED(this->m_d3dContext->Map(staging, 0, D3D11_MAP_READ, 0, &mapped))) {
-        const uint8_t* row = static_cast<const uint8_t*>(mapped.pData);
-        CImVector* dest = pixels.Ptr();
-
-        if (desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM) {
-            for (uint32_t y = 0; y < height; y++, row += mapped.RowPitch, dest += width) {
-                memcpy(dest, row, sizeof(CImVector) * width);
-            }
-        } else if (desc.Format == DXGI_FORMAT_R10G10B10A2_UNORM || desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM) {
-            // 10-bit (gxColorBits 30) and RGBA back buffers, to the BGRA CImVector the callers expect.
-            bool tenBit = desc.Format == DXGI_FORMAT_R10G10B10A2_UNORM;
-
-            for (uint32_t y = 0; y < height; y++, row += mapped.RowPitch, dest += width) {
-                const uint32_t* src = reinterpret_cast<const uint32_t*>(row);
-
-                for (uint32_t x = 0; x < width; x++) {
-                    uint32_t v = src[x];
-                    CImVector& out = dest[x];
-
-                    if (tenBit) {
-                        out.r = static_cast<uint8_t>((v & 0x3FF) >> 2);
-                        out.g = static_cast<uint8_t>(((v >> 10) & 0x3FF) >> 2);
-                        out.b = static_cast<uint8_t>(((v >> 20) & 0x3FF) >> 2);
-                        out.a = static_cast<uint8_t>((v >> 30) * 0x55);
-                    } else {
-                        out.r = static_cast<uint8_t>(v);
-                        out.g = static_cast<uint8_t>(v >> 8);
-                        out.b = static_cast<uint8_t>(v >> 16);
-                        out.a = static_cast<uint8_t>(v >> 24);
-                    }
-                }
-            }
-        } else {
-            memset(pixels.Ptr(), 0xFF, sizeof(CImVector) * width * height);
-        }
-
-        this->m_d3dContext->Unmap(staging, 0);
-    }
-
-    staging->Release();
-}
-
-// Works where 12340 D3D9 returns zeros (0x006A1950): copies the readable depth to a staging texture. Depth-stencil
-// resources can only be copied whole, so the full surface is copied and the rect cut out on the CPU.
-// TODO(phase 5): MSAA depth (needs the resolve from the depth contract); returns zeros for now.
-void CGxDeviceD3d11::DeviceReadDepths(CiRect& rect, TSGrowableArray<float>& depths) {
-    this->ClampRectToWindow(rect);
-
-    uint32_t width = rect.maxX - rect.minX;
-    uint32_t height = rect.maxY - rect.minY;
-    depths.SetCount(width * height);
-    memset(depths.Ptr(), 0, sizeof(float) * width * height);
-
-    if (!this->m_context || !this->m_depthTexture || !width || !height) {
-        return;
-    }
-
-    D3D11_TEXTURE2D_DESC desc;
-    this->m_depthTexture->GetDesc(&desc);
-
-    if (desc.SampleDesc.Count > 1) {
-        return;
-    }
-
-    desc.Usage = D3D11_USAGE_STAGING;
-    desc.BindFlags = 0;
-    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-
-    ID3D11Texture2D* staging = nullptr;
-
-    if (FAILED(this->m_d3dDevice->CreateTexture2D(&desc, nullptr, &staging))) {
-        return;
-    }
-
-    this->m_d3dContext->CopyResource(staging, this->m_depthTexture);
-
-    D3D11_MAPPED_SUBRESOURCE mapped;
-
-    if (SUCCEEDED(this->m_d3dContext->Map(staging, 0, D3D11_MAP_READ, 0, &mapped))) {
-        float* dest = depths.Ptr();
-
-        for (uint32_t y = 0; y < height && rect.minY + y < desc.Height; y++) {
-            const uint8_t* row = static_cast<const uint8_t*>(mapped.pData) + mapped.RowPitch * (rect.minY + y);
-
-            for (uint32_t x = 0; x < width && rect.minX + x < desc.Width; x++) {
-                uint32_t px = rect.minX + x;
-                float value;
-
-                switch (desc.Format) {
-                    case DXGI_FORMAT_R32_TYPELESS:
-                        value = reinterpret_cast<const float*>(row)[px];
-                        break;
-
-                    case DXGI_FORMAT_R16_TYPELESS:
-                        value = reinterpret_cast<const uint16_t*>(row)[px] / 65535.0f;
-                        break;
-
-                    default:
-                        value = (reinterpret_cast<const uint32_t*>(row)[px] & 0xFFFFFF) / 16777215.0f;
-                        break;
-                }
-
-                dest[y * width + x] = value;
-            }
-        }
-
-        this->m_d3dContext->Unmap(staging, 0);
-    }
-
-    staging->Release();
 }
 
 // ---------------------------------------------------------------------------------------------------------------

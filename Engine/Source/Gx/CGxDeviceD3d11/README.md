@@ -70,8 +70,9 @@ reuses the D3D9 mode list.
   and format table from shader-xlate. They are hashed on (elements, hash of the VS DXBC ISGN chunk). A failed create
   (VS reads an attribute the decl lacks) is cached as null and logged once per combination.
 - **Constants:**
-  - b0 per stage holds 256 float4. `IShaderConstantsFlush` maps a dirty stage with DISCARD and copies all 4 KB of
-    `s_shadowConstants`.
+  - b0 per stage holds 256 float4. `IShaderConstantsFlush` maps a dirty stage with DISCARD and copies the part of
+    the mirror the bound shader declares (`dcl_constantbuffer cb0[n]`, `DxbcCb0Bytes`); a shader declaring more than
+    was sent re-sends.
   - b1 (`m_devConstantBuffer`, 23 float4, bound to VS and PS) is rebuilt every draw and uploaded only when it changes:
     - alpha ref = AlphaRef/255 (0 = off);
     - user clip planes enabled by `GxRs_ClipPlaneMask`. Shader draws take them as given, which is clip space as on D3D9.

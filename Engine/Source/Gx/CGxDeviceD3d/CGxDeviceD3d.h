@@ -377,7 +377,6 @@ class CGxDeviceD3d : public CGxDevice {
     void IStateSetD3DDefaults();
     void ICreateSceneDepth();
     void IReleaseSceneDepth();
-    bool IResolveSceneDepthResz();
     void IStateSync();
     void IStateSyncClipPlanes();
     void IStateSyncEnables();
