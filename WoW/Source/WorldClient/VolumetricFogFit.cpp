@@ -63,10 +63,6 @@ struct WeightedLine {
     }
 };
 
-float Dot3(const float* a, const float* b) {
-    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-}
-
 void Normalize3(float* v) {
     const float length = std::sqrt(Dot3(v, v));
     if (length <= 0.0f) {
@@ -75,11 +71,6 @@ void Normalize3(float* v) {
     for (int i = 0; i < 3; ++i) {
         v[i] /= length;
     }
-}
-
-float SmoothStep(float edge0, float edge1, float x) {
-    const float t = std::clamp((x - edge0) / (edge1 - edge0), 0.0f, 1.0f);
-    return t * t * (3.0f - 2.0f * t);
 }
 
 // coa renderer.cpp:1479 (composite c96.x, c98.w). Glow is compensated only when the composite blended over a

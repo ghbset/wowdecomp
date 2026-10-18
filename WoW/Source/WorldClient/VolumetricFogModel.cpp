@@ -54,10 +54,6 @@ constexpr float kLuminanceWeights[3] = { 0.2126f, 0.7152f, 0.0722f };
 constexpr float kReferenceFarTarget = 200.0f;
 constexpr float kNoLimit = 1.0e9f;
 
-float SmoothStep(float e0, float e1, float x) {
-    float t = std::clamp((x - e0) / (e1 - e0), 0.0f, 1.0f);
-    return t * t * (3.0f - 2.0f * t);
-}
 
 void Scale(const float* rgb, float s, float* out) {
     out[0] = rgb[0] * s;
@@ -389,16 +385,20 @@ FogParams BuildFogParamsFrom(const FrameInputs& in, const Config& cfg, const Aut
     return p;
 }
 
-// coa renderer.cpp:1286-1289: Classic data where it covers the camera, derived layers elsewhere.
-FogParams BuildFogParams(const FrameInputs& in, const Config& cfg) {
-    AuthoredFog authored;
+LightParamsSelection SelectionFor(const FrameInputs& in) {
     LightParamsSelection selection;
     selection.stormBlend = std::isfinite(in.stormBlend) ? std::clamp(in.stormBlend, 0.0f, 1.0f) : 0.0f;
     if (in.screenEffectSlot >= 0 && in.screenEffectSlot < kLightParamsSlots) {
         selection.screenEffectSlot = in.screenEffectSlot;
     }
+    return selection;
+}
+
+// coa renderer.cpp:1286-1289: Classic data where it covers the camera, derived layers elsewhere.
+FogParams BuildFogParams(const FrameInputs& in, const Config& cfg) {
+    AuthoredFog authored;
     const bool hasAuthored =
-        cfg.dataMode == 1 && ResolveFogData(in.mapId, in.camPos, in.dayFraction, selection, authored);
+        cfg.dataMode == 1 && ResolveFogData(in.mapId, in.camPos, in.dayFraction, SelectionFor(in), authored);
     return BuildFogParamsFrom(in, cfg, hasAuthored ? &authored : nullptr);
 }
 
@@ -583,10 +583,6 @@ constexpr float kMinLightFalloffDenominator = 1.0f;
 constexpr float kLightBoundaryFadeRate = 4.0f;
 constexpr float kMinLightRadius = 1.0e-3f;
 constexpr int kMaxPieceCuts = 2 + 2 * kFogLayers + 2 * kMaxLocalLights;
-
-float Dot3(const float* a, const float* b) {
-    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-}
 
 float PhaseHG(float g, float cosAngle) {
     const float r = (1.0f - g) / std::sqrt(std::max(1.0f + g * g - 2.0f * g * cosAngle, kMinPhaseDenominator));

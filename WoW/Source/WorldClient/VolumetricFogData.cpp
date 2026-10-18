@@ -181,11 +181,6 @@ bool ContainsRange(size_t size, uint32_t first, uint32_t count) {
     return first <= size && count <= size - first;
 }
 
-void UnpackRgb(uint32_t rgb, float* out) {
-    out[0] = static_cast<float>((rgb >> 16) & 0xFF) / 255.0f;
-    out[1] = static_cast<float>((rgb >> 8) & 0xFF) / 255.0f;
-    out[2] = static_cast<float>(rgb & 0xFF) / 255.0f;
-}
 
 void AddScaled(AuthoredLayer& acc, const AuthoredLayer& l, float w) {
     for (int i = 0; i < 3; ++i) {
@@ -577,8 +572,8 @@ ConditionFog FogData::InterpolateKeys(const Params& params, float halfMinuteOfDa
     }
     float directA[3];
     float directB[3];
-    UnpackRgb(a.directRgb, directA);
-    UnpackRgb(b.directRgb, directB);
+    UnpackColor(a.directRgb, directA);
+    UnpackColor(b.directRgb, directB);
     for (int i = 0; i < 3; ++i) {
         fog.directLight[i] = directA[i] + (directB[i] - directA[i]) * fraction;
     }
@@ -657,9 +652,9 @@ ConditionFog FogData::BlendConditions(const ConditionFog& a, const ConditionFog&
 
 AuthoredLayer FogData::Unpack(const Layer& layer) {
     AuthoredLayer out = {};
-    UnpackRgb(layer.diffuseRgb, out.diffuse);
-    UnpackRgb(layer.emissiveRgb, out.emissive);
-    UnpackRgb(layer.shadowEmissiveRgb, out.shadowEmissive);
+    UnpackColor(layer.diffuseRgb, out.diffuse);
+    UnpackColor(layer.emissiveRgb, out.emissive);
+    UnpackColor(layer.shadowEmissiveRgb, out.shadowEmissive);
     out.start = layer.start;
     out.density = layer.density;
     out.shadowMultiplier = layer.shadowMultiplier;
@@ -693,7 +688,7 @@ AuthoredNoise FogData::UnpackNoise(const Layer& layer) {
         }
     }
     noise.presence = (layer.flags & kClientNoiseLayerFlag) && anyOctave ? 1.0f : 0.0f;
-    UnpackRgb(layer.noiseFadeRgb, noise.fade);
+    UnpackColor(layer.noiseFadeRgb, noise.fade);
     noise.unmappedToggle = layer.unmappedToggle;
     return noise;
 }
@@ -857,11 +852,31 @@ void FogData::CollectMapsWithFog() {
 FogData s_fogData;
 bool s_loadTried = false;
 
+// ResolveFogData's last answer: the composite, the water, the grade and the glow ask for the same inputs in one
+// frame (audit O4). Resolve is a pure function of the inputs and the loaded data; a load drops the entry.
+struct ResolveMemo {
+    bool valid = false;
+    int mapId;
+    float position[3];
+    float dayFraction;
+    LightParamsSelection selection;
+    bool result;
+    AuthoredFog out;
+};
+ResolveMemo s_resolveMemo;
+
 }  // namespace
 
 bool LoadFogDataFromMemory(const void* data, size_t size) {
     s_loadTried = true;
+    s_resolveMemo.valid = false;
     return s_fogData.Load(data, size);
+}
+
+void EnsureFogData() {
+    if (!s_loadTried) {
+        LoadFogData();  // missing or invalid: the derived layers are used (coa)
+    }
 }
 
 bool FogDataLoaded() {
@@ -888,10 +903,23 @@ bool LoadFogData() {
 
 bool ResolveFogData(int mapId, const float position[3], float dayFraction, const LightParamsSelection& selection,
                     AuthoredFog& out) {
-    if (!s_loadTried) {
-        LoadFogData();  // first frame that wants the data, if the driver did not load it already
+    EnsureFogData();
+    ResolveMemo& m = s_resolveMemo;
+    if (m.valid && m.mapId == mapId && std::memcmp(m.position, position, sizeof(m.position)) == 0
+        && std::memcmp(&m.dayFraction, &dayFraction, sizeof(dayFraction)) == 0
+        && std::memcmp(&m.selection.stormBlend, &selection.stormBlend, sizeof(float)) == 0
+        && m.selection.screenEffectSlot == selection.screenEffectSlot) {
+        out = m.out;
+        return m.result;
     }
-    return s_fogData.Resolve(mapId, position, dayFraction, selection, out);
+    m.result = s_fogData.Resolve(mapId, position, dayFraction, selection, out);
+    m.valid = true;
+    m.mapId = mapId;
+    std::memcpy(m.position, position, sizeof(m.position));
+    m.dayFraction = dayFraction;
+    m.selection = selection;
+    m.out = out;
+    return m.result;
 }
 
 }  // namespace VolumetricFog
