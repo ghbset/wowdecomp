@@ -122,6 +122,8 @@ float CShadowCache::s_shadowScale;
 
 // STATIC: 0x00D431D0
 C4Vector CShadowCache::s_pcfOffsets[8];
+C44Matrix CShadowCache::s_publishedView;
+uint32_t CShadowCache::s_publishStamp;
 
 // STATIC: 0x00D43250
 CShadowBand CShadowCache::s_extDynShadow;
@@ -741,6 +743,9 @@ void CShadowCache::PostUpdate() {
         CShadowCache::s_shadowMatrices[5 + 3 * i].z = matrix.c2;
         CShadowCache::s_shadowMatrices[5 + 3 * i].w = matrix.d2;
     }
+
+    GxXformView(CShadowCache::s_publishedView);   // not stock (S3): GetPublished
+    CShadowCache::s_publishStamp++;
 }
 
 // VERIFY: 6227ff43 manual
@@ -1127,5 +1132,35 @@ int32_t CShadowCache::Update(const C3Vector& pos, int32_t useCullFrustum) {
 // OFFSET: 0x00876360
 int32_t CShadowCache::Initialize() {
     CShadowCache::Init();
+    return 1;
+}
+
+// Not stock (SHADOW_PORT_PLAN S3): the bands the receivers use, for native consumers (wxl-shadow's WxlShadowApi
+// without the plugin). 0 while the bands do not exist (extShadowQuality <= 2), are being recreated, or the shadow
+// query was never set up; then a consumer leaves its sun unshadowed.
+int32_t CShadowCache::GetPublished(ShadowView& out) {
+    if (CShadowCache::s_recreateTextures || CShadowCache::s_shadowMode <= SHADOW_MEDIUM || !CShadowCache::s_matrixCallback
+        || !CShadowCache::s_publishStamp) {
+        return 0;
+    }
+
+    for (int32_t i = 0; i < 3; i++) {
+        CShadowBand& band = CShadowCache::s_extShadowBands[i];
+        CTexture* texture = band.m_textures[band.m_current];
+        out.map[i] = texture ? TextureGetGxTex(texture, 1, nullptr) : nullptr;
+
+        if (!out.map[i]) {
+            return 0;
+        }
+
+        for (int32_t row = 0; row < 3; row++) {
+            out.rows[i][row] = CShadowCache::s_shadowMatrices[3 + 3 * i + row];
+        }
+    }
+
+    out.view = CShadowCache::s_publishedView;
+    out.size = CShadowCache::s_shadowSize;
+    out.pcf = CShaderEffect::s_usePcfFiltering ? 1 : 0;
+    out.stamp = CShadowCache::s_publishStamp;
     return 1;
 }

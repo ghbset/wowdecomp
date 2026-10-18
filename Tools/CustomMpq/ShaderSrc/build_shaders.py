@@ -8,7 +8,7 @@ Per shader: HLSL, preprocessed by vkd3d-compiler -E ($VKD3D_PREFIX or <xlate>/..
 ps_3_0 bytecode by Microsoft's d3dcompiler_47 under wine (--fxc: the fxc.exe wrapper and DLL of
 /root/wxl-depth/tools, wxl-depth's tools/fxc.cpp; $WINEPREFIX, default /tmp/testprefix, as its bakeps.py) ->
 Shaders/Pixel/ps_3_0/<Name>.bls (D3D9, and the source of the Vulkan translation), then
-shader-xlate's `xlate.py one` -> Shaders/Pixel/ps_4_0/<Name>.bls (D3D11). The outputs are committed,
+shader-xlate's compile_one (imported; s5/s6 compare slots for the fog marches) -> Shaders/Pixel/ps_4_0/<Name>.bls (D3D11). The outputs are committed,
 so building the MPQ needs none of these tools.
 
 Why fxc and not vkd3d's own d3dbc backend (FarBlend's): vkd3d 2.1 allocates the VFog marches 40 to 98
@@ -82,14 +82,23 @@ for _q, _steps in ((1, 16), (2, 24), (3, 32)):
             _defs = {'STEPS': _steps, 'LOCAL_LIGHTS': _lights, 'VF_NOISE': _noise}
             _march_noise = (9, 10) if _noise else ()
             _composite_noise = ((9,) if _lights else (9, 10)) if _noise else ()    # VFogComposite.hlsl: L drops s10
-            SHADERS['VFogMarch' + _suffix] = ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, *_march_noise), 0,
+            # s5/s6: the engine's sun shadow bands 1 and 2 (vf_shadow.hlsli, shadowed sun in-scatter)
+            SHADERS['VFogMarch' + _suffix] = ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 5, 6, *_march_noise), 0,
                                               'VFogMarch', _defs)
             SHADERS['VFogComposite' + _suffix] = ('ps_3_0', TEXCOORD0, COLOR0,
-                                                  samplers(0, 1, 3, 4, *_composite_noise), 0, 'VFogComposite', _defs)
+                                                  samplers(0, 1, 3, 4, 5, 6, *_composite_noise), 0, 'VFogComposite',
+                                                  _defs)
             # MSAA sample split (coa vf_composite_split, vfogMsaaSplit): the same composite per silhouette side
             SHADERS['VFogCompositeSplit' + _suffix] = ('ps_3_0', TEXCOORD0, COLOR0,
-                                                       samplers(0, 1, 3, 4, *_composite_noise), 0, 'VFogComposite',
+                                                       samplers(0, 1, 3, 4, 5, 6, *_composite_noise), 0,
+                                                       'VFogComposite',
                                                        dict(_defs, SPLIT=1))
+
+
+# The shadow band slots of vf_shadow.hlsli: hardware-compare samplers in the SM4 pack (D3D11 binds a LESS_EQUAL
+# comparison sampler for a D24X8 target under hwPCF), like the stock _pcf families' (shader-xlate pcf_slots).
+def compare_slots(name):
+    return (5, 6) if name.startswith(('VFogMarch', 'VFogComposite')) else ()
 
 
 def bls(code, a, b, c, d):
@@ -124,9 +133,11 @@ def build(name, a, vk, env):
         f.write(bls(code, ra, rb, rc, rd))
     sm4 = os.path.join(OUT, kind, prof[:3] + '4_0', name + '.bls')
     os.makedirs(os.path.dirname(sm4), exist_ok=True)
-    r = subprocess.run([sys.executable, os.path.join(a.xlate, 'xlate.py'), 'one', d3d9, '-o', sm4], capture_output=True)
-    if r.returncode or not os.path.isfile(sm4) or b' ok ' not in r.stdout:
-        return '%s: xlate failed: %s %s' % (name, r.stdout.decode(errors='replace'), r.stderr.decode(errors='replace'))
+    st, why, dx = xlate.compile_one(code, None, compare_slots(name))[:3]
+    if st != 'ok':
+        return '%s: xlate failed: %s %s' % (name, st, why)
+    with open(sm4, 'wb') as f:
+        f.write(xlate.write_bls([(ra, rb, rc | rd << 16, dx)]))
     print('%s: %s (%d bytes), %s (%d bytes)' % (name, d3d9, os.path.getsize(d3d9), sm4, os.path.getsize(sm4)),
           flush=True)
     return None
@@ -139,6 +150,10 @@ def main(argv):
     ap.add_argument('-j', type=int, default=8, help='shaders compiled at once (each is one wine process)')
     ap.add_argument('names', nargs='*', help='only these shaders (default: all)')
     a = ap.parse_args(argv)
+    global xlate
+    sys.dont_write_bytecode = True
+    sys.path.insert(0, a.xlate)
+    import xlate
     vk = os.environ.get('VKD3D_PREFIX', os.path.join(a.xlate, '..', 'vkd3d-install'))
     env = dict(os.environ, LD_LIBRARY_PATH=os.path.join(vk, 'lib'))
     for name in a.names:

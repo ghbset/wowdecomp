@@ -4,6 +4,7 @@
 #include "vf_common.hlsli"
 #include "vf_density_variation.hlsli"
 #include "vf_authored_noise.hlsli"
+#include "vf_shadow.hlsli"
 
 #ifndef STEPS
 #define STEPS 24
@@ -232,7 +233,7 @@ float LayerVariation(FogLayer layer, MarchRay ray, float stepStart, float stepEn
 }
 
 void AccumulateLayer(FogLayer layer, int layerIndex, float noiseDensity, float2 rayTerms, float stepStart,
-                     float stepEnd, float jitter, MarchRay ray, float variation, inout float3 radiance,
+                     float stepEnd, float jitter, MarchRay ray, float variation, float sun, inout float3 radiance,
                      inout float opticalDepth)
 {
     float layerStart = max(stepStart, layer.start);
@@ -250,7 +251,8 @@ void AccumulateLayer(FogLayer layer, int layerIndex, float noiseDensity, float2 
     float3 emissive = lerp(layer.emissive, layer.shadowEmissive, shadow);
     [flatten] if (kSamplesAuthoredNoise && layerIndex < kNoisyLayers)
         emissive = lerp(emissive, LayerNoiseFade(layerIndex), 1 - noiseDensity);
-    radiance += (layer.diffuse * rayTerms.y + emissive) * layerOpticalDepth;
+    // sun = the sun's visibility here (vf_shadow.hlsli, 1 unshadowed): the sun term and, by vfogCanopy, the glow
+    radiance += (layer.diffuse * (rayTerms.y * sun) + emissive * CanopyScale(sun)) * layerOpticalDepth;
     opticalDepth += layerOpticalDepth;
 }
 
@@ -263,14 +265,15 @@ float3 StepSamplePosition(MarchRay ray, float stepStart, float stepEnd, float ji
 // step loop by the unrolled path only. The looped (lit) path takes them per layer: eight floats live across
 // the whole step loop would push the lit noisy march past ps_3_0's 32 temps.
 void AccumulateLayers(float4 noiseDensities, float4 rayTerms[2], float cosToLight, float skyUpward, float stepStart,
-                      float stepEnd, float jitter, MarchRay ray, inout float3 radiance, inout float opticalDepth)
+                      float stepEnd, float jitter, MarchRay ray, float sun, inout float3 radiance,
+                      inout float opticalDepth)
 {
     [branch] if (kUnrollsLayers)
     {
         float4 variations = LayerVariations(ray, stepStart, stepEnd, jitter);
         [unroll] for (int j = 0; j < kFogLayers; j++)
             AccumulateLayer(LoadConstantFogLayer(j), j, noiseDensities[j], float2(rayTerms[0][j], rayTerms[1][j]),
-                            stepStart, stepEnd, jitter, ray, variations[j], radiance, opticalDepth);
+                            stepStart, stepEnd, jitter, ray, variations[j], sun, radiance, opticalDepth);
     }
     else
     {
@@ -280,8 +283,8 @@ void AccumulateLayers(float4 noiseDensities, float4 rayTerms[2], float cosToLigh
             float4 selector = j == int4(0, 1, 2, 3) ? 1 : 0;
             float noiseDensity = kSamplesAuthoredNoise ? dot(noiseDensities, selector) : 1;
             AccumulateLayer(layer, j, noiseDensity, LayerRayTerms(layer, cosToLight, skyUpward), stepStart,
-                            stepEnd, jitter, ray, LayerVariation(layer, ray, stepStart, stepEnd, jitter), radiance,
-                            opticalDepth);
+                            stepEnd, jitter, ray, LayerVariation(layer, ray, stepStart, stepEnd, jitter), sun,
+                            radiance, opticalDepth);
         }
     }
 }
@@ -356,8 +359,10 @@ float4 IntegrateFogAtDepth(float2 pixel, float depth, float jitter)
         float stepEnd = marchLength * endFraction * endFraction;
         float3 stepRadiance = 0;
         float stepOpticalDepth = 0;
+        // Before the noise: its four densities are not live yet while the shadow taps run (ps_3_0 temps).
+        float sun = SunVisibility(ray.viewDirection * (stepStart + (stepEnd - stepStart) * jitter), jitter);
         float4 noiseDensities = LayerNoiseDensities(StepSamplePosition(ray, stepStart, stepEnd, jitter));
-        AccumulateLayers(noiseDensities, layerTerms, cosToLight, skyUpward, stepStart, stepEnd, jitter, ray,
+        AccumulateLayers(noiseDensities, layerTerms, cosToLight, skyUpward, stepStart, stepEnd, jitter, ray, sun,
                          stepRadiance, stepOpticalDepth);
         [branch] if (kMarchesLocalLights && lightCoverage.nextEndpoint <= stepStart)
             lightCoverage = ChordCoverageFrom(lightCoverage, viewDirection, stepStart, marchLength);

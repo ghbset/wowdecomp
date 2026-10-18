@@ -693,3 +693,38 @@ Published as `2026.10.18-vfog24`:
 
 custom.MPQ: 5121 files, vfog22's SPIR-V set unchanged (spirv-val clean); only the SM4 pack and
 `VideoOptionsAdvanced.lua` differ. Checks: `check_gpu_waves.py` PASS, GroundDecalCheck ok.
+
+## 2026-10-18: vfog25, shadowed sun shafts (shadow-s3)
+
+Published as `2026.10.18-vfog25` (SHADOW_PORT_PLAN S3). The fog's sun in-scatter is now tested against the engine's
+own cascaded sun shadow maps, so beams fall from the sun through the fog past trees, buildings and their M2/WMO
+casters: lit where the sun reaches, dark in shadow. The screen-space god rays (VFogRayMask/Blur/Composite,
+`vfogGodRays`) are unchanged and stay a separate option.
+
+- **Accessor** (`ShadowCache.cpp/.h`, appended): `CShadowCache::GetPublished(ShadowView&)` gives each band's front
+  `CGxTex*`, its receiver texgen rows (`s_shadowMatrices`, view space), the Gx view `PostUpdate` built them in
+  (`s_publishedView`, new), map size, pcf flag and a PostUpdate count. 0 while the bands do not exist
+  (`extShadowQuality` <= 2), are being recreated, or the shadow query never ran.
+- **vfog** (`VolumetricFogRenderer.cpp` `ShadowConstants`/`BindShadows`): bands 1 and 2 (160 / 640 yd) bound at
+  s5/s6, their rows composed with the fog's view (fog view -> camera-relative world -> PostUpdate's view) at
+  c56-c61, control at c62 (on, hardware compare, canopy, size). Set for the march and for the composite, whose
+  full-res edge re-march must agree. Unbound after each.
+- **Shader** (`vf_shadow.hlsli`, new; `vf_integrate.hlsli`): one visibility per march step at the step's jittered
+  sample point (IGN + frame, already the march's jitter), in band 1 where it covers the point (seam dithered by the
+  jitter), else band 2, else lit with a 10 % edge fade. Mapping as the stock receivers (Terrain2[_pcf]):
+  uv = q.xy * 0.5 + 0.5, lit when q.z <= stored. Visibility scales each layer's sun term (diffuse x phase) and, by
+  `vfogCanopy`, its emissive haze glow (1 - canopy x shadow), which darkens the fog under trees.
+- **Per backend**:
+  - Vulkan (R32F maps, the user's path): four point taps per step, comparisons interpolated bilinearly
+    (northlight `fogShadow`: interpolate comparisons, never depths). The SPIR-V is plain samples.
+  - D3D11 (hwPCF, D24X8): one `SampleCmpLevelZero` tap (bilinear PCF through the S1 comparison sampler).
+    `build_shaders.py` now translates the SM4 pack in-process with shader-xlate's `compile_one` and marks s5/s6 as
+    compare slots for VFogMarch*/VFogComposite*. With `hwPCF 0` (R32F) the shafts are off on D3D11 (the SM4 shader
+    would need a comparison sampler).
+  - D3D9 / 9Ex: hwPCF uses the hardware compare in `texldl` (one tap), R32F the four-tap path. Every variant fits
+    ps_3_0 (32 temps): the manual taps are accumulated one at a time and the visibility is one float through the
+    layer loop.
+- **CVars**: `vfogShadowedSun` (default 1), `vfogCanopy` (0..1, default 0.5); on Video Options > Advanced >
+  Light & God Rays. Shadows off or low: the sun is unshadowed, as before.
+- Not done: band 0 (40 yd) is not read (one sampler less, the near 40 yd are a small part of a fog ray); no
+  receiver-plane bias beyond the engine's own (the march points are in the air, not on surfaces).

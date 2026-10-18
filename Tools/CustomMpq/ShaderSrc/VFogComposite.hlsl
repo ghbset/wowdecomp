@@ -7,6 +7,12 @@
 #if LOCAL_LIGHTS
 #define VF_AUTHORED_NOISE 0
 #endif
+// The full-res fallback's shadowed sun (vf_shadow.hlsli): one tap, none in the lit noisy composite (ps_3_0 temps).
+#if LOCAL_LIGHTS && VF_NOISE
+#define VF_SHADOW_TAPS 0
+#else
+#define VF_SHADOW_TAPS 1
+#endif
 // SPLIT: VFogCompositeSplit{Q}[L][N], coa vf_composite_split.hlsl: drawn over the stencil-marked near (c80.x = 0) or
 // far (c80.x = 1) samples of an MSAA silhouette (VFogSilhouette), fogged at that side's depth; c80.y = 1: the pixel's own
 // side was already drawn by the plain composite, so it is clipped here.

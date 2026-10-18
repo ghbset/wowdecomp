@@ -69,6 +69,8 @@ struct CVars {
     CVar* noise;
     CVar* debug;
     CVar* godRays;
+    CVar* shadowedSun;
+    CVar* canopy;
     CVar* grade;
     CVar* gradeStrength;
     CVar* dither;
@@ -169,6 +171,8 @@ Config ReadConfig() {
     cfg.noiseAmount = std::clamp(CVarFloat(s_cvars.noise, cfg.noiseAmount), 0.0f, 1.0f);
     cfg.debugView = std::clamp(CVarInt(s_cvars.debug, 0), 0, 3);
     cfg.godRays = std::clamp(CVarFloat(s_cvars.godRays, cfg.godRays), 0.0f, 4.0f);   // coa config.cpp:75
+    cfg.shadowedSun = CVarInt(s_cvars.shadowedSun, 1) != 0;
+    cfg.canopy = std::clamp(CVarFloat(s_cvars.canopy, cfg.canopy), 0.0f, 1.0f);
     cfg.grade = CVarInt(s_cvars.grade, 0) != 0;
     cfg.gradeStrength = std::clamp(CVarFloat(s_cvars.gradeStrength, cfg.gradeStrength), 0.0f, 1.0f);   // coa config.cpp:52
     cfg.dither = std::clamp(CVarInt(s_cvars.dither, 1), 0, 2);
@@ -544,6 +548,8 @@ void RegisterCVars() {
     s_cvars.dither = CVar::Register("vfogDither", "Volumetric fog dither against banding on the 8-bit outputs (composite, grade, water, and the fog targets when 8 bit): 0 = off, 1 = +-1/255 triangular (default), 2 = twice that", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.hdrTargets = CVar::Register("vfogHdrTargets", "Volumetric fog: 1 = half-float fog and god ray targets where the device has them (default), 0 = 8 bit (bands)", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.godRays = CVar::Register("vfogGodRays", "Volumetric fog god rays from the bright sky around the sun: 0 = off, 1 = on (default), up to 4 = strength", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    s_cvars.shadowedSun = CVar::Register("vfogShadowedSun", "Volumetric fog sun shafts through the scene: the fog's sunlight is shadowed by trees, buildings and terrain casters (needs shadows above low): 1 = on (default), 0 = off", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    s_cvars.canopy = CVar::Register("vfogCanopy", "Volumetric fog darkening of the haze glow in sun shadow (under trees, beside buildings) while vfogShadowedSun is on, 0..1 (default 0.5)", 1, "0.5", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
 
     auto reg = [](const char* name, const char* help, const char* value) {
         return CVar::Register(name, help, 1, value, nullptr, CATEGORY_GRAPHICS, false, nullptr, false);

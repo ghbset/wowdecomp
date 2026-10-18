@@ -15,6 +15,7 @@
 #include "Engine/Source/Gx/Gx.h"
 #include "Engine/Source/Gxu/Gxu.h"
 #include "Engine/Source/Services/Texture.h"
+#include "Engine/Source/ShaderEffect/ShadowCache.h"
 #include "Engine/Source/Tempest/C2Vector.h"
 #include "Engine/Source/Tempest/C3Vector.h"
 #include "Engine/Source/Tempest/C44Matrix.h"
@@ -35,6 +36,8 @@ constexpr uint32_t kSampleSideRegister = 80;        // VFogCompositeSplit c80 (c
 constexpr uint32_t kDitherRegister = 79;            // vf_common cDither (x on, y frame)
 constexpr uint32_t kGradeRegister = 10;             // VFogGrade c10 strength, c11-c18 curve
 constexpr uint32_t kLocalLightRegister = 100;
+constexpr uint32_t kShadowRegister = 56;           // vf_shadow.hlsli c56-c61 band rows, c62 control
+constexpr int kShadowStage = 5;                     // vf_shadow.hlsli s5 band 1, s6 band 2
 constexpr uint32_t kSavedPixelRegisters = kLocalLightRegister + 4 * kMaxLocalLights;    // c0-c131
 static_assert(kSavedPixelRegisters == kPassSavedPixelRegisters, "SavedPassState holds the whole register range");
 constexpr float kDensityNoiseSize = 32.0f;          // coa noise_volume.h kDensityNoiseSize
@@ -693,7 +696,52 @@ struct FogFrame {
     uint32_t rayW, rayH;
     bool rays;
     CGxTex* copy;       // CompositePass: the scene copy (linear blend, rays, fade), or nullptr
+    float shadow[7][4]; // vf_shadow.hlsli c56-c62 (control x = 0: sun unshadowed)
+    CGxTex* shadowMaps[2];
 };
+
+// vfogShadowedSun (SHADOW_PORT_PLAN S3): bands 1 and 2 of the engine's sun shadow maps, their texgen rows composed
+// with this frame's view (vfog view space -> camera-relative world -> the view PostUpdate built them in, which
+// CShadowQuery::Update refreshes every world frame), so vf_shadow.hlsli reads them as the receivers do. Off
+// (control 0) without the bands (extShadowQuality <= 2) and on D3D11 with R32F maps (hwPCF 0): its SM4 marches
+// sample s5/s6 with SampleCmp, which needs the comparison sampler only depth maps get.
+void ShadowConstants(const Config& cfg, const float viewToWorld[16], FogFrame& f) {
+    std::memset(f.shadow, 0, sizeof(f.shadow));
+    f.shadowMaps[0] = f.shadowMaps[1] = nullptr;
+    ShadowView view;
+    if (!cfg.shadowedSun || !CShadowCache::GetPublished(view) || (!view.pcf && f.device->DeviceApi() == GxApi_D3d11)) {
+        return;
+    }
+
+    float rotation[16];
+    std::memcpy(rotation, viewToWorld, sizeof(rotation));
+    rotation[12] = rotation[13] = rotation[14] = 0.0f;   // camera relative, as the Gx view stack top
+    float a[16];
+    C44Matrix composed = ToMatrix(rotation) * view.view;
+    std::memcpy(a, &composed, sizeof(a));
+    for (int band = 0; band < 2; band++) {
+        for (int k = 0; k < 3; k++) {
+            const C4Vector& row = view.rows[band + 1][k];
+            const float col[4] = { row.x, row.y, row.z, row.w };
+            for (int i = 0; i < 4; i++) {
+                f.shadow[band * 3 + k][i] = a[i * 4] * col[0] + a[i * 4 + 1] * col[1] + a[i * 4 + 2] * col[2] + a[i * 4 + 3] * col[3];
+            }
+        }
+        f.shadowMaps[band] = view.map[band + 1];
+    }
+    f.shadow[6][0] = 1.0f;
+    f.shadow[6][1] = static_cast<float>(view.pcf);
+    f.shadow[6][2] = cfg.canopy;
+    f.shadow[6][3] = static_cast<float>(view.size);
+}
+
+void BindShadows(const FogFrame& f, bool on) {
+    if (on) {
+        SetPs(kShadowRegister, &f.shadow[0][0], 7);
+    }
+    Bind(kShadowStage, on ? f.shadowMaps[0] : nullptr);
+    Bind(kShadowStage + 1, on ? f.shadowMaps[1] : nullptr);
+}
 
 void MarchPass(const FogFrame& f) {
     // ---- march (coa :1369-1430) ----------------------------------------------------------------------
@@ -707,6 +755,7 @@ void MarchPass(const FogFrame& f) {
     Bind(0, f.depth);
     Bind(9, f.densityNoise);
     Bind(10, f.authoredNoise);
+    BindShadows(f, true);
 
     // wxl-vfog ec1c66b: the lit march only over the texels a light can reach, the unlit one over the rest.
     TexelRect litTexels = LocalLightTexels(f.lights, f.lightCount, f.proj, f.vpW, f.vpH, f.scale, f.lowW, f.lowH);
@@ -745,6 +794,7 @@ void MarchPass(const FogFrame& f) {
 
     Bind(9, nullptr);
     Bind(10, nullptr);
+    BindShadows(f, false);
 }
 
 // Returns the fog the composite reads: the march, or with vfogTemporal the filtered history.
@@ -807,6 +857,7 @@ void CompositePass(FogFrame& f, CGxTex* fogResult) {
     Bind(2, nullptr);
     Bind(3, sceneCopy);
     Bind(4, s_targets.march);
+    BindShadows(f, true);   // its full-res re-march at edges (vf_composite FogWithoutMatchingTap)
     f.device->RsSet(GxRs_PixelShader, f.composite);
     // VFogComposite reads TEXCOORD0 as uv across the world viewport (vf_common FullPixelFromUv: c0.xy + uv * c0.zw).
     if (f.splitComposite) {
@@ -842,6 +893,7 @@ void CompositePass(FogFrame& f, CGxTex* fogResult) {
         GxRsSet(GxRs_StencilTest, 0);
         Bind(0, f.depth);
     }
+    BindShadows(f, false);
 }
 
 void GodRayPass(const FogFrame& f) {
@@ -1144,6 +1196,7 @@ bool RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg,
     f.rayW = rayW; f.rayH = rayH;
     f.rays = rays;
     f.copy = nullptr;
+    ShadowConstants(cfg, viewToWorld, f);
 
     // ---- state: everything below is undone at the end --------------------------------------------
     static SavedPassState s_saved;     // 2 KB of constants, off the stack

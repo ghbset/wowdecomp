@@ -53,6 +53,18 @@ struct CShadowCacheQueryData {
     CShadowCacheQueryData();
 };
 
+// Not stock (SHADOW_PORT_PLAN S3): the cascade bands as the receivers saw them this frame, for consumers outside the
+// receiver shaders (vfog's shadowed sun). rows[i]: the texgen of band i, dp4 of a view-space position (w = 1) under
+// `view` gives (u', v', ref) with uv = u'v' * 0.5 + 0.5; lit where ref <= the stored depth (Terrain2[_pcf]).
+struct ShadowView {
+    CGxTex* map[3];          // the front map of each band (D24X8 with pcf, else R32F); borrowed
+    C4Vector rows[3][3];
+    C44Matrix view;          // the Gx view rows[] are relative to (PostUpdate's); a consumer composes its own view
+    uint32_t size;           // texels per side
+    int32_t pcf;             // 1 = hardware compare (depth maps), 0 = R32F compared in the shader
+    uint32_t stamp;          // PostUpdate count: unchanged since the consumer's last frame = not updated
+};
+
 class CShadowCache {
     public:
     static const float s_bandRadius[3];
@@ -75,6 +87,8 @@ class CShadowCache {
     static int32_t s_haveBandCentre;  // gfxShadowAnchor: the bands follow s_bandCentre instead of the viewer
     static C3Vector s_bandCentre;
     static C4Vector s_pcfOffsets[8];
+    static C44Matrix s_publishedView;  // S3: PostUpdate's Gx view, for GetPublished
+    static uint32_t s_publishStamp;
     static ShadowQueryCallback s_queryCallback;
     static int32_t s_recreateTextures;
     static ShadowRenderCallback s_renderCallback;
@@ -92,6 +106,7 @@ class CShadowCache {
     static void Destroy();
     static void GatherBands(CShadowCacheQueryData& data, const C3Vector& pos, CFrustum& frustum, int32_t useCullFrustum);
     static uint32_t GetMaxShadowMode();
+    static int32_t GetPublished(ShadowView& out);
     static EShadowMode GetShadowMode();
     static const char* GetShadowModeDesc(uint32_t mode);
     static uint32_t GetShadowValue();

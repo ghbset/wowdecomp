@@ -45,6 +45,8 @@ local PAGES = {
 	},
 	{ name = "Light & God Rays", parent = "Advanced", title = "Light & God Rays",
 	  { "vfogGodRays", "slider", "God rays", "Light shafts from the sky around the sun. 0 turns them off.", 0, 4, 0.25 },
+	  { "vfogShadowedSun", "check", "Sun shafts through the scene", "Sunlight in the fog is blocked by trees and buildings, so beams fall through the fog where the sun reaches. Needs shadows above Low." },
+	  { "vfogCanopy", "slider", "Fog darkening in shade", "How much darker the fog is under trees and beside buildings while sun shafts are on.", 0, 1, 0.05 },
 	  { "vfogSunScatter", "slider", "Sun glow in fog", "How much sun or moon light the fog catches.", 0, 10, 0.05 },
 	  { "vfogLocalLights", "check", "Lamps light the fog", "Torches, lamps and other nearby lights brighten the fog." },
 	  { "vfogLocalLightIntensity", "slider", "Lamp brightness", "How brightly nearby lights shine in the fog.", 0, 8, 0.1 },

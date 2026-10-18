@@ -59,6 +59,8 @@ struct Config {
     float temporal = 0.85f;         // vfogTemporal (0 = off, no jitter)
     int debugView = 0;              // vfogDebug 0..3
     float godRays = 1.0f;           // vfogGodRays: coa GodRays, 0 = off, 0..4 strength (default 1)
+    bool shadowedSun = true;        // vfogShadowedSun: the sun in-scatter tested against the sun shadow maps (S3)
+    float canopy = 0.5f;            // vfogCanopy: the haze glow kept in sun shadow, 1 - this (0 = glow unshadowed)
     bool grade = false;             // vfogGrade: coa ColorGrading > 0 (coa ships 0 = off)
     float gradeStrength = 1.0f;     // vfogGradeStrength: coa ColorGrading's 0..1 strength when on
     int dither = 1;                 // vfogDither: 0 off, 1 = +-1/255 triangular on the 8-bit outputs, 2 = twice that
