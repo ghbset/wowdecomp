@@ -709,7 +709,7 @@ namespace {
 // and drawn here as CM2Scene::Draw does, so the composite fogs them at their own depth.
 // vfogFadeStencil (wxl-vfog 0.6.3): the depth behind them is kept first and each batch writes its alpha into the stencil,
 // so RenderFog fogs the frame from behind them and lays their own fog over them by that alpha. Without it (no stencil,
-// MSAA, CVar 0) the background seen through a fading model takes the model's fog (doodad-fade-frame.md 5d).
+// CVar 0) the background seen through a fading model takes the model's fog (doodad-fade-frame.md 5d).
 bool FadingOpaqueElement(const M2Element& e) {
     if (e.m_type != 0 || !e.m_model || !e.m_batch || !(e.m_model->m_alpha < 0.99999f)) {
         return false;
@@ -754,7 +754,7 @@ void DrawFadingEarly() {
     // wxl-vfog MarkLateDepth: stencil = alpha * 255 where each batch passes the depth test; runs of one alpha per draw.
     GxSceneClear(GxBufferBit_Stencil, CImVector { 0, 0, 0, 0 });
     g_theGxDevicePtr->RsPush();
-    SetStencil(GxStencilCmp_Always, 0, 0xFF, 0xFF, GxStencilOp_Replace);
+    SetStencil(GxStencilCmp_Always, 0, 0xFF, kFadeBits, GxStencilOp_Replace);   // top three bits only: the split owns the rest
     const auto ref = [&](uint32_t index) { return static_cast<int32_t>(std::clamp(elements[index].m_alpha, 0.0f, 1.0f) * 255.0f + 0.5f); };
     for (size_t start = 0, end; start < early.size(); start = end) {
         const int32_t r = ref(early[start]);

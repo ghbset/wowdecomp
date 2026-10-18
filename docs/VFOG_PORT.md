@@ -83,9 +83,24 @@ The decisions:
   before the composite, the composite at the live depth goes over the marked pixels by their alpha in seven steps
   (stencil EQUAL `step << 5` under read mask 0xE0, `GxBlend_ConstantAlpha` with the Unk84 blend factor (2 step + 1) / 16,
   1 at step 7; step 0 left as is). So a model takes none of its own fog at first sight and all of it once solid.
-  Off (the old path: the background seen through a fading model takes the model's fog, 5d) with no stencil bits, MSAA
-  (wxl: the sample split would clear the marks), no blend-factor cap, no R32F target, the world drawn into a target, or
-  the CVar 0. Cost when fading models are in view: two full-size R32F depth copies, a scene copy, seven stencil-tested
+  **With MSAA (vfog16; wxl-vfog turns it off there)**: the stencil is split between the two users, fade alpha in the
+  top three bits (written with write mask 0xE0, read with 0xE0), the sample split in the low five (near 1, far 0x1F,
+  written and read with 0x1F). The marks are written per sample, as the stencil is. The fading pass clears the whole
+  stencil and writes only 0xE0, so the low bits are 0 already: the split skips its clear on such frames and keeps the
+  marks. The depth behind the models is `DeviceCopySceneDepth`, the single-sample depth every vfog pass reads (sample 0:
+  D3D9 RESZ, D3D11 `blit_depth_ms_ps`, Vulkan's SAMPLE_ZERO depth resolve), so it is the same depth the split's
+  silhouette and composites use. The split runs on the depth behind the models (the frame is fogged from behind them),
+  so a model's edge samples get the background's fog first. The overlay then uses the split's near-side shader (c80 = 0,
+  nothing clipped), which fogs a marked sample at the nearest depth of its 3x3, which is the model's own depth when
+  sample 0 is the background behind its edge. With the plain composite those edge samples would take the background's
+  fog (a halo). Deviation: a fading model's samples behind a nearer edge (a solid object in front of it) take that
+  object's depth in the overlay. Cost under MSAA: nothing beyond the non-MSAA cross-fade (the overlay's seven quads use
+  a 9-tap shader in place of the 1-tap one).
+  Off (the old path: the background seen through a fading model takes the model's fog, 5d) with no stencil bits, no
+  blend-factor cap, no R32F target, the world drawn into a target, or the CVar 0. The world-into-a-target guard (from
+  wxl, where another plugin can redirect the world) is never hit in this client: the world frame always draws to the
+  back buffer (only portraits and the shadow query set targets, and neither runs vfog), and `CopySceneBeforeFog` and
+  the stencil both belong to the back buffer, so it stays. Cost when fading models are in view: two full-size R32F depth copies, a scene copy, seven stencil-tested
   composite quads.
   It only runs with `vfogTransparent 1`. With 0, one composite after the world covers the models anyway.
 - **God rays** (vfog4): see section 2a. On by default (`vfogGodRays 1`, coa's "on" strength); coa ships `GodRays=0`.
@@ -358,7 +373,8 @@ STOREd (CreatePassMs), the stencil clear is `vkCmdClearAttachments` on that atta
 sample, so no sample shading, `gl_SampleID` or `sampler2DMS` is needed (the shaders read the sample-0 depth copy, as
 D3D11). The stencil state, colour mask and sample count are in the pipeline key already. Cost (as D3D): one stencil
 clear and four full-screen quads in place of one (the silhouette pass is depth/stencil only), plus one pipeline per
-split variant. Also off with no stencil bits, the world drawn into a target, or the CVar 0.
+split variant. Also off with no stencil bits, the world drawn into a target, or the CVar 0. It uses the low five
+stencil bits (near 1, far 0x1F) so the fading-model alpha in 0xE0 survives it (section 1, alpha cross-fade).
 Deviations: (1) the water is shaded from one depth sample per pixel (its class tags are per sample, section 2b). (2) No NVAPI (`NvAPI_D3D9_StretchRectEx`, coa's
 path on native Windows NVIDIA D3D9, where there is no RESZ): there D3D9 MSAA keeps the stock fog; D3D11 works. (3) No
 depth-copy self-test and no `Multisampling` setting: coa refuses MSAA unless its copy passes a test; here MSAA is never
@@ -371,8 +387,8 @@ and back alike; defaults off, ALWAYS, 0, 0xFF, 0xFF, KEEP), `GxBufferBit_Stencil
 the whole surface, D3D9 the viewport), `m_caps.m_stencilBits` (8 or 0). Implemented on Vulkan (pipeline key; D24S8 or
 D32S8 depth), D3D11 and D3D9/9Ex. vfog's helpers: `StencilAvailable()`, `SetStencil(...)` (VolumetricFogWater.h);
 `BeginPasses` turns the test off. Users: water tags (2b), fading-model alpha (1), MSAA sample split (above); each
-clears the stencil itself, they never overlap in a frame (water in the liquid pass, then fading, then the composite;
-fading is off with MSAA).
+clears the stencil itself, in order in a frame (water in the liquid pass, then fading, then the composite). Fading and
+the split share it (bits: fading 0xE0, split 0x1F; the split skips its clear after a fading pass, section 1).
 
 ## 4. Depth decode (shader, vf_common)
 
