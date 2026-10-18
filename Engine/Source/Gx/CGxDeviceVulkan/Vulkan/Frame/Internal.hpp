@@ -124,7 +124,8 @@ namespace gxvk::vk::frame::detail
     {
         VkImage       image    = VK_NULL_HANDLE;
         uint32_t      layer    = 0;
-        VkImageView   view     = VK_NULL_HANDLE;   ///< a 2D view of the layer, owned here
+        uint32_t      level    = 0;                ///< RTT MIPS: the mip level the view and framebuffer cover
+        VkImageView   view     = VK_NULL_HANDLE;   ///< a 2D view of the layer's level, owned here
         uint32_t      depth    = 0;                ///< index into the depth table
         VkFramebuffer fb       = VK_NULL_HANDLE;
         VkFormat      format   = VK_FORMAT_UNDEFINED;
@@ -137,6 +138,7 @@ namespace gxvk::vk::frame::detail
     {
         const texture::Image* image = nullptr;   ///< null: the scene
         uint32_t              layer = 0;
+        uint32_t              level = 0;         ///< RTT MIPS: the mip level drawn into
     };
 
     struct State

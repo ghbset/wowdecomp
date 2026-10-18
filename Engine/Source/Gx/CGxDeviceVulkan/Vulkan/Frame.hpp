@@ -35,8 +35,9 @@ namespace gxvk::vk::frame
      *
      * @param const texture::Image* image : an image made with COLOR_ATTACHMENT usage, or null
      * @param uint32 layer : the array layer (cube face) drawn into
+     * @param uint32 level : the mip level drawn into (RTT MIPS, Gx.h GxRenderTargetSet); 0 for a cube face
      */
-    void SetTarget(const texture::Image* image, uint32_t layer);
+    void SetTarget(const texture::Image* image, uint32_t layer, uint32_t level = 0);
 
     /// The scene image (B8G8R8A8, the swapchain's size), or null before the swapchain exists.
     const texture::Image* Scene();

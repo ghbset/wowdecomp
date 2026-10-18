@@ -114,6 +114,7 @@ struct WaterConfig {
     bool clientSplashes = false;    // vfogWaterClientSplashes (coa WaterClientSplashes)
     int debug = 0;              // vfogWaterDebug 0..6
     bool stencil = true;        // vfogWaterStencil: coa's stencil class tags (0 = the depth-difference mask)
+    bool gpuWaves = true;       // vfogWaterGpuWaves: the waves as GPU passes (0 = CPU worker threads)
 };
 
 struct WaterCVars {
@@ -130,6 +131,7 @@ struct WaterCVars {
     CVar* clientSplashes;
     CVar* debug;
     CVar* stencil;
+    CVar* gpuWaves;
 };
 
 WaterCVars s_cvars = {};
@@ -142,6 +144,7 @@ WaterConfig ReadWaterConfig() {
     WaterConfig c;
     c.enable = !s_cvars.enable || s_cvars.enable->m_intValue != 0;
     c.stencil = !s_cvars.stencil || s_cvars.stencil->m_intValue != 0;
+    c.gpuWaves = !s_cvars.gpuWaves || s_cvars.gpuWaves->m_intValue != 0;
     c.quality = std::clamp(s_cvars.quality ? s_cvars.quality->m_intValue : c.quality, 1, 3);
     c.waves = CVarFloat(s_cvars.waves, c.waves, 0.0f, 2.0f);
     c.wind = CVarFloat(s_cvars.wind, c.wind, 0.5f, 10.0f);
@@ -524,6 +527,7 @@ void DestroyTextures() {
     }
     DestroyTex(s_flat);
     RippleRelease();
+    WaveGpuRelease();
 }
 
 void __fastcall OnDeviceRestored() {
@@ -961,6 +965,13 @@ void ShadeClass(WaterClass waterClass, CGxTex* waterDepth = nullptr) {
     const bool waves = s_pass.water.waves > 0.0f;
     for (int k = 0; k < kWaterPresetTiles; k++) {
         const int32_t tile = preset->tiles[k];
+        CGxTex* gpuSlopes = nullptr;
+        CGxTex* gpuState = nullptr;
+        if (waves && WaveGpuMaps(tile, gpuSlopes, gpuState)) {
+            Bind(kFirstSurfaceStage + k, gpuSlopes);
+            Bind(kFirstFoamStateStage + k, gpuState);
+            continue;
+        }
         const WaveTextures* w = waves && tile >= 0 && tile < kWaterMaxTiles && s_waveTex[tile].resolution && WaveMapsOf(tile) ? &s_waveTex[tile] : nullptr;
         Bind(kFirstSurfaceStage + k, w ? w->slopes : FlatTex());
         Bind(kFirstFoamStateStage + k, w ? w->state : FlatTex());
@@ -1001,6 +1012,7 @@ void RegisterWaterCVars() {
     s_cvars.ripples = CVar::Register("vfogWaterRipples", "Modern water ripples and wakes where units move through or jump into water, 0..2 (0 = off)", 1, "0.5", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.clientSplashes = CVar::Register("vfogWaterClientSplashes", "Keep the client's own splash discs and wake trails on top of the modern water's ripples (0 = hidden while the ripples run)", 1, "0", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.stencil = CVar::Register("vfogWaterStencil", "Modern water: 1 = water classes tagged in the stencil as they draw and shaded after the liquid pass (coa), 0 = a depth copy per class marks its pixels", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    s_cvars.gpuWaves = CVar::Register("vfogWaterGpuWaves", "Modern water waves simulated on the GPU (1) or on CPU worker threads (0); the CPU also runs where the GPU lacks RGBA16F targets", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.debug = CVar::Register("vfogWaterDebug", "Modern water debug view: 0 off, 1 normal, 2 foam, 3 transmittance, 4 reflection, 5 class, 6 ripples", 1, "0", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
 }
 
@@ -1092,7 +1104,10 @@ void WaterFlushDone() {
     if (s_pass.begun && !s_pass.failed && s_pass.water.waves > 0.0f) {
         // coa PrepareWaves: the drawn classes' tiles, 128 at WaterQuality=1, else 256; amplitude scale = waves^2.
         const WaveSettings settings = { s_pass.water.quality == 1 ? kFftResolutionLow : kFftResolution, s_pass.water.wind, s_pass.water.waves * s_pass.water.waves };
-        WaveLaunch(s_data.tiles, s_pass.drawnTiles, settings, s_pass.seconds);
+        if (!s_pass.water.gpuWaves || !WaveGpuStep(s_data.tiles, s_pass.drawnTiles, settings, s_pass.seconds, s_pass.vp)) {
+            WaveGpuRelease();
+            WaveLaunch(s_data.tiles, s_pass.drawnTiles, settings, s_pass.seconds);
+        }
     }
     s_pass.armed = false;
 }
@@ -1108,6 +1123,7 @@ bool WaterHidesClientRipples() {
 
 void WaterShutdown() {
     WaveReset();
+    WaveGpuShutdown();
     RippleShutdown();
     if (g_theGxDevicePtr) {
         DestroyTextures();

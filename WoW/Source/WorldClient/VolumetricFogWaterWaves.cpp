@@ -2,6 +2,7 @@
 // tested against; shaders/vw_fft_*.hlsl) run on the CPU, because the Gx API has no RGBA16F/32F targets and no
 // render-to-mip. Same spectra, tile parameters, loop clock, Hermitian fold, 1/256^2 normalisation, surface stencil,
 // foam/oxygen persistence and box-filtered mips as coa; float instead of double. docs/VFOG_PORT.md "Water".
+// Now the fallback: VolumetricFogWaterWavesGpu.cpp runs the same maths on the GPU (vfogWaterGpuWaves, default 1).
 #include "WoW/Source/WorldClient/VolumetricFogWater.h"
 #include <algorithm>
 #include <atomic>
@@ -353,6 +354,55 @@ void Step(Tile& t, double seconds) {
 }
 
 }  // namespace
+
+void ComputeWaveSpectrum(const WaterFftTile& tile, const WaveSettings& settings, WaveSpectrum& out) {
+    Tile t;
+    t.params = tile;
+    t.settings = settings;
+    Configure(t);
+    const int n = settings.resolution;
+    const double length = std::max(1.0, std::floor(static_cast<double>(tile.size)));
+    const double texelsPerUnit = n / length;
+    out.loopPerRootRadius = static_cast<float>(kLoopSeconds * std::sqrt(kGravity / (kTwoPi * length)));
+    out.wide = std::min(std::max(static_cast<int>(std::lround(2.0 * texelsPerUnit)), 1), n / 2);
+    out.halfTexelsPerUnit = static_cast<float>(0.5 * texelsPerUnit);
+    out.inverseWide = static_cast<float>(texelsPerUnit / (2.0 * out.wide));
+    const float area = static_cast<float>(n) * n / (static_cast<float>(kReferenceResolution) * kReferenceResolution);
+    float peak = 0.0f;
+    for (size_t i = 0; i < t.h0Towards.size(); i++) {
+        peak = std::max({ peak, std::fabs(t.h0Towards[i].real()), std::fabs(t.h0Towards[i].imag()), std::fabs(t.h0AwayReal[i]) });
+    }
+    peak *= area;
+    out.exponent = peak > 16384.0f ? static_cast<int>(std::ceil(std::log2(peak / 16384.0f))) : 0;
+    const float scale = std::ldexp(area, -out.exponent);
+    // coa SplitForHalfStorage with the sign (vw_wave_common.hlsli SplitComplex): coarse = 9 significant bits, exact
+    // in half, into h0; the residual into h0Low.
+    auto split = [](float v, uint16_t& coarse, uint16_t& residual) {
+        const float a = std::fabs(v);
+        int e = 0;
+        std::frexp(std::max(a, 6.10351563e-5f), &e);
+        const float step = std::ldexp(1.0f, e - 1 - 9);
+        const float c = std::floor(a / step) * step;
+        const float r = std::min(a - c, step * 0.99951171875f);
+        coarse = Half(std::copysign(c, v));
+        residual = Half(std::copysign(r, v));
+    };
+    out.h0.resize(t.h0Towards.size());
+    out.h0Low.resize(t.h0Towards.size());
+    for (size_t i = 0; i < out.h0.size(); i++) {
+        const float values[3] = { t.h0Towards[i].real() * scale, t.h0Towards[i].imag() * scale, t.h0AwayReal[i] * scale };
+        uint64_t coarse = static_cast<uint64_t>(Half(std::fmod(t.loopFrequency[i], 2048.0f))) << 48;
+        uint64_t residual = 0;
+        for (int c = 0; c < 3; c++) {
+            uint16_t hi, lo;
+            split(values[c], hi, lo);
+            coarse |= static_cast<uint64_t>(hi) << (16 * c);
+            residual |= static_cast<uint64_t>(lo) << (16 * c);
+        }
+        out.h0[i] = coarse;
+        out.h0Low[i] = residual;
+    }
+}
 
 void WaveLaunch(const std::vector<WaterFftTile>& tiles, uint32_t tileMask, const WaveSettings& settings, double seconds) {
     if (s_busy.load() || !tileMask) {

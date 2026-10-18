@@ -4,6 +4,7 @@
 //   VolumetricFogWater.cpp       data (VFog\waterdata.bin), classification, CVars, the GPU passes, the liquid hooks
 //   VolumetricFogWaterWaves.cpp  the waves: coa's spectra and FFT on the CPU (water_spectrum.cpp reference path),
 //                                surface moments, foam and their mip chains, simulated on worker threads
+//   VolumetricFogWaterWavesGpu.cpp  the same waves as GPU passes (default; the CPU path is the fallback)
 #pragma once
 
 #include <cstdint>
@@ -55,6 +56,8 @@ struct WaterPreset {
 };
 static_assert(sizeof(WaterPreset) == 204, "waterdata.bin preset record");
 
+struct WorldViewport;
+
 // ---- waves (VolumetricFogWaterWaves.cpp) ----------------------------------------------------------------------
 // One tile's CPU maps, every mip level down to 1x1 back to back (level 0 first):
 //   slopes: Gr1616F texels (half slope x | half slope y << 16), the box-filtered mean slope (coa moments.xy);
@@ -80,6 +83,27 @@ void WaveLaunch(const std::vector<WaterFftTile>& tiles, uint32_t tileMask, const
 bool WaveCollect();
 const WaveMaps* WaveMapsOf(int tile);       // nullptr: not simulated yet with the current settings
 void WaveReset();                           // drops every map (settings or data changed)
+
+// GPU waves (VolumetricFogWaterWavesGpu.cpp, vfogWaterGpuWaves): the same simulation as off-screen passes,
+// VFogWave{Evolve,Fft,Surface,Mip,Pack}; docs/VFOG_PORT.md "Waves". WaveSpectrum = the CPU Configure's h0 for it:
+// RGBA16F texels (half towards.re | towards.im << 16 | away.re << 32 | loop frequency mod 2048 << 48), prescaled n^2 / 256^2 * 2^-exponent (the 1/2 per
+// butterfly stage gives the rest of the CPU's 1/256^2; the frequency is not) with exponent >= 0 keeping |texel| <= 16384.
+struct WaveSpectrum {
+    std::vector<uint64_t> h0;           // coarse halves (exact) + the frequency
+    std::vector<uint64_t> h0Low;        // residuals: h0 + h0Low = the CPU's float h0 to ~2^-20
+    int exponent = 0;
+    float loopPerRootRadius = 0.0f;
+    float halfTexelsPerUnit = 0.0f;     // the surface stencil, as Step
+    float inverseWide = 0.0f;
+    int wide = 1;
+};
+void ComputeWaveSpectrum(const WaterFftTile& tile, const WaveSettings& settings, WaveSpectrum& out);
+// One step of the tiles in `tileMask` into their GPU maps (restores vp's target and state). False: not available
+// (no RGBA16F targets, a shader missing, a target failed); the caller runs the CPU path.
+bool WaveGpuStep(const std::vector<WaterFftTile>& tiles, uint32_t tileMask, const WaveSettings& settings, double seconds, const WorldViewport& vp);
+bool WaveGpuMaps(int tile, CGxTex*& slopes, CGxTex*& state);    // false: no GPU maps for it (bind the CPU ones)
+void WaveGpuRelease();                      // drops the GPU textures (device restored, CPU path chosen)
+void WaveGpuShutdown();
 
 // ---- ripples and wakes (VolumetricFogWaterRipples.cpp) --------------------------------------------------------
 struct WorldViewport;

@@ -20,7 +20,8 @@ VFog (docs/VFOG_PORT.md section 5): VFogMarch{Q}[L][N] and VFogComposite{Q}[L][N
 16/24/32 as coa-vfog CMakeLists.txt), L = LOCAL_LIGHTS, N = VF_NOISE (density variation + authored noise),
 plus VFogTemporal and VFogHistoryDepth, and the god rays VFogRayMask, VFogRayBlur and VFogRayComposite.
 Grading (coa vp_grade): VFogGrade.
-Water (coa vw_*): VFogWaterDepth, VFogWaterMask, VFogWater{1,2,3} (SSR_STEPS 0/16/32) and VFogRippleStep.
+Water (coa vw_*): VFogWaterDepth, VFogWaterMask, VFogWater{1,2,3} (SSR_STEPS 0/16/32) and VFogRippleStep;
+GPU waves VFogWave{Evolve,Fft,Surface,Mip,Pack}.
 Fading models (wxl-vfog 0.6.3): VFogDepthCopy. MSAA sample split (coa): VFogSilhouette and VFogCompositeSplit{Q}[L][N].
 """
 import argparse
@@ -59,6 +60,12 @@ SHADERS = {
     'VFogWaterMask': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 1), 0, 'VFogWaterDepth', {'MASK': 1}),
     # water ripples and wakes (coa vw_ripple_step): one 30 Hz step of the Gr1616F height field
     'VFogRippleStep': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0), 0, 'VFogRippleStep', {}),
+    # GPU waves (coa vw_fft_*, docs "Waves"): evolve + fold, radix-2 stages, surface moments / foam, moment mips, pack
+    'VFogWaveEvolve': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 1), 0, 'VFogWaveEvolve', {}),
+    'VFogWaveFft': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0), 0, 'VFogWaveFft', {}),
+    'VFogWaveSurface': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 1, 2), 0, 'VFogWaveSurface', {}),
+    'VFogWaveMip': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0), 0, 'VFogWaveMip', {}),
+    'VFogWavePack': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 1), 0, 'VFogWavePack', {}),
     # fading models' cross-fade (wxl-vfog 0.6.3, vfogFadeStencil): the scene depth into R32F, behind and with them
     'VFogDepthCopy': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0), 0, 'VFogDepthCopy', {}),
     # MSAA silhouette samples marked in the stencil by an oDepth pass (coa vf_silhouette_mask; Vulkan: gl_FragDepth)

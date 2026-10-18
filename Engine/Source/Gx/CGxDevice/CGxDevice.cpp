@@ -275,8 +275,13 @@ void CGxDevice::DeviceSetRenderTarget(EGxBuffer buffer, CGxTex* texture, uint32_
     if (texture && (this->m_textureTarget[GxBuffers_Color].m_texture || this->m_textureTarget[GxBuffers_Depth].m_texture)) {
         this->m_curWindowRect.minY = 0.0f;
         this->m_curWindowRect.minX = 0.0f;
-        this->m_curWindowRect.maxY = static_cast<float>(texture->m_height);
-        this->m_curWindowRect.maxX = static_cast<float>(texture->m_width);
+        // RTT MIPS: not in 12340 (which always rendered level 0). A non-cube plane is the mip level, so the window
+        // is that level's extent; cube planes are faces at level 0.
+        uint32_t level = texture->m_target == GxTex_CubeMap ? 0 : plane;
+        uint32_t width = texture->m_width >> level;
+        uint32_t height = texture->m_height >> level;
+        this->m_curWindowRect.maxY = static_cast<float>(height ? height : 1);
+        this->m_curWindowRect.maxX = static_cast<float>(width ? width : 1);
     } else {
         this->m_curWindowRect = this->m_defWindowRect;
     }
@@ -1911,6 +1916,12 @@ void CGxDevice::ITexWHDStartEnd(CGxTex* texId, uint32_t& width, uint32_t& height
     }
 
     baseMip = this->m_baseMipLevel < mipCount - 1 ? this->m_baseMipLevel : mipCount - 1;
+
+    // RTT MIPS: not in 12340. A mipmapped render target (see GxRenderTargetSet) keeps its full size and chain: the
+    // texture quality base mip must not shrink what the caller renders into.
+    if (texId->m_flags.m_renderTarget && !texId->m_flags.m_forceMipTracking) {
+        baseMip = 0;
+    }
     width >>= baseMip;
     height >>= baseMip;
 

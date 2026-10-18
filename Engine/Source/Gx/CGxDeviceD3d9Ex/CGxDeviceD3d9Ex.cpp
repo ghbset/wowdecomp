@@ -3540,7 +3540,9 @@ void CGxDeviceD3d9Ex::DeviceSetRenderTarget(EGxBuffer buffer, CGxTex* texture, u
             if (texture->m_target == GxTex_CubeMap) {
                 static_cast<IDirect3DCubeTexture9*>(texture->m_apiSpecificData)->GetCubeMapSurface(s_faceTypes[plane], 0, reinterpret_cast<LPDIRECT3DSURFACE9*>(&target.m_apiSpecific));
             } else {
-                static_cast<IDirect3DTexture9*>(texture->m_apiSpecificData)->GetSurfaceLevel(0, reinterpret_cast<LPDIRECT3DSURFACE9*>(&target.m_apiSpecific));
+                // RTT MIPS: not in 12340 (level 0). plane = mip level (Gx.h GxRenderTargetSet); the auto-paired depth
+                // below stays sized for level 0, which D3D9 allows for a smaller colour surface.
+                static_cast<IDirect3DTexture9*>(texture->m_apiSpecificData)->GetSurfaceLevel(plane, reinterpret_cast<LPDIRECT3DSURFACE9*>(&target.m_apiSpecific));
             }
         }
     }

@@ -65,6 +65,11 @@ void GxXformSet(EGxXform xf, const C44Matrix& matrix);
 char* GxBufLock(CGxBuf* buf);
 void GxBufUnlock(CGxBuf* buf, uint32_t size);
 void GxBufDestroy(CGxBuf* buf);
+// plane: cube map face (level 0), or for any other texture the mip level rendered into (RTT MIPS, not in 12340,
+// which always bound level 0). A render target gets a full mip chain down to 1x1, with no hardware auto-generation,
+// when its CGxTexFlags have m_renderTarget = 1, a mip filter (m_filter >= GxTex_NearestMipNearest), m_generateMipMaps = 0
+// and m_forceMipTracking = 0 (ITexWHDStartEnd); the caller renders every level itself. The window/viewport is the
+// bound level's extent and the auto-paired depth is sized for it; bind no depth texture for a level > 0.
 void GxRenderTargetSet(EGxBuffer buffer, CGxTex* texture, uint32_t plane);
 void GxBufData(CGxBuf* buf, const void* data, uint32_t size, uint32_t offset);
 CGxBuf* GxBufStream(EGxPoolTarget target, uint32_t itemSize, uint32_t itemCount);

@@ -310,14 +310,15 @@ namespace gxvk::vk::frame::detail
 
 namespace gxvk::vk::frame
 {
-    void SetTarget(const texture::Image* image, uint32_t layer)
+    void SetTarget(const texture::Image* image, uint32_t layer, uint32_t level)
     {
-        if (s.target.image == image && s.target.layer == layer) return;
+        if (s.target.image == image && s.target.layer == layer && s.target.level == level) return;
         // A clear asked for the old target before its pass opened is applied to it first.
         if (s.open && (s.clearColourPending || s.clearDepthPending)) BeginPass();
         if (s.open) EndPass();
         s.target.image       = image;
         s.target.layer       = layer;
+        s.target.level       = level;
         s.clearColourPending = false;
         s.clearDepthPending  = false;
     }

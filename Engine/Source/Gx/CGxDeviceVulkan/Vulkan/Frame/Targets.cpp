@@ -405,7 +405,7 @@ namespace gxvk::vk::frame::detail
     {
         const VkImage image = t.image ? t.image->handle : s.scene.handle;
         for (uint32_t i = 0; i < s.fbCount; ++i)
-            if (s.fbs[i].image == image && s.fbs[i].layer == t.layer) return i;
+            if (s.fbs[i].image == image && s.fbs[i].layer == t.layer && s.fbs[i].level == t.level) return i;
 
         const uint32_t depth = DepthFor(extent);
         if (depth == UINT32_MAX) return UINT32_MAX;
@@ -435,7 +435,7 @@ namespace gxvk::vk::frame::detail
         view.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
         view.format                          = format;
         view.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
-        view.subresourceRange.baseMipLevel   = 0;
+        view.subresourceRange.baseMipLevel   = t.level;
         view.subresourceRange.levelCount     = 1;
         view.subresourceRange.baseArrayLayer = t.layer;
         view.subresourceRange.layerCount     = 1;
@@ -466,6 +466,7 @@ namespace gxvk::vk::frame::detail
         }
         fb.image    = image;
         fb.layer    = t.layer;
+        fb.level    = t.level;
         fb.depth    = depth;
         fb.format   = format;
         fb.extent   = extent;
@@ -482,10 +483,15 @@ namespace gxvk::vk::frame::detail
     {
         if (t.image)
         {
-            if (t.image->handle == VK_NULL_HANDLE || t.layer >= t.image->layers) return false;
+            if (t.image->handle == VK_NULL_HANDLE || t.layer >= t.image->layers || t.level >= t.image->levels) return false;
             image  = t.image;
             format = t.image->format;
-            extent = t.image->extent;
+            // RTT MIPS: the level's extent, so the framebuffer, render area, whole-target clear and paired depth
+            // buffer (DepthFor) are that level's size. The pass's load op (a whole clear) and its finalLayout touch
+            // only this level's view; every level stays SHADER_READ_ONLY between passes, which is the one layout the
+            // image tracks (RecordClear moves a new target's whole chain there in the pre-pass).
+            extent.width  = t.image->extent.width >> t.level ? t.image->extent.width >> t.level : 1u;
+            extent.height = t.image->extent.height >> t.level ? t.image->extent.height >> t.level : 1u;
             return true;
         }
         const context::Handles* h = context::Get();

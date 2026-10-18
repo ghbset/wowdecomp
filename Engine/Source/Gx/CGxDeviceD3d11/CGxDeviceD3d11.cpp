@@ -1212,6 +1212,10 @@ void CGxDeviceD3d11::IBindRenderTargets() {
 
         if (!this->m_textureTarget[GxBuffers_Depth].m_apiSpecific) {
             CGxTex* color = this->m_textureTarget[GxBuffers_Color].m_texture;
+            // RTT MIPS: the bound level's extent (CGxDevice::DeviceSetRenderTarget), D3D11 wants an exact-size DSV.
+            uint32_t level = color->m_target == GxTex_CubeMap ? 0 : this->m_textureTarget[GxBuffers_Color].m_plane;
+            uint32_t width = color->m_width >> level ? color->m_width >> level : 1;
+            uint32_t height = color->m_height >> level ? color->m_height >> level : 1;
             int slot = -1;
 
             // One scratch depth per target size, so FFX and vfog ping-pong no longer recreates one every frame.
@@ -1221,7 +1225,7 @@ void CGxDeviceD3d11::IBindRenderTargets() {
                 if (this->m_rtDepthTexture[i]) {
                     this->m_rtDepthTexture[i]->GetDesc(&desc);
 
-                    if (desc.Width == color->m_width && desc.Height == color->m_height) {
+                    if (desc.Width == width && desc.Height == height) {
                         slot = i;
                     }
                 }
@@ -1231,7 +1235,7 @@ void CGxDeviceD3d11::IBindRenderTargets() {
                 slot = static_cast<int>(this->m_rtDepthNext++ % kRtDepthSlots);
                 SafeRelease(this->m_rtDepthDsv[slot]);
                 SafeRelease(this->m_rtDepthTexture[slot]);
-                this->ICreateDepth(color->m_width, color->m_height, 1, this->m_rtDepthTexture[slot], this->m_rtDepthDsv[slot], nullptr);
+                this->ICreateDepth(width, height, 1, this->m_rtDepthTexture[slot], this->m_rtDepthDsv[slot], nullptr);
             }
 
             dsv = this->m_rtDepthDsv[slot];
@@ -1316,7 +1320,7 @@ void CGxDeviceD3d11::DeviceSetRenderTarget(EGxBuffer buffer, CGxTex* texture, ui
 
         if (!texture->m_needsCreation && api) {
             if (buffer == GxBuffers_Color) {
-                target.m_apiSpecific = api->m_rtv[plane < 6 ? plane : 0];
+                target.m_apiSpecific = api->m_rtv[plane < 16 ? plane : 0];
             } else {
                 target.m_apiSpecific = api->m_dsv;
             }
@@ -3217,7 +3221,7 @@ void CGxDeviceD3d11::ITexRelease(CGxTex* texId) {
         return;
     }
 
-    for (uint32_t i = 0; i < 6; i++) {
+    for (uint32_t i = 0; i < 16; i++) {
         SafeRelease(api->m_rtv[i]);
     }
 
@@ -3402,7 +3406,10 @@ void CGxDeviceD3d11::ITexCreate(CGxTex* texId) {
         dsvDesc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
         this->m_d3dDevice->CreateDepthStencilView(texture, &dsvDesc, &api->m_dsv);
     } else if (renderTarget) {
-        for (uint32_t face = 0; face < desc.ArraySize; face++) {
+        // RTT MIPS: a 2D target gets one RTV per mip level (slot = level), a cube one per face at level 0.
+        uint32_t views = cube ? desc.ArraySize : (desc.MipLevels < 16 ? desc.MipLevels : 16);
+
+        for (uint32_t face = 0; face < views; face++) {
             D3D11_RENDER_TARGET_VIEW_DESC rtvDesc;
             memset(&rtvDesc, 0, sizeof(rtvDesc));
             rtvDesc.Format = desc.Format;
@@ -3413,6 +3420,7 @@ void CGxDeviceD3d11::ITexCreate(CGxTex* texId) {
                 rtvDesc.Texture2DArray.ArraySize = 1;
             } else {
                 rtvDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+                rtvDesc.Texture2D.MipSlice = face;
             }
 
             this->m_d3dDevice->CreateRenderTargetView(texture, &rtvDesc, &api->m_rtv[face]);

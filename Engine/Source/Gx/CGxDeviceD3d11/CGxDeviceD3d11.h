@@ -28,7 +28,7 @@ class CGxDeviceD3d11 : public CGxDevice {
     struct TexApi {
         ID3D11Texture2D* m_texture;
         ID3D11ShaderResourceView* m_srv;
-        ID3D11RenderTargetView* m_rtv[6];
+        ID3D11RenderTargetView* m_rtv[16];   // cube: per face (level 0); else per mip level (RTT MIPS, Gx.h GxRenderTargetSet)
         ID3D11DepthStencilView* m_dsv;
         uint32_t m_levels;
         // What ITexDesc asked for at creation: a CGxTex whose flags have since changed (TexSetFlags, the texture

@@ -102,7 +102,8 @@ void CGxDeviceVulkan::DeviceSetRenderTarget(EGxBuffer buffer, CGxTex* texture, u
     uint32_t layer = 0;
 
     if (colour.m_texture && this->ITargetImage(colour.m_texture, image, colour.m_plane, layer)) {
-        frame::SetTarget(image, layer);
+        // RTT MIPS: a non-cube plane is the mip level (Gx.h GxRenderTargetSet).
+        frame::SetTarget(image, layer, colour.m_texture->m_target == GxTex_CubeMap ? 0u : colour.m_plane);
         this->ITexTouch(colour.m_texture);
     } else {
         frame::SetTarget(nullptr, 0);

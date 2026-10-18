@@ -210,7 +210,47 @@ pass. Here:
    and leaves no mark.
 Cost per frame with water: 1 colour copy + (1 + classes) depth copies and linearisations + one shading pass per class.
 
-**Waves (deviation: CPU).** The Gx API has no RGBA16F/32F targets and no render-to-mip, so coa's GPU FFT runs on
+**Waves on the GPU (2026-10-18, `vfogWaterGpuWaves` 1, default; the CPU path below is the fallback).** With
+`GxTex_Abgr16161616F` targets and render-to-mip (`GxRenderTargetSet(GxBuffers_Color, tex, level)`) coa's GPU FFT runs
+as Gx passes (`VolumetricFogWaterWavesGpu.cpp`, shaders `VFogWave{Evolve,Fft,Surface,Mip,Pack}` + `vw_wave_common.hlsli`),
+as a speed change: same maths as the CPU path, same output maps, so `vw_surface.hlsli` / `VFogWater*` are unchanged.
+Deviation from coa (RGBA32F there, MRT): Gx has RGBA16F only and no MRT, so
+- every 16F texel that must carry float precision holds one value split coarse + residual (coa SplitForHalfStorage,
+  signed: 9 significant bits exact in half + the remainder, ~2^-20 relative); an FFT texel is one complex
+  (re hi, im hi, re lo, im lo), so heightAndX and alongY run as two chains;
+- each butterfly stage halves (never grows past h0, no overflow) and h0 is prescaled n^2/256^2 * 2^-e on upload
+  (e >= 0 keeps |texel| <= 16384, 0..4 for the Forever tiles at wind 10 / waves 2), the surface pass multiplies by 2^e:
+  together the CPU's 1/256^2 at 128 and 256;
+- h0 = CPU `Configure` output (`ComputeWaveSpectrum`), uploaded once per configuration with `GxTexUpdate` as two RGBA16F
+  textures (coarse, residual); h0.w = the CPU's integer loop frequency mod 2048 (exact in half), the shader adds the
+  multiple of 2048 nearest its own sqrt estimate, so a GPU sqrt an ulp off cannot flip the CPU's floor(x + 0.5)
+  (a few hundred modes per tile sit within 2e-3 of that tie); twiddles in the shader (sincos of [-pi, pi));
+- the moments mip chain keeps the central variance (mean of the children's variance + their means' spread) instead of
+  E[s^2], so half storage never cancels E[s^2] - |E[s]|^2.
+Per tile per frame (n = 256 / 128): 2 x (evolve+fold into bit-reversed order + 2 log2 n radix-2 stages, ping-pong over
+3 shared RGBA16F n^2 targets) -> surface (moments level 0) + foam step (per-tile RGBA16F ping-pong, split storage, dt
+clamped 0.1 s, cleared on reconfigure) -> log2 n box-filter passes into per-level scratch RGBA16F targets -> per level
+one pack into the tile's final slopes (RGBA16F, .xy) and one into its state (Argb8888, the CPU encoding: R sqrt(var/0.25),
+G sqrt(wide^2), B foam, A oxygen at level 0, 0 above) by render-to-mip (wrap, trilinear). 62 draws at 256, 54 at 128.
+The step runs where the CPU launch was (`WaterFlushDone`, after the last class), inside BeginPasses/EndPasses with the
+world target restored, every frame (the CPU updates at its worker rate). Fallback to the CPU path, sticky: no
+`m_rttAbgr16161616F` (caps 0x114) or Argb8888 target cap, a VFogWave shader missing from the MPQ, or a target/texture
+that fails to create; `vfogWaterGpuWaves 0` forces the CPU (the GPU textures are dropped).
+**Check** (`python3 Tools/CustomMpq/check_gpu_waves.py`, numpy): the CPU path (float radix-2 replica of Step) against
+the shader maths with a float16 store at every target write, all 7 waterdata.bin tiles, 128 and 256, defaults (wind 2,
+waves 1) and the extremes (wind 10, waves 2), 12 steps of 70 ms at t = 3611 s (late loop phase, foam built). Measured:
+slopes max 9.8e-4 (1 half ulp at |slope| 1..2; 2.4e-4 at the defaults), RMS 2e-6..6e-5; state R/G max 1 unit (an
+8-bit rounding flip), RMS <= 0.035 (defaults) / 0.10 (extremes); foam/oxygen max 1 unit (defaults), 4 at the extremes,
+RMS <= 0.04, plus 6 texel-steps of tile 46 at 256/extremes where dt * oxygen rate (200/s * 70 ms) > 2 makes FoamStep a
+2-cycle at saturation (1 <-> 0.951) that flickers on the CPU as well and rounding picks the other phase.
+Without the coarse/residual split (plain 16F FFT texels) the same check gave slopes 1.7e-2 and oxygen 40 units off.
+**Expected savings**: the CPU path costs ~10 ms of worker time per 256 step per tile (threads, so the waves update at
+~50-100 Hz) plus, per update, `GxTexUpdate` of 2 x 256^2 texels x 4 B with mips (~0.7 MB) per tile on the main thread.
+GPU: ~2.6 M pixels per 256 tile per frame (34 n^2 FFT passes, 2-4 point fetches of 8 B each), ~80 MB of traffic:
+~0.2-0.3 ms per tile on a 300-500 GB/s card, so ~0.3-1 ms for the 1-4 drawn tiles, no CPU work besides 62 draws per
+tile, no uploads after configuration, and the waves advance every frame. (Estimate, not measured in game.)
+
+**Waves on the CPU (fallback; the original deviation).** The Gx API had no RGBA16F/32F targets and no render-to-mip, so coa's GPU FFT runs on
 the CPU instead: coa's own CPU reference path (water_spectrum.cpp: WaterReferenceH0/Modes/FoldModes/InverseTransform/
 AssembleDisplacement/Surface) in float, same spectra, Forever tile parameters, 1024 s loop clock, 1/256^2
 normalisation, surface stencil, Jacobian foam/oxygen persistence (FoamStep, dt clamped to 0.1 s) and box-filtered
@@ -236,7 +276,7 @@ Missing maps bind an 8x8 zero texture (coa m_flat).
 shade_low/mid/high (SSR_STEPS 0/16/32); variant = quality - 1, or 1 (sky only) when vfogWaterReflections is 0.
 The Vulkan translator gained `texldd` (tex2Dgrad -> textureGrad).
 
-**Deviations from coa**: CPU waves (above); scene copies clamp instead of mirror addressing (the Gx API has no
+**Deviations from coa**: 16F GPU waves with split storage, or CPU waves (above); scene copies clamp instead of mirror addressing (the Gx API has no
 mirror); no packed-RGBA8 depth fallback (needs R32F targets); MSAA water is shaded from one depth sample per pixel (with the
 stencil scheme the class tags and the shading test are per sample, as coa; with the mask scheme the mask is per pixel);
 classes are shaded one after another inside the liquid pass instead of all after it (same pixels, same inputs:
@@ -509,7 +549,7 @@ Water (coa CoAVolFog.ini Water* defaults and ranges): `vfogWater` (1), `vfogWate
 `vfogWaterWaves` (1, 0..2), `vfogWaterWind` (2, 0.5..10), `vfogWaterFoam` (1, 0..2), `vfogWaterReflections` (1, 0..2),
 `vfogWaterSpecular` (1, 0..4), `vfogWaterClarity` (1, 0.25..4), `vfogWaterZoneColors` (0.5, 0..1), 
 `vfogWaterRipples` (0.5, 0..2; 0 = off: no simulation and no reading of the units; coa WaterRipples),
-`vfogWaterStencil` (1 = coa's stencil class tags, 0 = the depth-difference mask; either way the mask without
+`vfogWaterGpuWaves` (1 = the GPU waves, 0 = the CPU path; new), `vfogWaterStencil` (1 = coa's stencil class tags, 0 = the depth-difference mask; either way the mask without
 stencil bits), `vfogWaterClientSplashes` (0 = the client's splash discs and wake trails hidden while the ripples run, 1 = kept; coa
 WaterClientSplashes), `vfogWaterDebug` (0; 1 normal, 2 foam, 3 transmittance, 4 reflection, 5 class, 6 ripples).
 The defaults are coa CoAVolFog.ini plus the user's wxl-vfog look: Ambient 1.75, ClassicExposure 0.5,
