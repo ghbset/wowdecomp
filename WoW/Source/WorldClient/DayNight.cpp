@@ -78,6 +78,10 @@ DayNight::DNClouds DayNight::g_clouds;
 // STATIC: 0x00D38E28
 DayNight::DNPlanets DayNight::g_planets;
 
+// Not stock: toward the sun and moon discs (unit), as SetPlanets placed them, for CShadowQuery (gfxSunShadows).
+C3Vector DayNight::g_sunToward(0.0f, 0.0f, 1.0f);
+C3Vector DayNight::g_moonToward(0.0f, 0.0f, -1.0f);
+
 // STATIC: 0x00D38EA8
 DayNight::DNSunGlare DayNight::g_sunGlare;
 
@@ -1208,6 +1212,7 @@ void DayNight::SetPlanets() {
     planets.m_sun.m_position.x = x * scale + info.m_cameraPos.x;
     planets.m_sun.m_position.y = y * scale + info.m_cameraPos.y;
     planets.m_sun.m_position.z = cosTheta * scale + info.m_cameraPos.z;
+    DayNight::g_sunToward = C3Vector(x, y, cosTheta);   // not stock (gfxSunShadows): before the camera is added
     planets.m_sun.m_scale = DayNight::InterpTable(s_sunScale, 4, info.m_dayProgression) * planets.m_sun.m_baseScale;
     DayNight::g_sunGlare.m_position = planets.m_sun.m_position;
 
@@ -1223,6 +1228,7 @@ void DayNight::SetPlanets() {
     planets.m_moon.m_position.x = x * scale + info.m_cameraPos.x;
     planets.m_moon.m_position.y = y * scale + info.m_cameraPos.y;
     planets.m_moon.m_position.z = cosTheta * scale + info.m_cameraPos.z;
+    DayNight::g_moonToward = C3Vector(x, y, cosTheta);  // not stock (gfxSunShadows)
     planets.m_moon.m_scale = DayNight::InterpTable(s_moonScale, 4, info.m_dayProgression) * planets.m_moon.m_baseScale;
     DayNight::g_moonGlare.m_scaleMin = planets.m_moon.m_scale;
     DayNight::g_moonGlare.m_position = planets.m_moon.m_position;

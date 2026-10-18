@@ -69,6 +69,11 @@ class CShadowCache {
     static CTexture* s_intDynShadow;
     static ShadowMatrixCallback s_matrixCallback;
     static int32_t s_needsRebuild;
+    // Not stock (CShadowQuery sets these each frame; see ShadowCache.cpp):
+    static uint32_t s_bandRedraw;     // gfxSunShadows: bit i = redraw cached band i once, wherever the camera is
+    static int32_t s_texelSnap;       // gfxShadowSnap: map centres snapped to whole texels in light space
+    static int32_t s_haveBandCentre;  // gfxShadowAnchor: the bands follow s_bandCentre instead of the viewer
+    static C3Vector s_bandCentre;
     static C4Vector s_pcfOffsets[8];
     static ShadowQueryCallback s_queryCallback;
     static int32_t s_recreateTextures;

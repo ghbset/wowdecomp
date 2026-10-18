@@ -6,6 +6,7 @@
 #include "Engine/Source/Gx/CGxDevice/CGxDevice.h"
 #include "Engine/Source/Gx/CGxTexFlags.h"
 #include "Engine/Source/Gx/Gx.h"
+#include "Engine/Source/Gxu/Gxu.h"
 #include "Engine/Source/Services/Texture.h"
 #include "Engine/Source/ShaderEffect/ShaderEffect.h"
 #include "Engine/Source/Tempest/CFrustum.h"
@@ -42,6 +43,37 @@ CTexture* CShadowCache::s_intDynShadow;
 
 // STATIC: 0x00D4314C
 int32_t CShadowCache::s_needsRebuild;
+
+// Not stock: set by CShadowQuery::Update (gfxSunShadows, gfxShadowSnap, gfxShadowAnchor).
+uint32_t CShadowCache::s_bandRedraw;
+int32_t CShadowCache::s_texelSnap;
+int32_t CShadowCache::s_haveBandCentre;
+C3Vector CShadowCache::s_bandCentre;
+
+/// Not stock (gfxShadowSnap): moves a map centre to the nearest whole texel across the light, so the texel grid
+/// stays fixed on the world as the centre follows the player and shadow edges do not crawl. The axes are the ones
+/// CShadowQuery::MatrixCallback's look-at gives the map (looking along s_sunDir, `up` the band's m_dir); the
+/// centre's depth along the light is left as it is.
+static void SnapToTexels(C3Vector& p, float radius, const C3Vector& up) {
+    if (!CShadowCache::s_texelSnap || !(radius > 0.0f) || !CShadowCache::s_shadowSize) {
+        return;
+    }
+
+    const C3Vector& d = CShadowCache::s_sunDir;
+    C44Matrix view;
+    GxuXformCreateLookAtXXX(C3Vector(-d.x, -d.y, -d.z), C3Vector(0.0f, 0.0f, 0.0f), up, view);
+
+    const float texel = 2.0f * radius / CShadowCache::s_shadowSize;
+    const C3Vector axes[2] = { C3Vector(view.a0, view.b0, view.c0), C3Vector(view.a1, view.b1, view.c1) };
+
+    for (const C3Vector& a : axes) {
+        float c = p.x * a.x + p.y * a.y + p.z * a.z;
+        float move = std::floor(c / texel + 0.5f) * texel - c;
+        p.x += a.x * move;
+        p.y += a.y * move;
+        p.z += a.z * move;
+    }
+}
 
 // STATIC: 0x00D43150
 uint32_t CShadowCache::s_shadowSize;
@@ -471,15 +503,20 @@ void CShadowCache::GatherBands(CShadowCacheQueryData& data, const C3Vector& pos,
                 float dy = band.m_lastPos.y - pos.y;
                 float dz = band.m_lastPos.z - pos.z;
 
-                if (dx * dx + dy * dy + dz * dz <= band.m_updateDistance) {
+                // (or the light has moved since it was drawn: the redraw goes into the back texture and is swapped
+                // in when done, so the map on screen stays whole throughout)
+                if (dx * dx + dy * dy + dz * dz <= band.m_updateDistance && !(CShadowCache::s_bandRedraw & (1u << i))) {
                     continue;
                 }
+
+                CShadowCache::s_bandRedraw &= ~(1u << i);
             }
 
             data.m_radius[i] = band.m_radius;
 
             if (!band.m_updateCount) {
                 band.m_pos = pos;
+                SnapToTexels(band.m_pos, band.m_radius, band.m_dir);
             }
 
             data.m_pos[i] = band.m_pos;
@@ -574,10 +611,14 @@ void CShadowCache::GatherBands(CShadowCacheQueryData& data, const C3Vector& pos,
                 cell = 16.0f;
             }
 
-            float invCell = 1.0f / cell;
-            band.m_pos.x = floor(invCell * band.m_pos.x) * cell;
-            band.m_pos.y = floor(band.m_pos.y * invCell) * cell;
-            band.m_pos.z = floor(band.m_pos.z * invCell) * cell;
+            if (CShadowCache::s_texelSnap) {
+                SnapToTexels(band.m_pos, band.m_radius, band.m_dir);
+            } else {
+                float invCell = 1.0f / cell;
+                band.m_pos.x = floor(invCell * band.m_pos.x) * cell;
+                band.m_pos.y = floor(band.m_pos.y * invCell) * cell;
+                band.m_pos.z = floor(band.m_pos.z * invCell) * cell;
+            }
 
             data.m_pos[i] = band.m_pos;
 
@@ -978,6 +1019,13 @@ int32_t CShadowCache::Update(const C3Vector& pos, int32_t useCullFrustum) {
     CShadowCache::s_extDynShadow.m_lastPos.x = floor(size * CShadowCache::s_extDynShadow.m_lastPos.x + 0.5) * texel;
     CShadowCache::s_extDynShadow.m_lastPos.y = floor(CShadowCache::s_extDynShadow.m_lastPos.y * size + 0.5) * texel;
 
+    if (CShadowCache::s_texelSnap) {
+        // (drawn round the same centre the receivers project with; stock draws round pos, 1/size yd off at most)
+        CShadowCache::s_extDynShadow.m_lastPos = pos;
+        SnapToTexels(CShadowCache::s_extDynShadow.m_lastPos, radius, CShadowCache::s_extDynShadow.m_dir);
+        data.m_pos[0] = CShadowCache::s_extDynShadow.m_lastPos;
+    }
+
     CGxTex* depthTarget = nullptr;
 
     if (CShaderEffect::s_usePcfFiltering) {
@@ -1063,7 +1111,7 @@ int32_t CShadowCache::Update(const C3Vector& pos, int32_t useCullFrustum) {
                 data.m_useFrustum = 1;
             }
 
-            CShadowCache::GatherBands(data, pos, frustum, useBandCull);
+            CShadowCache::GatherBands(data, CShadowCache::s_haveBandCentre ? CShadowCache::s_bandCentre : pos, frustum, useBandCull);
             CShadowCache::RenderBands(data);
         }
     }
