@@ -31,6 +31,8 @@ CMapAreaLow::CMapAreaLow() {
     this->m_holes = nullptr;
 }
 
+uint32_t g_lowDetailLoads = 0;   // shadow audit L10 (MapLowDetail.h)
+
 // VERIFY: 0b659a65 auto
 // OFFSET: 0x007CC2C0
 CMapLowDetail::CMapLowDetail() {
@@ -131,6 +133,7 @@ void CMapLowDetail::Load(const char* mapPath, const char* mapName) {
     this->m_data = static_cast<char*>(SMemAlloc(size, __FILE__, __LINE__, 0));
     SFileReadFile(file, this->m_data, size, nullptr, nullptr, 0);
     SFileCloseFile(file);
+    g_lowDetailLoads++;
 
     uint32_t* chunk = reinterpret_cast<uint32_t*>(this->m_data + reinterpret_cast<uint32_t*>(this->m_data)[1] + 8);
     char* data = this->m_data + reinterpret_cast<uint32_t*>(this->m_data)[1] + 16;

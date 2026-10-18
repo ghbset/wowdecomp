@@ -55,4 +55,7 @@ class CMapLowDetail {
     void Unload();
 };
 
+// Not stock (shadow audit L10): bumped per WDL load, so a new map is seen even when its WDL reuses the freed address.
+extern uint32_t g_lowDetailLoads;
+
 #endif

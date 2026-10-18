@@ -77,7 +77,7 @@ float LandSunVisibility(float3 world)
     [branch] if (cLandShadow.w <= 0)
         return 1;
     float lit = tex2Dlod(sLandShadow, float4(cLandShadow.xy - cLandShadow.z * world.yx, 0, 0)).x;
-    float sun = saturate(1 - (lit - world.z) * cLandShadow.w);
+    float sun = saturate(1 - (lit - world.z - 4.0) * cLandShadow.w);   // the mask's 4 yd surface bias (audit L6)
     return sun + (1 - sun) * cLandShadowFade.x;
 }
 

@@ -953,7 +953,9 @@ void OnOpaqueDone() {
     }
 
     s_opaqueValid = viewValid && std::isfinite(in.fogStart) && std::isfinite(in.fogEnd);
-    s_maskPending = mask && s_opaqueValid;
+    // vfog38 (shadow audit L4): no land shadow indoors (strength 0): skip the pass and its depth copy.
+    s_maskPending = mask && s_opaqueValid && in.interiorBlend < 1.0f;
+    CGxDevice::SetDepthUser(CGxDevice::DepthUser_ShadowMask, s_maskPending);
     s_ssaoPending = ssao && s_opaqueValid;
 }
 

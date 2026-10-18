@@ -8,6 +8,7 @@
 #include "Engine/Source/Gx/CGxDevice/CGxDevice.h"
 #include "Engine/Source/Gx/CGxTex.h"
 #include "Engine/Source/Gx/Gx.h"
+#include "Engine/Source/Os/TimeManager.h"
 #include "WoW/Source/WorldClient/Map.h"
 #include "WoW/Source/WorldClient/MapLowDetail.h"
 
@@ -24,16 +25,25 @@ constexpr int kRecentre = 16;               // texels the camera may drift befor
 constexpr float kTurnCos = 0.99999f;        // ~0.26 degrees of light turn before a rebuild
 constexpr float kMarchYards = 8000.0f;      // the CPU test's reach
 constexpr float kTopOfWorld = 4000.0f;      // no land above this
+constexpr uint32_t kFadeMs = 1000;          // vfog38 (audit M2): a rebuild cross-fades from the shown heights this long
+constexpr uint32_t kFadeStepMs = 33;        // re-upload at most this often while fading
+constexpr float kSnapCos = 0.99f;           // ~8 degrees of turn at once (debugHour, a time jump): no fade
+constexpr float kUnset = -1e30f;            // s_from: not in the old window
 
 CVar* s_cvar;
 CVar* s_maskCvar;       // shadowMask (Legion survey 2.7)
 CVar* s_softCvar;       // shadowSoft
 CGxTex* s_tex;
-float s_lit[kSize * kSize];
+float s_lit[kSize * kSize];       // the last build
+float s_from[kSize * kSize];      // the shown heights when it was built (same window), the fade's start
+float s_shown[kSize * kSize];     // lerp(s_from, s_lit, fade): what the texture holds
+uint32_t s_fadeStart, s_lastUpload;
+bool s_fading;
 uint32_t s_texels[kSize * kSize];
 float s_light[3];
 int s_r0 = 0, s_c0 = 0;
 const void* s_wdl;
+uint32_t s_loads;       // g_lowDetailLoads at the build (audit L10: a new WDL can reuse the freed one's address)
 bool s_built;
 
 float Vertex(int r, int c) {
@@ -111,10 +121,15 @@ void Build(const float L[3]) {
             at(a, b) = std::max(std::max(land, past) - drop, kNone);
         }
     }
+}
+
+// The shown heights at fade weight w into the texels.
+void Blend(float w) {
     for (int i = 0; i < kSize * kSize; i++) {
         const int r = i / kSize, c = i % kSize;
         const bool border = r == 0 || c == 0 || r == kSize - 1 || c == kSize - 1;     // the clamp past the grid: lit
-        s_texels[i] = Half(border ? kNone : s_lit[i]);   // R = lit height, G unused
+        s_shown[i] = s_from[i] + (s_lit[i] - s_from[i]) * w;
+        s_texels[i] = Half(border ? kNone : s_shown[i]);   // R = lit height, G unused
     }
 }
 
@@ -148,12 +163,40 @@ bool Update(const float toLight[3], const float camPos[3], CGxTex*& tex, float r
     const int r = static_cast<int>(std::floor(kGridOrigin - camPos[0] / kCell)) - kSize / 2;
     const int c = static_cast<int>(std::floor(kGridOrigin - camPos[1] / kCell)) - kSize / 2;
     const float turn = toLight[0] * s_light[0] + toLight[1] * s_light[1] + toLight[2] * s_light[2];
-    if (!s_built || !s_tex || s_wdl != CMap::s_lowDetail.m_data || turn < kTurnCos || std::abs(r - s_r0) > kRecentre || std::abs(c - s_c0) > kRecentre) {
+    const uint32_t now = OsGetAsyncTimeMs();
+    bool upload = false;
+    if (!s_built || !s_tex || s_wdl != CMap::s_lowDetail.m_data || g_lowDetailLoads != s_loads || turn < kTurnCos || std::abs(r - s_r0) > kRecentre || std::abs(c - s_c0) > kRecentre) {
+        // vfog38 (audit M2): fade from the heights shown now, moved into the new window; a new map, the first build
+        // or a big turn snaps. Texels the old window did not cover start at the new heights.
+        const bool fade = s_built && s_tex && s_wdl == CMap::s_lowDetail.m_data && g_lowDetailLoads == s_loads && turn >= kSnapCos;
+        const int dr = r - s_r0, dc = c - s_c0;
+        for (int i = 0; i < kSize * kSize; i++) {
+            const int a = i / kSize + dr, b = i % kSize + dc;
+            s_from[i] = fade && a >= 0 && a < kSize && b >= 0 && b < kSize ? s_shown[a * kSize + b] : kUnset;
+        }
         s_r0 = r;
         s_c0 = c;
         std::memcpy(s_light, toLight, sizeof(s_light));
         s_wdl = CMap::s_lowDetail.m_data;
+        s_loads = g_lowDetailLoads;
         Build(toLight);
+        for (int i = 0; i < kSize * kSize; i++) {
+            if (s_from[i] == kUnset) {
+                s_from[i] = s_lit[i];
+            }
+        }
+        s_fading = fade;
+        s_fadeStart = now;
+        Blend(fade ? 0.0f : 1.0f);
+        upload = true;
+    } else if (s_fading && now - s_lastUpload >= kFadeStepMs) {
+        const float w = std::min(static_cast<float>(now - s_fadeStart) / kFadeMs, 1.0f);
+        s_fading = w < 1.0f;
+        Blend(w);
+        upload = true;
+    }
+    if (upload) {
+        s_lastUpload = now;
         if (!s_tex) {
             CGxTexFlags flags(GxTex_Linear, 0, 0, 0, 0, 0, 1, 0, 0, 0);
             g_theGxDevicePtr->TexCreate(GxTex_2d, kSize, kSize, 0, GxTex_Gr1616F, GxTex_Gr1616F, flags, nullptr, Callback, "TerrainSunShadow", s_tex);
@@ -170,7 +213,7 @@ bool Update(const float toLight[3], const float camPos[3], CGxTex*& tex, float r
     row[0] = (kGridOrigin - s_c0 + 0.5f) / kSize;
     row[1] = (kGridOrigin - s_r0 + 0.5f) / kSize;
     row[2] = 1.0f / (kCell * kSize);
-    row[3] = 1.0f / kSoftYards;
+    row[3] = 1.0f / MaskSoftYards();    // vfog38 (audit L6): fog, water and caustics soften as the mask does (shadowSoft)
     return true;
 }
 

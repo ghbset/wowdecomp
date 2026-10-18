@@ -971,3 +971,21 @@ strength from 4 degrees up (S2). All in `PickLightBody` (DayNight.cpp); the shad
 - gfxShadowFade 0 (fade 1): the fade paths are unchanged (c10.w, c64, c69, c15).
 - No new CVars. Shaders rebuilt: VFogShadowMask, VFogCausticsAbove/Under, VFogComposite*/VFogCompositeSplit* (24).
 - Not done: F5 (non-compare mask variant for D3D11 hwPCF 0), F4, the models' grazing-ndl shadow fade in the mask.
+
+## 2026-10-19: vfog38, land-shadow cross-fade and receivers lows (receivers M2, L4, L6, L10)
+
+- **M2.** TerrainSunShadow rebuilds no longer pop: each rebuild keeps the heights shown at that moment (moved into the
+  new window when it recentred) and the texture cross-fades from them to the new build over 1 s (`kFadeMs`),
+  re-uploaded at most every 33 ms. Done on the CPU, so every consumer of the land tap (shadow mask, fog march /
+  composite s7, caustics, water c68) fades the same with no shader or register change. A new map, the first build,
+  a device reset or a turn over ~8° at once (`kSnapCos`, debugHour, time jumps) snaps. Cost: a 64k-texel lerp +
+  half conversion + 256 KB upload per step during the fade (~30 steps per rebuild).
+- **L6.** `Update`'s row w is now `1 / MaskSoftYards()` (shadowSoft) for every consumer, not 1/16: fog, water and
+  caustics soften like the mask. The water's `LandSunVisibility` (vw_constants.hlsli) adds the mask's 4 yd surface bias.
+- **L4 (part).** The mask pass and its depth copy (`DepthUser_ShadowMask`) are skipped when the camera is fully in an
+  interior group (`interiorBlend >= 1`). Not done: skipping when no texel can shadow (max(lit - H) < -bias).
+- **L10.** `g_lowDetailLoads` (MapLowDetail.cpp, bumped per WDL load) replaces the WDL pointer as the map-change test.
+- **M3 not done:** the window stays +-4.2 km; casters outside it are still ignored. A soft edge needs an opacity
+  weight in the tap (the lit-height alone cannot fade a deep shadow), i.e. a shader change in all four consumers,
+  and the fog marches are at their temp limit. The M2 fade does soften the pop when a recentre brings a caster in.
+- No new CVars. Shaders rebuilt: VFogWater1/2/3.
