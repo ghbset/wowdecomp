@@ -1,3 +1,4 @@
+#include "WoW/Source/WorldClient/TerrainSunShadow.h"
 #include "WoW/Source/WorldClient/DayNight__DNInfo.h"
 #include <cmath>
 #include <new>
@@ -3067,6 +3068,13 @@ float DayNight::DNGlare::GetPointOcclusion() {
     end.y = ny * info->m_farClip + info->m_cameraPos.y;
     end.z = nz * info->m_farClip + info->m_cameraPos.z;
     float distance = 1.0f;
+    // Not stock (gfxTerrainShadow): the land past the loaded ADTs, which World::Intersect does not see.
+    const float from[3] = { start.x, start.y, start.z };
+    const float toward[3] = { nx, ny, nz };
+
+    if (TerrainSunShadow::Visibility(from, toward) == 0.0f) {
+        return 0.0f;
+    }
 
     if (World::Intersect(start, end, &hit, &distance, 0x200112, nullptr)) {
         return 0.0f;

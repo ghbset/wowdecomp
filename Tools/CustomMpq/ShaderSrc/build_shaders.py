@@ -82,15 +82,15 @@ for _q, _steps in ((1, 16), (2, 24), (3, 32)):
             _defs = {'STEPS': _steps, 'LOCAL_LIGHTS': _lights, 'VF_NOISE': _noise}
             _march_noise = (9, 10) if _noise else ()
             _composite_noise = ((9,) if _lights else (9, 10)) if _noise else ()    # VFogComposite.hlsl: L drops s10
-            # s5/s6: the engine's sun shadow bands 1 and 2 (vf_shadow.hlsli, shadowed sun in-scatter)
-            SHADERS['VFogMarch' + _suffix] = ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 5, 6, *_march_noise), 0,
+            # s5/s6: the engine's sun shadow bands 1 and 2, s7 the land's lit height (vf_shadow.hlsli, shadowed sun in-scatter)
+            SHADERS['VFogMarch' + _suffix] = ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 5, 6, 7, *_march_noise), 0,
                                               'VFogMarch', _defs)
             SHADERS['VFogComposite' + _suffix] = ('ps_3_0', TEXCOORD0, COLOR0,
-                                                  samplers(0, 1, 3, 4, 5, 6, *_composite_noise), 0, 'VFogComposite',
+                                                  samplers(0, 1, 3, 4, 5, 6, 7, *_composite_noise), 0, 'VFogComposite',
                                                   _defs)
             # MSAA sample split (coa vf_composite_split, vfogMsaaSplit): the same composite per silhouette side
             SHADERS['VFogCompositeSplit' + _suffix] = ('ps_3_0', TEXCOORD0, COLOR0,
-                                                       samplers(0, 1, 3, 4, 5, 6, *_composite_noise), 0,
+                                                       samplers(0, 1, 3, 4, 5, 6, 7, *_composite_noise), 0,
                                                        'VFogComposite',
                                                        dict(_defs, SPLIT=1))
 

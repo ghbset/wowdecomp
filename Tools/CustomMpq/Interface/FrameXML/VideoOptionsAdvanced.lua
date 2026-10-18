@@ -93,6 +93,7 @@ local PAGES = {
 	  { "gfxSunShadows", "check", "Shadows follow the sun", "Shadows fall from where the sun or moon is in the sky, long in the morning and evening and short at noon. Off uses the stock steep light." },
 	  { "gfxShadowSnap", "check", "Steady shadow edges", "Moves the shadow maps in whole pixels so shadow edges do not crawl or shimmer as you move." },
 	  { "gfxShadowAnchor", "check", "Steady shadows when jumping", "Keeps the shadow maps in place while you jump, so distant shadows do not shift or redraw." },
+	  { "gfxTerrainShadow", "check", "Mountains block the sun", "Hills and distant mountains block the sunlight in the fog and hide the sun's glare when the sun is behind them." },
 	},
 	{ name = "Debug", parent = "Advanced", title = "Debug & Technical",
 	  text = "For testing. The defaults are right for normal play.",

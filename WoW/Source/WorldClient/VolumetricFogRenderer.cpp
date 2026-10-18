@@ -4,6 +4,7 @@
 // Not ported (doc section 1): the depth probe, logging.
 #include "WoW/Source/WorldClient/VolumetricFogModel.h"
 #include "WoW/Source/WorldClient/VolumetricFogWater.h"
+#include "WoW/Source/WorldClient/TerrainSunShadow.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -36,8 +37,8 @@ constexpr uint32_t kSampleSideRegister = 80;        // VFogCompositeSplit c80 (c
 constexpr uint32_t kDitherRegister = 79;            // vf_common cDither (x on, y frame)
 constexpr uint32_t kGradeRegister = 10;             // VFogGrade c10 strength, c11-c18 curve
 constexpr uint32_t kLocalLightRegister = 100;
-constexpr uint32_t kShadowRegister = 56;           // vf_shadow.hlsli c56-c61 band rows, c62 control
-constexpr int kShadowStage = 5;                     // vf_shadow.hlsli s5 band 1, s6 band 2
+constexpr uint32_t kShadowRegister = 56;           // vf_shadow.hlsli c56-c61 band rows, c62 control, c63 terrain
+constexpr int kShadowStage = 5;                     // vf_shadow.hlsli s5 band 1, s6 band 2, s7 terrain
 constexpr uint32_t kSavedPixelRegisters = kLocalLightRegister + 4 * kMaxLocalLights;    // c0-c131
 static_assert(kSavedPixelRegisters == kPassSavedPixelRegisters, "SavedPassState holds the whole register range");
 constexpr float kDensityNoiseSize = 32.0f;          // coa noise_volume.h kDensityNoiseSize
@@ -197,6 +198,7 @@ void __fastcall OnDeviceRestored() {
     DestroyFadeDepth();
     DestroyTex(s_densityNoise);
     DestroyTex(s_authoredNoise);
+    TerrainSunShadow::Release();
     s_depthUnsupported = false;     // MSAA may have changed with the reset
 }
 
@@ -696,7 +698,8 @@ struct FogFrame {
     uint32_t rayW, rayH;
     bool rays;
     CGxTex* copy;       // CompositePass: the scene copy (linear blend, rays, fade), or nullptr
-    float shadow[7][4]; // vf_shadow.hlsli c56-c62 (control x = 0: sun unshadowed)
+    float shadow[8][4]; // vf_shadow.hlsli c56-c62 (control x = 0: sun unshadowed), c63 terrain (w = 0: off)
+    CGxTex* terrainShadow;  // s7, gfxTerrainShadow
     CGxTex* shadowMaps[2];
 };
 
@@ -708,6 +711,8 @@ struct FogFrame {
 void ShadowConstants(const Config& cfg, const float viewToWorld[16], FogFrame& f) {
     std::memset(f.shadow, 0, sizeof(f.shadow));
     f.shadowMaps[0] = f.shadowMaps[1] = nullptr;
+    // gfxTerrainShadow: the land (ADT and WDL) blocks the sun past the cascades, which terrain does not cast into.
+    TerrainSunShadow::Update(f.in.toLight, f.in.camPos, f.terrainShadow, f.shadow[7]);
     ShadowView view;
     if (!cfg.shadowedSun || !CShadowCache::GetPublished(view) || (!view.pcf && f.device->DeviceApi() == GxApi_D3d11)) {
         return;
@@ -737,10 +742,11 @@ void ShadowConstants(const Config& cfg, const float viewToWorld[16], FogFrame& f
 
 void BindShadows(const FogFrame& f, bool on) {
     if (on) {
-        SetPs(kShadowRegister, &f.shadow[0][0], 7);
+        SetPs(kShadowRegister, &f.shadow[0][0], 8);
     }
     Bind(kShadowStage, on ? f.shadowMaps[0] : nullptr);
     Bind(kShadowStage + 1, on ? f.shadowMaps[1] : nullptr);
+    Bind(kShadowStage + 2, on ? f.terrainShadow : nullptr);
 }
 
 void MarchPass(const FogFrame& f) {
@@ -1306,6 +1312,7 @@ void RendererShutdown() {
     DestroyFadeDepth();
     DestroyTex(s_densityNoise);
     DestroyTex(s_authoredNoise);
+    TerrainSunShadow::Release();
 
     if (g_theGxDevicePtr) {
         CGxShader** all = &s_shaders.march[0][0][0];
