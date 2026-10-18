@@ -100,6 +100,8 @@ local PAGES = {
 	  { "gfxShadowSnap", "check", "Steady shadow edges", "Moves the shadow maps in whole pixels so shadow edges do not crawl or shimmer as you move." },
 	  { "gfxShadowAnchor", "check", "Steady shadows when jumping", "Keeps the shadow maps in place while you jump, so distant shadows do not shift or redraw." },
 	  { "gfxTerrainShadow", "check", "Mountains block the sun", "Hills and distant mountains block the sunlight in the fog and hide the sun's glare when the sun is behind them." },
+	  { "shadowMask", "check", "Mountain shadows on the world", "Hills and distant mountains cast the sun's shadow onto the ground, buildings and creatures. Needs \"Mountains block the sun\"." },
+	  { "shadowSoft", "slider", "Mountain shadow softness", "How soft the edge of a mountain's shadow is. 0 is hard.", 0, 4, 0.25 },
 	},
 	{ name = "Loading & Gameplay", parent = "Advanced", title = "Loading & Gameplay",
 	  { "fastLoad", "check", "Fast loading", "Loading screens finish sooner; one processor core stays busy while they are up." },

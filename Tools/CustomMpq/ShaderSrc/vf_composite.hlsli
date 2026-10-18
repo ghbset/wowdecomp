@@ -17,6 +17,10 @@ sampler2D sFog : register(s1);
 sampler2D sGodRays : register(s2);
 sampler2D sSceneBeforeFog : register(s3);
 sampler2D sCurrentMarch : register(s4);
+// The depth the low-res fog was marched at (its taps' surfaces). The plain composite binds the scene depth here as at s0;
+// the fading-model over-pass binds the depth behind the models, while s0 holds the depth with them: a pixel on a fading
+// model then matches no tap and is fogged at its own depth (FogWithoutMatchingTap), not given the background's fog.
+sampler2D sMarchDepth : register(s8);
 
 static const float kHighlightKnee = 0.8;
 static const float kSunMarkerRadius = 6;
@@ -135,7 +139,7 @@ BilinearTaps GatherBilinearTaps(float2 pixel, float depth, float viewZ)
     {
         float2 tapOffset = float2(frac(j * 0.5) * 2, floor(j * 0.5));
         float2 tapTexel = clamp(taps.baseTexel + tapOffset, 0, LowResSize() - 1);
-        float tapDepth = SampleDepth(sDepth, LowResTexelToFullPixel(tapTexel));
+        float tapDepth = SampleDepth(sMarchDepth, LowResTexelToFullPixel(tapTexel));
         float2 bilinearWeight = lerp(1 - taps.fraction, taps.fraction, tapOffset);
         float weight = bilinearWeight.x * bilinearWeight.y;
         taps.currentMarch += tex2Dlod(sCurrentMarch, float4(LowResTexelToUv(tapTexel), 0, 0)) * weight;
@@ -231,7 +235,7 @@ float4 DepthAwareUpsample(float2 pixel, float depth, float viewZ)
     {
         float2 tapOffset = float2(frac(j * 0.5) * 2, floor(j * 0.5));
         float2 tapTexel = clamp(baseTexel + tapOffset, 0, LowResSize() - 1);
-        float tapDepth = SampleDepth(sDepth, LowResTexelToFullPixel(tapTexel));
+        float tapDepth = SampleDepth(sMarchDepth, LowResTexelToFullPixel(tapTexel));
         float tapViewZ = LinearDepth(tapDepth);
         float2 bilinearWeight = lerp(1 - bilinearFraction, bilinearFraction, tapOffset);
         bool sameClass = SameDepthClass(depth, tapDepth);

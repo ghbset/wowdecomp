@@ -23,7 +23,7 @@ Grading (coa vp_grade): VFogGrade.
 Water (coa vw_*): VFogWaterDepth, VFogWaterMask, VFogWater{1,2,3} (SSR_STEPS 0/16/32) and VFogRippleStep;
 GPU waves VFogWave{Evolve,Fft,Surface,Mip,Pack}.
 Grass wind (wxl-grasswind, MULTI): Shaders/Vertex/vs_3_0|vs_4_0/DetailDoodad.bls, the stock grass VS's 6 permutations.
-Fading models (wxl-vfog 0.6.3): VFogDepthCopy. MSAA sample split (coa): VFogSilhouette and VFogCompositeSplit{Q}[L][N].
+Fading models (wxl-vfog 0.6.3): VFogDepthCopy. Land shadow mask (shadowMask): VFogShadowMask. MSAA sample split (coa): VFogSilhouette and VFogCompositeSplit{Q}[L][N].
 """
 import argparse
 import concurrent.futures
@@ -76,10 +76,12 @@ SHADERS = {
     'TreeLeavesPS': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0), 0, 'TreeLeavesPS', {}),
     # Cata ProcMagma lava/slime over the stock vsLiquidMagma (backlog #10, liquidProcMagma)
     'LiquidProcMagma': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 1, 2, 3), 0, 'LiquidProcMagma', {}),
+    # shadowMask (Legion survey 2.7): the land's sun shadow over the opaque world, a multiply; s5/s6 cascades, s7 land
+    'VFogShadowMask': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 5, 6, 7), 0, 'VFogShadowMask', {}),
 }
 # VFogWater{1,2,3}: coa ps_vw_shade_low/mid/high (SSR_STEPS 0/16/32, cmake/WaterShaders.cmake)
 for _v, _ssr in ((1, 0), (2, 16), (3, 32)):
-    SHADERS['VFogWater%d' % _v] = ('ps_3_0', TEXCOORD0, COLOR0, samplers(*range(0, 13), 14, 15), 0, 'VFogWater',
+    SHADERS['VFogWater%d' % _v] = ('ps_3_0', TEXCOORD0, COLOR0, samplers(*range(0, 16)), 0, 'VFogWater',
                                    {'SSR_STEPS': _ssr})
 for _q, _steps in ((1, 16), (2, 24), (3, 32)):
     for _lights in (0, 1):
@@ -92,11 +94,12 @@ for _q, _steps in ((1, 16), (2, 24), (3, 32)):
             SHADERS['VFogMarch' + _suffix] = ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 5, 6, 7, *_march_noise), 0,
                                               'VFogMarch', _defs)
             SHADERS['VFogComposite' + _suffix] = ('ps_3_0', TEXCOORD0, COLOR0,
-                                                  samplers(0, 1, 3, 4, 5, 6, 7, *_composite_noise), 0, 'VFogComposite',
+                                                  samplers(0, 1, 3, 4, 5, 6, 7, 8, *_composite_noise), 0, 'VFogComposite',
                                                   _defs)
+            # s8: the march's depth for the upsample taps (vf_composite sMarchDepth)
             # MSAA sample split (coa vf_composite_split, vfogMsaaSplit): the same composite per silhouette side
             SHADERS['VFogCompositeSplit' + _suffix] = ('ps_3_0', TEXCOORD0, COLOR0,
-                                                       samplers(0, 1, 3, 4, 5, 6, 7, *_composite_noise), 0,
+                                                       samplers(0, 1, 3, 4, 5, 6, 7, 8, *_composite_noise), 0,
                                                        'VFogComposite',
                                                        dict(_defs, SPLIT=1))
 
@@ -114,7 +117,7 @@ MULTI = {
 # The shadow band slots of vf_shadow.hlsli: hardware-compare samplers in the SM4 pack (D3D11 binds a LESS_EQUAL
 # comparison sampler for a D24X8 target under hwPCF), like the stock _pcf families' (shader-xlate pcf_slots).
 def compare_slots(name):
-    return (5, 6) if name.startswith(('VFogMarch', 'VFogComposite')) else ()
+    return (5, 6) if name.startswith(('VFogMarch', 'VFogComposite', 'VFogShadowMask')) else ()
 
 
 def bls(recs):
