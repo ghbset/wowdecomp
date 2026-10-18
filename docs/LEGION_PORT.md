@@ -124,3 +124,59 @@ as the fog), ps_3_0 (D3D9) compiled by fxc.
 - WDL is 33 yd per vertex: mountain-scale shadows only. A cave interior under a mountain seen from outside is
   darkened by the sun's share (from inside, the interior fade removes it).
 - Underwater frames take the mask too (it draws before the liquid in both branches).
+
+## 2026-10-18: Legion post (survey items 10, 5, 9: depth users, FXAA, colour blindness)
+
+### Depth-consumer registry (item 10, Legion `SetDepthUser` 0x006C4343, count at 0x013CCDDC)
+
+`CGxDevice::s_depthUsers` is a bitmask of the scene-depth consumers this frame (CGxDevice.h). While it is 0, every
+backend's `DeviceCopySceneDepth` (Vulkan, D3D11, both D3D9 through `d3d9scenedepth::Copy`) returns nullptr with
+`*transient = true`, so no copy, blit or RESZ resolve runs and callers retry next frame. A bit instead of Legion's
+counter: setting it twice is harmless, so a consumer can set it from its state every frame.
+
+Registered now:
+
+| bit | set where | on while |
+|---|---|---|
+| `DepthUser_Fog` | `VolumetricFog::SetDepthUsers` (DecideFrame, OnViewerLiquid) | vfog draws this frame (`s_active`) |
+| `DepthUser_FadeStencil` | same | vfog draws and `vfogFadeEarly` and `vfogFadeStencil` |
+| `DepthUser_Water` | `WaterArm` (cleared at its top, set once armed) | modern water draws in this liquid pass |
+| `DepthUser_ShadowMask` | `VolumetricFog::OnOpaqueDone` | `shadowMask` wanted (`TerrainSunShadow::MaskWanted`) and the renderer ready |
+
+The fog, fade and water users are inside vfog, and the copy was already demand-driven (only callers pay, and the Vulkan/D3D11/RESZ
+"fresh" flags share one snapshot per frame), so this saves nothing measurable yet. What it adds is the contract: a
+consumer that does not register gets no depth.
+
+**Registering a new consumer** (screen-space shadow mask, SSAO, refraction, light buffer, soft particles):
+1. add a bit to the enum in `Engine/Source/Gx/CGxDevice/CGxDevice.h` (`DepthUser_ShadowMask = 1u << 3`, ...);
+2. once per frame, before its `DeviceCopySceneDepth` call, `CGxDevice::SetDepthUser(CGxDevice::DepthUser_X, on)`
+   with `on` from its CVar state (and whatever else gates its pass). Nothing else.
+The shadow mask is the first consumer outside vfog's `s_active` (it runs with vfog off), registered this way.
+
+### FXAA (item 5) and colour blindness (item 9): one post pass
+
+`VolumetricFog::PreparePost` (in `OnWorldDone`, which sees the world viewport) reads the CVars;
+`RenderPost` (VolumetricFogRenderer.cpp, beside `RenderGrade`) draws in `OnWorldRendered`, after the colour grade and
+the glow, before names (`WorldTextRenderBatch`) and the UI, so neither is anti-aliased or colour-shifted. It copies
+the world viewport (the grade's bilinear `CopySceneBeforeFog`) and draws one quad, opaque, RGB, scissored to the world.
+Runs whether or not vfog is on; skipped entirely when both features are off.
+
+Shaders (ours, `Tools/CustomMpq/ShaderSrc/LegionPost.hlsl`, FXAA 3.11 quality after Lottes' public algorithm, flat
+code with no dynamic branches): `LegionPost0` colour shift only, `LegionPost1` FXAA low (preset 12: 5 search steps,
+edge threshold 0.166/0.0833) + shift, `LegionPost2` FXAA high (preset 39: 12 steps, 0.125/0.0625) + shift; subpix
+0.75. Constants: c0 world viewport px, c10 FXAA (subpix, threshold, threshold min), c11-c13 the colour matrix rows.
+The matrix is applied in linear light (gamma 2.2 decode/encode) and is the identity when colour blindness is off.
+
+| CVar | range | default | |
+|---|---|---|---|
+| `ffxAntiAliasingMode` | 0-2 | 0 | 0 off, 1 FXAA low, 2 FXAA high (Legion's 3 = CMAA not ported) |
+| `colorblindSimulator` | 0-3 | 0 | 0 off, 1 protanopia, 2 deuteranopia, 3 tritanopia |
+| `daltonize` | 0/1 | 0 | 0 simulate the type, 1 correct for it |
+| `colorblindWeaknessFactor` | 0-1 | 0.5 | severity: sim = I + f (M - I) |
+
+Matrices: Machado, Oliveira and Fernandes 2009 at severity 1.0 (linear RGB); daltonize is Fidaner et al. 2005's error
+shift, `I + E (I - sim)` with E = [[0,0,0],[0.7,1,0],[0.7,0,1]], folded into one 3x3 on the CPU
+(`ColourShiftMatrix`). Legion's 11 types are not mirrored (its table is not used); `colorblindMode` (the stock UI text
+labels CVar) is untouched and independent.
+
+Options: Video Options > Advanced > Post Processing ("Anti-Aliasing & Colour").

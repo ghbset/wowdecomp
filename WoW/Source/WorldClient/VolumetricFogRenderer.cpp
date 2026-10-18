@@ -36,6 +36,7 @@ constexpr uint32_t kHorizonBandRegister = 99;
 constexpr uint32_t kSampleSideRegister = 80;        // VFogCompositeSplit c80 (coa c99, which is the horizon band here)
 constexpr uint32_t kDitherRegister = 79;            // vf_common cDither (x on, y frame)
 constexpr uint32_t kGradeRegister = 10;             // VFogGrade c10 strength, c11-c18 curve
+constexpr uint32_t kPostRegister = 10;              // LegionPost c10 FXAA, c11-c13 colour matrix
 constexpr uint32_t kLocalLightRegister = 100;
 constexpr uint32_t kShadowRegister = 56;           // vf_shadow.hlsli c56-c61 band rows, c62 control, c63 terrain
 constexpr uint32_t kShadowMaskRegister = 10;      // VFogShadowMask c10-c13 (light, ambient + bias, diffuse, stock fog)
@@ -74,6 +75,7 @@ struct Shaders {
     CGxShader* grade;
     CGxShader* depthCopy;               // VFogDepthCopy: the scene depth into an R32F target (fading cross-fade)
     CGxShader* shadowMask;              // VFogShadowMask: the land's sun shadow over the opaque world (shadowMask)
+    CGxShader* post[3];                 // LegionPost{0,1,2}: colour shift, + FXAA low, + FXAA high (ffxAntiAliasingMode)
 };
 
 struct Targets {
@@ -1384,6 +1386,43 @@ bool RenderShadowMask(const FrameInputs& in, float softYards, bool stockFogInCol
         Bind(stage, nullptr);
     }
     EndPasses(s_saved, vp);
+    return true;
+}
+
+// LEGION FFX post (ffxAntiAliasingMode, FFXColorShift): FXAA and the colour matrix over a bilinear copy of the world
+// viewport, like RenderGrade (after it, before names and the UI). docs/LEGION_PORT.md.
+bool RenderPost(int fxaa, const float colourShift[3][4], const WorldViewport& world) {
+    static const char* const kNames[3] = { "LegionPost0", "LegionPost1", "LegionPost2" };
+    CGxDevice* device = g_theGxDevicePtr;
+    if (!device || fxaa < 0 || fxaa > 2 || world.w < 1.0f || world.h < 1.0f || !Shader(s_shaders.post[fxaa], kNames[fxaa])) {
+        return false;
+    }
+    const WorldViewport live = LiveWorldViewport();
+    if (live.target) {
+        return false;
+    }
+    if (!s_callbackAdded) {     // the scene copy goes with a reset even while vfog is off
+        device->AddDeviceRestoredCallback(OnDeviceRestored);
+        s_callbackAdded = true;
+    }
+    CGxTex* scene = CopySceneBeforeFog(static_cast<uint32_t>(world.x), static_cast<uint32_t>(world.y), static_cast<uint32_t>(world.w), static_cast<uint32_t>(world.h));
+    if (!scene) {
+        return false;
+    }
+
+    static SavedPassState s_saved;
+    BeginPasses(s_saved);
+    ScissorToWorld(world);
+    const float viewport[4] = { world.x, world.y, world.w, world.h };
+    // FXAA 3.11 quality defaults: subpix 0.75, edge threshold 0.166 / 0.125, edge threshold min 0.0833 / 0.0625.
+    const float fxaaParams[4] = { 0.75f, fxaa == 2 ? 0.125f : 0.166f, fxaa == 2 ? 0.0625f : 0.0833f, 0.0f };
+    SetPs(0, viewport, 1);
+    SetPs(kPostRegister, fxaaParams, 1);
+    SetPs(kPostRegister + 1, &colourShift[0][0], 3);
+    Bind(0, scene);
+    device->RsSet(GxRs_PixelShader, s_shaders.post[fxaa]);
+    DrawQuad(static_cast<uint32_t>(world.w), static_cast<uint32_t>(world.h), world.minX, world.maxX, world.minY, world.maxY);
+    EndPasses(s_saved, live);
     return true;
 }
 

@@ -129,6 +129,15 @@ local PAGES = {
 	  { "vfogLiquidDepth", "check", "Water writes depth", "Water is fogged at its own distance (always on with modern water)." },
 	  { "vfogClassicPhase", "check", "Normalised zone sun glow", "Uses energy-normalised sun scattering for the zone fog." },
 	},
+	{ name = "Post Processing", parent = "Advanced", title = "Anti-Aliasing & Colour",
+	  text = "Applied to the 3D world only; names and the interface stay sharp.",
+	  { "ffxAntiAliasingMode", "drop", "Post anti-aliasing", "Smooths jagged edges, including leaves and fences multisampling misses. Slightly softens the image.",
+	    { { "0", "Off" }, { "1", "FXAA Low" }, { "2", "FXAA High" } } },
+	  { "colorblindSimulator", "drop", "Colour blindness type", "The kind of colour blindness to show or correct for.",
+	    { { "0", "Off" }, { "1", "Protanopia (red)" }, { "2", "Deuteranopia (green)" }, { "3", "Tritanopia (blue)" } } },
+	  { "daltonize", "check", "Correct colours", "On shifts colours so they are easier to tell apart with that colour blindness. Off shows how the world looks with it." },
+	  { "colorblindWeaknessFactor", "slider", "Strength", "How strong the colour blindness view or correction is.", 0, 1, 0.05 },
+	},
 }
 
 -- Grass wind (wxl-grasswind, DetailDoodad.hlsl): its own page, placed before Debug.
