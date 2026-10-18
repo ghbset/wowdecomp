@@ -23,6 +23,7 @@
 #include "Engine/Source/Model2/M2Cache.h"
 #include "Engine/Source/Model2/M2ModelLight.h"
 #include "Engine/Source/Model2/M2Scene.h"
+#include "Engine/Source/Model2/M2TreeSway.h"
 #include "Engine/Source/Services/AsyncFile.h"
 #include "Engine/Source/Services/Camera.h"
 #include "Engine/Source/Services/ParticleSystem2.h"
@@ -4767,7 +4768,7 @@ void CM2Model::AnimateMTSimple(const C44Matrix* view, const C3Vector& diffuse, c
         this->m_loops[i] = time;
     }
 
-    this->m_matrixF4 = this->m_worldTransform * *view;
+    this->m_matrixF4 = M2TreeSway::World(this) * *view; // TREESWAY: not in 12340 (m_worldTransform)
 
     CM2Model* attachParent = this->m_attachParent;
 
@@ -5122,7 +5123,7 @@ void CM2Model::AnimateMT(const C44Matrix* view, const C3Vector& diffuse, const C
         this->m_loops[i] = time;
     }
 
-    this->m_matrixF4 = this->m_worldTransform * *view;
+    this->m_matrixF4 = M2TreeSway::World(this) * *view; // TREESWAY: not in 12340 (m_worldTransform)
 
     CM2Model* attachParent = this->m_attachParent;
 
@@ -6219,7 +6220,7 @@ void CM2Model::AnimateSM() {
         return;
     }
 
-    *this->m_boneMatrices = this->m_worldTransform * scene->m_view;
+    *this->m_boneMatrices = M2TreeSway::World(this) * scene->m_view; // TREESWAY: not in 12340 (m_worldTransform): casters tilt with the drawn tree
     this->m_alpha = this->m_baseAlpha * this->m_fadeAlpha;
 
     M2Data* data = this->m_shared->m_data;

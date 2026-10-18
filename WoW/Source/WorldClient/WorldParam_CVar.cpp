@@ -16,6 +16,7 @@
 #include "WoW/Source/WorldClient/VolumetricFog.h"
 #include "Engine/Source/ConsoleBase/ConsoleVar.h"
 #include "Engine/Source/Model2/M2Scene.h"
+#include "Engine/Source/Model2/M2TreeSway.h"
 #include "Engine/Source/ConsoleBase/IConsole.h"
 #include "Engine/Source/Storm/H/storm.h"
 #include "WoW/Source/ConsoleDevice/ConsoleDevice.h"
@@ -669,6 +670,16 @@ void CWorldParam::Initialize() {
     // applies as each WMO group loads, so a change needs a relog or zone reload.
     CVar::Register("wmoNormalRepair", "Repair building normals at load (relog to apply)", 1, "1", [](CVar*, const char*, const char* value, void*) -> bool {
         CMapObjGroup::s_repairNormals = SStrToInt(value) != 0;
+        return true;
+    }, CATEGORY_GRAPHICS, false, nullptr, false);
+    // TREESWAY: not in 12340 (wxl-treewind). Placed living trees and bushes tilt in a gust field (M2TreeSway).
+    CVar::Register("treeSway", "Trees and bushes sway in the wind", 1, "1", [](CVar*, const char*, const char* value, void*) -> bool {
+        M2TreeSway::s_enabled = SStrToInt(value) != 0;
+        return true;
+    }, CATEGORY_GRAPHICS, false, nullptr, false);
+    CVar::Register("treeSwayStrength", "Tree sway amount (0..3, 1 = wxl-treewind)", 1, "1", [](CVar*, const char*, const char* value, void*) -> bool {
+        float v = SStrToFloat(value);
+        M2TreeSway::s_strength = v < 0.0f ? 0.0f : (v > 3.0f ? 3.0f : v);
         return true;
     }, CATEGORY_GRAPHICS, false, nullptr, false);
 
