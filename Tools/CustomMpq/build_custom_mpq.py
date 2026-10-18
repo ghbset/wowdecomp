@@ -14,6 +14,8 @@ Contents:
                           (--d3d11-mpq to take another archive).
   Textures\\...           every file in Tools/CustomMpq/Textures beside this script (the
                           selection-circle styles from wxl-aoeindicators, selectionCircleStyle).
+  XTextures\\...          every file in Tools/CustomMpq/XTextures (Cata water's ocean\\newoceanbump.blp and
+                          foam\\waterchop7bw.blp from Cataclysm 4.3.4, waterStyle 1, WorldClient/CataWater.cpp).
   Shaders\\...            our own shaders, Tools/CustomMpq/Shaders (ps_3_0 for D3D9, ps_4_0 for D3D11),
                           built from ShaderSrc/*.hlsl by ShaderSrc/build_shaders.py (VFog*: volumetric
                           fog, docs/VFOG_PORT.md). Tools/VulkanShaders translates the ps_3_0 ones with the client's.
@@ -157,6 +159,7 @@ def main(argv):
         sys.exit('no Shaders\\*\\vs_4_0 / ps_4_0 files in %s' % d3d11)
     files.update(sm4)
     textures = folder_files('Textures', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Textures'))
+    textures.update(folder_files('XTextures', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'XTextures')))
     files.update(textures)
     ours = folder_files('Shaders', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Shaders'))
     # ours replace a stock SM4 file of the same name (DetailDoodad.bls); MPQ names are case-insensitive

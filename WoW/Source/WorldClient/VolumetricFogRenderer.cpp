@@ -2,6 +2,7 @@
 // docs/VFOG_PORT.md sections 2-5 are the spec: pass list, targets, register and sampler contract.
 // God rays: coa DrawGodRayMask / DrawGodRaysOverScene (renderer.cpp:1189-1260), always drawn after the world.
 // Not ported (doc section 1): the depth probe, logging.
+#include "WoW/Source/WorldClient/CataWater.h"
 #include "WoW/Source/WorldClient/VolumetricFogModel.h"
 #include "WoW/Source/WorldClient/VolumetricFogWater.h"
 #include "WoW/Source/WorldClient/TerrainSunShadow.h"
@@ -1393,6 +1394,7 @@ bool CompositeOverSceneCopy() {
 
 void RendererShutdown() {
     WaterShutdown();
+    CataWater::Shutdown();
     DestroyTargets();
     DestroyFadeDepth();
     DestroyTex(s_densityNoise);

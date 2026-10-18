@@ -3,6 +3,7 @@
 #include "Engine/Source/Gx/CGxDevice/CGxDevice.h"
 #include "Engine/Source/Gx/CGxLight.h"
 #include "Engine/Source/Storm/H/storm.h"
+#include "WoW/Source/WorldClient/CataWater.h"
 #include "WoW/Source/WorldClient/VolumetricFogWater.h"
 
 // STATIC: 0x00B23F6C
@@ -122,7 +123,9 @@ void Liquid::CRenderer::Flush(const C3Vector& cameraPos, uint32_t pass) {
     uint32_t count = instances.Count();
     // VFOG: not in 12340. Modern water (docs/VFOG_PORT.md "Water"): the transparent pass draws the water last, grouped
     // by class, and shades each class after its draws.
-    const bool water = pass == 1 && VolumetricFog::WaterArm(instances.m_data, count);
+    // Not in 12340: waterStyle 1 (CataWater.h) shades the water inside its own draws instead.
+    const bool cata = pass == 1 && CataWater::Arm(instances.m_data, count);
+    const bool water = pass == 1 && !cata && VolumetricFog::WaterArm(instances.m_data, count);
 
     for (uint32_t i = 0; i < count; i++) {
         Liquid::CInstance* instance = instances.m_data[i];
@@ -135,6 +138,10 @@ void Liquid::CRenderer::Flush(const C3Vector& cameraPos, uint32_t pass) {
 
     if (water) {
         VolumetricFog::WaterFlushDone();
+    }
+
+    if (cata) {
+        CataWater::Done();
     }
 
     instances.Clear();

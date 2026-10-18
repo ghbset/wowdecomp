@@ -9,6 +9,7 @@
 // and 0 elsewhere. Magma, slime and the classes waterdata.bin lacks keep the client's look; under water the fog and
 // the water are both off (coa Underwater=0).
 #include "WoW/Source/WorldClient/VolumetricFogWater.h"
+#include "WoW/Source/WorldClient/CataWater.h"
 #include "WoW/Source/WorldClient/VolumetricFogModel.h"
 #include "WoW/Source/WorldClient/TerrainSunShadow.h"
 #include <algorithm>
@@ -1132,6 +1133,9 @@ bool WaterArmed() {
 }
 
 bool WaterHidesClientRipples() {
+    if (CataWater::DrawsRipples()) {
+        return RipplesHideClientSprites(true);  // CATA WATER: its ripples replace the sprites the same way
+    }
     const WaterConfig water = ReadWaterConfig();
     // Not coa: the sky-only variant (quality 1 or reflections 0) shows the ripple map only as a faint normal tilt
     // against a flat sky, so the client's splash rings and wake trails stay on there; the screen-reflecting

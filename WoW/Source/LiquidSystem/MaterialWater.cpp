@@ -3,6 +3,7 @@
 #include "Engine/Source/Gx/Gx.h"
 #include "Engine/Source/Model2/M2Light.h"
 #include "Engine/Source/Storm/H/storm.h"
+#include "WoW/Source/WorldClient/CataWater.h"
 #include "WoW/Source/WorldClient/VolumetricFog.h"
 
 // STATIC: 0x00D45098
@@ -185,8 +186,10 @@ void Liquid::CMaterialWater::Render(Liquid::IEnvironment* environment, Liquid::I
         lightCount = 3;
     }
 
-    g_theGxDevicePtr->RsSet(GxRs_VertexShader, Liquid::CMaterialWater::s_vertexShaders[lightCount]);
-    g_theGxDevicePtr->RsSet(GxRs_PixelShader, Liquid::CMaterialWater::s_pixelShader);
+    if (!CataWater::Bind(settings, true, cameraPos)) {   // CATA WATER: not in 12340 (waterStyle 1)
+        g_theGxDevicePtr->RsSet(GxRs_VertexShader, Liquid::CMaterialWater::s_vertexShaders[lightCount]);
+        g_theGxDevicePtr->RsSet(GxRs_PixelShader, Liquid::CMaterialWater::s_pixelShader);
+    }
 
     CGxBuf* vertexBuf = nullptr;
     CGxBuf* indexBuf = nullptr;
@@ -264,8 +267,10 @@ void Liquid::CMaterialWaterNoSpec::Render(Liquid::IEnvironment* environment, Liq
         lightCount = 3;
     }
 
-    g_theGxDevicePtr->RsSet(GxRs_VertexShader, Liquid::CMaterialWaterNoSpec::s_vertexShaders[lightCount]);
-    g_theGxDevicePtr->RsSet(GxRs_PixelShader, Liquid::CMaterialWaterNoSpec::s_pixelShader);
+    if (!CataWater::Bind(settings, false, cameraPos)) {   // CATA WATER: not in 12340 (waterStyle 1)
+        g_theGxDevicePtr->RsSet(GxRs_VertexShader, Liquid::CMaterialWaterNoSpec::s_vertexShaders[lightCount]);
+        g_theGxDevicePtr->RsSet(GxRs_PixelShader, Liquid::CMaterialWaterNoSpec::s_pixelShader);
+    }
 
     CGxBuf* vertexBuf = nullptr;
     CGxBuf* indexBuf = nullptr;
