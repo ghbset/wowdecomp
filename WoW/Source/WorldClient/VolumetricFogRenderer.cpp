@@ -42,6 +42,7 @@ constexpr uint32_t kLocalLightRegister = 100;
 constexpr uint32_t kShadowRegister = 56;           // vf_shadow.hlsli c56-c61 band rows, c62 control, c63 terrain
 constexpr uint32_t kShadowMaskRegister = 10;      // VFogShadowMask c10-c13 (light, ambient + bias, diffuse, stock fog)
 constexpr float kShadowMaskSurfaceBias = 4.0f;     // yd: the ADT surface between WDL vertices may sit this far under them
+constexpr uint32_t kSsaoRegister = 10;             // LegionSsao c10 (radius, fade start, 1 / fade length, strength), c11 stock fog
 constexpr int kShadowStage = 5;                     // vf_shadow.hlsli s5 band 1, s6 band 2, s7 terrain
 constexpr int kMarchDepthStage = 8;                 // vf_composite.hlsli sMarchDepth: the depth the low-res fog was marched at
 constexpr uint32_t kSavedPixelRegisters = kLocalLightRegister + 4 * kMaxLocalLights;    // c0-c131
@@ -77,6 +78,7 @@ struct Shaders {
     CGxShader* depthCopy;               // VFogDepthCopy: the scene depth into an R32F target (fading cross-fade)
     CGxShader* shadowMask;              // VFogShadowMask: the land's sun shadow over the opaque world (shadowMask)
     CGxShader* post[3];                 // LegionPost{0,1,2}: colour shift, + FXAA low, + FXAA high (ffxAntiAliasingMode)
+    CGxShader* ssao[4];                 // LegionSsao, LegionSsaoBox, LegionSsaoBilateral, LegionSsaoApply (SSAO)
 };
 
 struct Targets {
@@ -92,6 +94,7 @@ struct Targets {
     uint32_t rayWidth;
     uint32_t rayHeight;
     EGxTexFormat colourFormat;  // march, history and rays: Abgr16161616F (vfogHdrTargets) or Argb8888
+    CGxTex* ao[2];              // SSAO: world viewport / 1 or 2, bilinear: [0] AO -> [1] blurred
 };
 
 // coa GodRayFrame: drawn by RenderGodRays at the end of the world.
@@ -186,6 +189,8 @@ void DestroyTargets() {
     DestroyTex(s_targets.rays[1]);
     s_targets.rayWidth = 0;
     s_targets.rayHeight = 0;
+    DestroyTex(s_targets.ao[0]);
+    DestroyTex(s_targets.ao[1]);
     s_godRays.pending = false;
 
     s_targets.width = 0;
@@ -1396,6 +1401,91 @@ bool RenderShadowMask(const FrameInputs& in, float softYards, bool stockFogInCol
     for (int stage = kShadowStage; stage < kShadowStage + 3; stage++) {
         Bind(stage, nullptr);
     }
+    EndPasses(s_saved, vp);
+    return true;
+}
+
+// SSAO (Legion survey 2.1, FEATURE_BACKLOG #5; docs/LEGION_PORT.md): ambient occlusion from the scene depth over the
+// opaque world, a multiply like the shadow mask. AO into a target at the world viewport / scale (SSAO 1 half, 2 full),
+// optionally blurred there (SSAOBlur 1 box, 2 depth-weighted), then one bilinear apply pass (GxBlend_Mod).
+// ponytail: the apply upsamples bilinearly (no depth test), so at half res the AO can bleed one pixel past a
+// silhouette; a joint-bilateral upsample (4 depth taps per pixel) fixes it if it shows.
+bool RenderSsao(const FrameInputs& in, int mode, int blur, float distance, float strength, bool stockFogInColour) {
+    static const char* const kNames[4] = { "LegionSsao", "LegionSsaoBox", "LegionSsaoBilateral", "LegionSsaoApply" };
+    CGxDevice* device = g_theGxDevicePtr;
+    if (!device || s_depthUnsupported || blur < 0 || blur > 2) {
+        return false;
+    }
+    for (int i = 0; i < 4; i++) {
+        if (!Shader(s_shaders.ssao[i], kNames[i])) {
+            return false;
+        }
+    }
+    const WorldViewport vp = LiveWorldViewport();
+    bool transient = false;
+    CGxTex* depth = device->DeviceCopySceneDepth(&transient);
+    if (!depth || vp.w < 1.0f || vp.h < 1.0f || vp.x < 0.0f || vp.y < 0.0f || vp.x + vp.w > depth->m_width || vp.y + vp.h > depth->m_height) {
+        return false;
+    }
+
+    const uint32_t scale = mode == 2 ? 1 : 2;
+    const uint32_t w = std::max(kMinTargetSize, (static_cast<uint32_t>(vp.w) + scale - 1) / scale);
+    const uint32_t h = std::max(kMinTargetSize, (static_cast<uint32_t>(vp.h) + scale - 1) / scale);
+    CGxTex*(&ao)[2] = s_targets.ao;
+    if (!ao[0] || !ao[1] || ao[0]->m_width != w || ao[0]->m_height != h) {
+        DestroyTex(ao[0]);
+        DestroyTex(ao[1]);
+        ao[0] = CreateTarget(w, h, GxTex_Linear);
+        ao[1] = CreateTarget(w, h, GxTex_Linear);
+        if (!ao[0] || !ao[1]) {
+            DestroyTex(ao[0]);
+            DestroyTex(ao[1]);
+            return false;
+        }
+    }
+
+    const float* proj = in.glProjection;
+    const float worldMinZ = in.viewport[4];
+    const float worldExtent = in.viewport[5] - in.viewport[4];
+    const float common[4][4] = {
+        { vp.x, vp.y, vp.w, vp.h },
+        { static_cast<float>(scale), 0.0f, 1.0f / depth->m_width, 1.0f / depth->m_height },
+        { proj[0], proj[5], proj[8], proj[9] },
+        { worldMinZ + worldExtent * (1.0f + proj[10]) * 0.5f, worldExtent * proj[14] * 0.5f, std::max(in.horizonBand[3], 1.0f), in.viewport[5] },
+    };
+    const float target[4] = { static_cast<float>(w), static_cast<float>(h), 1.0f / w, 1.0f / h };
+    distance = std::max(distance, 1.0f);
+    const float span = in.fogEnd - in.fogStart;
+    // Radius 1.5 yd (contact shading under props and in corners); the fade covers the last half of SSAODistance.
+    const float ssao[2][4] = {
+        { 1.5f, distance * 0.5f, 2.0f / distance, strength },
+        { in.fogStart, span > 1.0f ? 1.0f / span : 0.0f, stockFogInColour && span > 1.0f ? 1.0f : 0.0f, 0.0f },
+    };
+
+    static SavedPassState s_saved;
+    BeginPasses(s_saved);
+    SetPs(0, &common[0][0], 4);
+    SetPs(8, target, 1);
+    SetPs(kHorizonBandRegister, in.horizonBand, 1);
+    SetPs(kSsaoRegister, &ssao[0][0], 2);
+    device->DeviceSceneDepthBound(false);   // D3D9: s0 is the INTZ depth-stencil the back buffer uses
+    Bind(0, depth);
+    DrawToTarget(ao[0], s_shaders.ssao[0]);
+    if (blur) {
+        Bind(1, ao[0]);
+        DrawToTarget(ao[1], s_shaders.ssao[blur]);
+    }
+    Bind(0, nullptr);
+    device->DeviceSceneDepthBound(true);
+    GxRenderTargetSet(GxBuffers_Color, vp.target, 0);
+
+    GxRsSet(GxRs_BlendingMode, GxBlend_Mod);
+    GxRsSet(GxRs_ColorWrite, 7);
+    const float shift[4] = { blur ? 0.5f : 0.0f, 0.0f, 0.0f, 0.0f };     // the 4x4 box is centred half a texel back
+    SetPs(kSsaoRegister, shift, 1);
+    Bind(1, ao[blur ? 1 : 0]);
+    device->RsSet(GxRs_PixelShader, s_shaders.ssao[3]);
+    DrawQuad(static_cast<uint32_t>(vp.w), static_cast<uint32_t>(vp.h), vp.minX, vp.maxX, vp.minY, vp.maxY);
     EndPasses(s_saved, vp);
     return true;
 }

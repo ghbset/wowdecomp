@@ -180,3 +180,38 @@ shift, `I + E (I - sim)` with E = [[0,0,0],[0.7,1,0],[0.7,0,1]], folded into one
 labels CVar) is untouched and independent.
 
 Options: Video Options > Advanced > Post Processing ("Anti-Aliasing & Colour").
+
+## 2026-10-18: Legion ssao (survey item 2.1, FEATURE_BACKLOG #5)
+
+Screen-space ambient occlusion from the scene depth, laid over the opaque world as a multiply (v1, as backlog #5;
+ambient-only needs S4). Drawn in `VolumetricFog::OnSolidDone` (after the detail doodads, before liquids, the early fog
+composite, weather and the transparents), beside the shadow mask; runs with vfog on or off. `OnOpaqueDone` captures
+the frame inputs for it and registers `DepthUser_Ssao` (bit 4) while `SSAO > 0`. Sky, the WDL horizon band and past
+the far clip get none; it fades out over the second half of `SSAODistance`, and where the stock fog is still in the
+colour (vfog off) by the fog factor, so fogged distance is not darkened. Not on names or the UI (world pass only).
+
+Passes (`RenderSsao`, VolumetricFogRenderer.cpp; shaders ours, `Tools/CustomMpq/ShaderSrc/LegionSsao.hlsl`,
+northlight effects.hlsl AO/AOBlur (MIT, lepola) for the depth-derivative normals and depth-weighted blur):
+
+| shader | res | taps | what |
+|---|---|---|---|
+| `LegionSsao` | world / 2 (SSAO 1) or / 1 (SSAO 2) | 1 + 4 normal + 16 | view position from depth, normal from the nearer neighbour per axis, 16 hemisphere taps (golden-angle spiral, stratified elevation, longer taps last) turned per texel by a 4x4 Bayer index (Legion's 4x4 randomRotation without the texture), radius 1.5 yd, range check |
+| `LegionSsaoBox` | AO res | 4 bilinear | 4x4 box over the AO: cancels the 4x4 rotation pattern exactly (Legion gauss) |
+| `LegionSsaoBilateral` | AO res | 16 + 16 depth + 1 | the same box, each texel weighted by exp2(-dz / (0.02 z + 0.05)) (Legion bilateral) |
+| `LegionSsaoApply` | full, GxBlend_Mod, RGB | 1 bilinear | multiplies the colour; reads half a texel on when blurred (the 4x4 box is centred at k - 0.5) |
+
+Constants: c0-c3, c8 (AO target), c99 as vf_common.hlsli; c10 (radius, fade start, 1/fade length, strength), c11 stock fog.
+Targets: two Argb8888 bilinear, `s_targets.ao[2]`, freed with the vfog targets on device reset.
+
+| CVar | range | default | |
+|---|---|---|---|
+| `SSAO` | 0-2 | 0 | 0 off, 1 half res, 2 full res (Legion's 3 = HBAO, SM5 only, not ported) |
+| `SSAODistance` | yd | 100 | Legion default; fades over its second half |
+| `SSAOBlur` | 0-2 | 2 | 0 off (noisy), 1 box, 2 depth-weighted |
+| `SSAOStrength` | 0-2 | 1 | not in Legion |
+
+Cost at 2560x1440, SSAO 1 + SSAOBlur 2: AO 0.92 M texels x 21 fetches (19 M) + blur 0.92 M x 33 (30 M) + apply 3.7 M x 1,
+about 53 M fetches and ~1 G ALU ops: an estimated 0.2-0.4 ms on a current desktop GPU (not measured). SSAO 2 is about 4x
+that. Default 0 anyway: v1 darkens lit surfaces too (multiply, not ambient-only), so the look wants a verdict first;
+with vfog off it also wakes the depth copy. Options: Video Options > Advanced > Post Processing.
+ponytail: the apply upsamples bilinearly, so at half res the AO can bleed about one pixel past a silhouette.
