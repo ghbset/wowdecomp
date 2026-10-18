@@ -1997,7 +1997,11 @@ void CMap::PreUpdateAreas(bool addToScene) {
     int32_t minY = CWorld::gbChunkRect.minY >> 4;
     int32_t maxX = CWorld::gbChunkRect.maxX >> 4;
     int32_t entryCount = 0;
-    CMapAreaEntry* entries = static_cast<CMapAreaEntry*>(alloca(1024 * sizeof(CMapAreaEntry)));
+    // BACKLOG F1: stock alloca'd 1024 entries with no bound check; Northrend (1131 ADTs) overran the stack from
+    // about farclip 4500. The window is at most 64x64 tiles, so 4096 entries (32 KB) always fit; the checks
+    // below guard it anyway.
+    constexpr int32_t kMaxEntries = 64 * 64;
+    CMapAreaEntry* entries = static_cast<CMapAreaEntry*>(alloca(kMaxEntries * sizeof(CMapAreaEntry)));
 
     CMap::ClearChunkSortList();
     CMap::ProcessChunkLiquidUpdateList();
@@ -2012,6 +2016,11 @@ void CMap::PreUpdateAreas(bool addToScene) {
         CMapBaseObjLink* next = CMap::s_unk_ADFBEC.Next(link);
 
         if (area->m_index.x >= minX && area->m_index.x <= maxX && area->m_index.y >= minY && area->m_index.y <= maxY) {
+            if (entryCount >= kMaxEntries) {
+                link = next;
+                continue;
+            }
+
             C2Vector pos(World::s_currentWorldPos.x, World::s_currentWorldPos.y);
             entries[entryCount].m_dist = NTempest::DistanceSquared(area->m_bounds, pos);
             entries[entryCount].m_area = area;
@@ -2028,7 +2037,7 @@ void CMap::PreUpdateAreas(bool addToScene) {
         for (int32_t x = minX; x <= maxX; x++) {
             int32_t index = 64 * y + x;
 
-            if ((CMap::m_areaInfo[index].m_flags & 1) && !CMap::m_areaTable[index]) {
+            if ((CMap::m_areaInfo[index].m_flags & 1) && !CMap::m_areaTable[index] && entryCount < kMaxEntries) {
                 CMapArea* area = CMap::PrepareArea(x, y);
                 C2Vector pos(World::s_currentWorldPos.x, World::s_currentWorldPos.y);
                 entries[entryCount].m_area = area;
