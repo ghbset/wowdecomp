@@ -87,7 +87,10 @@ void CGxDeviceVulkan::DeviceSetRenderTarget(EGxBuffer buffer, CGxTex* texture, u
 
     CGxDevice::TextureTarget& target = this->m_textureTarget[buffer];
 
-    if (target.m_texture == texture && target.m_plane == plane) {
+    // Unchanged -- unless the colour texture's image was recreated while bound: ForgetImage then put
+    // the frame back on the scene, and the target has to be set again.
+    if (target.m_texture == texture && target.m_plane == plane
+        && (buffer != GxBuffers_Color || frame::Target() == (texture ? this->ITexImage(texture) : nullptr))) {
         return;
     }
 

@@ -94,7 +94,8 @@ static void PrebuildParticles(CM2SceneRender* render, M2Element* elements, uint3
 
     uint32_t particles = 0;
     size_t bytes = 0;
-    std::vector<size_t> offsets;
+    static std::vector<size_t> offsets;   // static: reused every Draw instead of allocated
+    offsets.clear();
 
     for (uint32_t i = 0; i < count; i++) {
         M2Element* element = &elements[indices[i]];
@@ -127,15 +128,19 @@ static void PrebuildParticles(CM2SceneRender* render, M2Element* elements, uint3
     }
 
     // Two workers must never build the same emitter, so an emitter listed twice sends the whole Draw down the stock path
-    std::vector<CParticleEmitter2*> emitters;
+    static std::vector<CParticleEmitter2*> emitters;
+    emitters.clear();
+    bool few = s_prebuilt.size() < 2 || (s_prebuilt.size() < PARTICLE_MIN_EMITTERS && particles < PARTICLE_MIN_PARTICLES);
 
-    for (const CParticleEmitter2::Prebuilt& prebuilt : s_prebuilt) {
-        emitters.push_back(prebuilt.m_emitter);
+    if (!few) {
+        for (const CParticleEmitter2::Prebuilt& prebuilt : s_prebuilt) {
+            emitters.push_back(prebuilt.m_emitter);
+        }
+
+        std::sort(emitters.begin(), emitters.end());
     }
 
-    std::sort(emitters.begin(), emitters.end());
-
-    if (s_prebuilt.size() < 2 || (s_prebuilt.size() < PARTICLE_MIN_EMITTERS && particles < PARTICLE_MIN_PARTICLES) || std::adjacent_find(emitters.begin(), emitters.end()) != emitters.end()) {
+    if (few || std::adjacent_find(emitters.begin(), emitters.end()) != emitters.end()) {
         s_prebuilt.clear();
         s_prebuiltAt.assign(count, -1);
         return;
@@ -673,13 +678,15 @@ void CM2SceneRender::DrawBatchProj() {
     // (no projected flag) or a stock flag-4 one (Consecration, Flamestrike, Blizzard, Death and Decay all
     // ship flag 4, whose stock slab is only +-2 yards, so hills clip them). It always draws (not only
     // under projectedTextures), keeps its texture animation, and its slab reaches as far as the quad is
-    // wide (benilla's fit_frame), so a slope up to 45 degrees stays inside the box.
+    // wide (benilla's fit_frame). Half the width is enough: a 45 degree slope from the centre reaches the
+    // edge at extent/2, and the full width painted floors up to ~13 yd above or below the spell.
     int32_t groundDecal = !(this->m_curBatch->m_flags & 4)
         || (CM2Scene::s_groundDecals && CM2Scene::IsGroundDecalBatch(this->m_curModel, this->m_curBatch, this->m_curSkinSection));
     float pad = 2.0f;
 
     if (groundDecal) {
         float extent = box.t.x - box.b.x > box.t.y - box.b.y ? box.t.x - box.b.x : box.t.y - box.b.y;
+        extent *= 0.5f;
         pad = extent > pad ? extent : pad;
 
         uint32_t transform = this->m_data->m_textureTransformCombos[this->m_curBatch->m_textureTransformComboIndex];
@@ -748,13 +755,19 @@ void CM2SceneRender::DrawBatchProj() {
     this->SetupBillboardView(*reinterpret_cast<const C3Vector*>(&this->m_scene->m_viewInv.d0));
     CShaderEffect::SetTexMtx_TexGen(GxTexGen_EyeLinear, texMatrix, 0);
     CShaderEffect::SetTexMtx_TexGen(GxTexGen_EyeLinear, depthMatrix, 1);
-    this->m_scene->m_projectTextureCallback(box, imColor, this->m_curLocalLighting, this->m_scene->m_projectTextureParam, ((this->m_curModel->m_fFlags >> 2) & 1) | groundDecal);
+    // BENILLA: 2 marks a quad rerouted from plain geometry; when it hits nothing (over water) draw it flat as stock did
+    int32_t rerouted = !(this->m_curBatch->m_flags & 4);
+    int32_t hit = this->m_scene->m_projectTextureCallback(box, imColor, this->m_curLocalLighting, this->m_scene->m_projectTextureParam, ((this->m_curModel->m_fFlags >> 2) & 1) | groundDecal | (rerouted ? 2 : 0));
     g_theGxDevicePtr->XformSetView(s_identity);
 
     CGxMatrixStack& world = g_theGxDevicePtr->m_xforms[GxXform_World];
     world.m_dirty = 1;
     world.m_flags[world.m_level] &= ~CGxMatrixStack::F_Identity;
     world.m_mtx[world.m_level] = s_identity;
+
+    if (rerouted && !hit) {
+        this->DrawBatch();
+    }
 }
 
 // VERIFY: 2ff5e9df manual

@@ -45,6 +45,9 @@ namespace gxvk::vk::present
      */
     bool Record(VkCommandBuffer cmd, uint32_t image, uint32_t slot);
 
+    /// Writes a warning Record() raised (it may run on the render thread); main thread only.
+    void LogPending();
+
     /**
      * The gamma ramp, as the engine's CGxGammaRamp holds it (three 256-entry tables of 16-bit
      * values), and whether it applies to the presented frame.

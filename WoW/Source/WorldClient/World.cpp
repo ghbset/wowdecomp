@@ -848,10 +848,13 @@ uint32_t World::GetIntersectingDoodadModels(CM2Model** models, uint32_t maxModel
 
 // VERIFY: fbdca5c7 auto
 // OFFSET: 0x0077F500
-void World::ProjectTextureCallback(const CAaBox& box, const CImVector& color, int32_t index, void* param, int32_t flags) {
+int32_t World::ProjectTextureCallback(const CAaBox& box, const CImVector& color, int32_t index, void* param, int32_t flags) {
+    // BENILLA: flags 2 = a ground decal rerouted from plain geometry (CM2SceneRender::DrawBatchProj); it also
+    // drapes M2 doodads (boat decks, bridges) and reports a miss so the caller can draw the flat quad instead.
     if (flags || (CWorld::enables2 & 0x4)) {
-        ProjectTex2dDrawShaderEffect(box, color, 0x200122, index ? 2 : 0, 0.40000001f);
+        return ProjectTex2dDrawShaderEffect(box, color, 0x200122, (index ? 2 : 0) | ((flags & 2) ? 1 : 0), 0.40000001f);
     }
+    return 0;
 }
 
 // VERIFY: 7b66e8de auto

@@ -5,6 +5,7 @@
 #include <new>
 #include "Engine/Source/Gx/CGxDeviceD3d9Ex/CGxDeviceD3d9Ex.h"
 #include "Engine/Source/Gx/Blit.h"
+#include "Engine/Source/Gx/CGxDeviceD3d/D3d9SceneDepth.h"
 #include "Engine/Source/Gx/CGxBuf.h"
 #include "Engine/Source/Gx/CGxPool.h"
 #include "Engine/Source/Gx/CGxTex.h"
@@ -3575,199 +3576,21 @@ void CGxDeviceD3d9Ex::DeviceSetRenderTarget(EGxBuffer buffer, CGxTex* texture, u
     this->m_scissorRectDirty = 1;
 }
 
-// VFOG: not in 12340 (coa-vfog d3d9_wrap.cpp CreateDepth). Called from IStateSetD3DDefaults, so after device create
-// and after every Reset (WM_SIZE, lost device), just before m_defDepthSurface is read back: with an INTZ texture
-// bound, m_defDepthSurface is its surface and every place that rebinds the main depth (DeviceSetRenderTarget,
-// DeviceSave/RestoreDepthSurface) keeps it. No INTZ: the auto depth-stencil stays bound.
-// MSAA back buffer (coa-vfog msaa_depth.cpp): the multisampled auto depth-stencil stays bound and INTZ is only a copy
-// target, filled by the driver's RESZ resolve (AMD, Intel, DXVK; sample 0) in DeviceCopySceneDepth. No RESZ: nullptr.
-// ponytail: the auto depth-stencil is still allocated (unused) while INTZ is bound; turn EnableAutoDepthStencil off in
-// ISetPresentParms if the VRAM matters.
+// VFOG: INTZ/RESZ scene depth, shared with the other D3D9 backend (D3d9SceneDepth.h).
 void CGxDeviceD3d9Ex::ICreateSceneDepth() {
-    const D3DFORMAT intz = static_cast<D3DFORMAT>(MAKEFOURCC('I', 'N', 'T', 'Z'));
-    const D3DFORMAT resz = static_cast<D3DFORMAT>(MAKEFOURCC('R', 'E', 'S', 'Z'));
-    D3DSURFACE_DESC desc;
-
-    if (this->m_sceneDepthTexture || !this->m_defColorSurface || FAILED(this->m_defColorSurface->GetDesc(&desc))) {
-        return;
-    }
-
-    bool msaa = desc.MultiSampleType != D3DMULTISAMPLE_NONE;
-
-    if (FAILED(this->m_d3d->CheckDeviceFormat(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, this->m_devAdapterFormat, D3DUSAGE_DEPTHSTENCIL, D3DRTYPE_TEXTURE, intz))
-        || (msaa && FAILED(this->m_d3d->CheckDeviceFormat(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, this->m_devAdapterFormat, D3DUSAGE_RENDERTARGET, D3DRTYPE_SURFACE, resz)))) {
-        return;
-    }
-
-    if (FAILED(this->m_d3dDevice->CreateTexture(desc.Width, desc.Height, 1, D3DUSAGE_DEPTHSTENCIL, intz, D3DPOOL_DEFAULT, &this->m_sceneDepthTexture, nullptr))) {
-        this->m_sceneDepthTexture = nullptr;
-        return;
-    }
-
-    if (msaa) {
-        this->m_sceneDepthResz = true;
-        return;
-    }
-
-    LPDIRECT3DSURFACE9 surface = nullptr;
-
-    if (FAILED(this->m_sceneDepthTexture->GetSurfaceLevel(0, &surface)) || FAILED(this->m_d3dDevice->SetDepthStencilSurface(surface))) {
-        if (surface) {
-            surface->Release();
-        }
-
-        this->IReleaseSceneDepth();
-        return;
-    }
-
-    // The device keeps its own reference while it is bound; m_defDepthSurface takes one more in GetDepthStencilSurface.
-    surface->Release();
+    d3d9scenedepth::Create(this);
 }
 
-// VFOG: D3DPOOL_DEFAULT, so it goes with the other default-pool objects before a Reset (IReleaseD3dResources).
 void CGxDeviceD3d9Ex::IReleaseSceneDepth() {
-    this->m_sceneDepthResz = false;
-    if (this->m_sceneDepthTex) {
-        this->m_sceneDepthTex->m_apiSpecificData = nullptr;
-    }
-
-    if (this->m_sceneDepthTexture) {
-        this->m_sceneDepthTexture->Release();
-        this->m_sceneDepthTexture = nullptr;
-    }
+    d3d9scenedepth::Release(this);
 }
 
-// VFOG: CGxDevice.h contract. No copy: the INTZ texture is the bound depth-stencil itself, sampled (.r = depth 0..1,
-// point filter) while the caller draws with depth test and write off, as coa-vfog does. MSAA: INTZ is a RESZ copy of
-// the bound multisampled depth instead. nullptr when INTZ is not in use (MSAA without RESZ, unsupported, device lost).
-// VFOG: reading a texture that is the bound depth-stencil is undefined in D3D9 even with depth test and write off.
 void CGxDeviceD3d9Ex::DeviceSceneDepthBound(bool bound) {
-    if (!this->m_d3dDevice) {
-        return;
-    }
-    if (bound) {
-        if (this->m_sceneDepthUnbound) {
-            this->m_d3dDevice->SetDepthStencilSurface(this->m_sceneDepthUnbound);
-            this->m_sceneDepthUnbound->Release();
-            this->m_sceneDepthUnbound = nullptr;
-        }
-        return;
-    }
-    if (this->m_sceneDepthUnbound || !this->m_sceneDepthTexture) {
-        return;
-    }
-    LPDIRECT3DSURFACE9 bound0 = nullptr;
-    LPDIRECT3DSURFACE9 intz = nullptr;
-    if (SUCCEEDED(this->m_d3dDevice->GetDepthStencilSurface(&bound0)) && bound0 && SUCCEEDED(this->m_sceneDepthTexture->GetSurfaceLevel(0, &intz))) {
-        if (bound0 == intz) {
-            this->m_d3dDevice->SetDepthStencilSurface(nullptr);
-            this->m_sceneDepthUnbound = bound0;     // keeps the reference until it goes back
-            bound0 = nullptr;
-        }
-    }
-    if (intz) {
-        intz->Release();
-    }
-    if (bound0) {
-        bound0->Release();
-    }
-}
-
-// VFOG (coa-vfog msaa_depth.cpp ResolveThroughResz): the bound multisampled depth-stencil resolved into INTZ by the
-// driver (sample 0). INTZ on stage 0, one point drawn so the binding reaches the driver, then the RESZ code written to
-// D3DRS_POINTSIZE. Everything touched is read back first and put back, so the Gx state caches stay true.
-bool CGxDeviceD3d9Ex::IResolveSceneDepthResz() {
-    const D3DRENDERSTATETYPE states[] = { D3DRS_ZENABLE, D3DRS_ZWRITEENABLE, D3DRS_COLORWRITEENABLE, D3DRS_POINTSIZE };
-    DWORD saved[4] = {};
-    IDirect3DBaseTexture9* texture = nullptr;
-    IDirect3DVertexShader9* vs = nullptr;
-    IDirect3DPixelShader9* ps = nullptr;
-    IDirect3DVertexDeclaration9* decl = nullptr;
-    IDirect3DVertexBuffer9* stream = nullptr;
-    UINT offset = 0;
-    UINT stride = 0;
-    DWORD fvf = 0;
-    auto* dev = this->m_d3dDevice;
-
-    for (int i = 0; i < 4; i++) {
-        dev->GetRenderState(states[i], &saved[i]);
-    }
-
-    dev->GetTexture(0, &texture);
-    dev->GetVertexShader(&vs);
-    dev->GetPixelShader(&ps);
-    dev->GetVertexDeclaration(&decl);
-    dev->GetFVF(&fvf);
-    dev->GetStreamSource(0, &stream, &offset, &stride);
-
-    dev->SetVertexShader(nullptr);
-    dev->SetPixelShader(nullptr);
-    dev->SetFVF(D3DFVF_XYZ);
-    dev->SetTexture(0, this->m_sceneDepthTexture);
-    dev->SetRenderState(D3DRS_ZENABLE, FALSE);
-    dev->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
-    dev->SetRenderState(D3DRS_COLORWRITEENABLE, 0);
-    const float point[3] = {};
-    bool drawn = SUCCEEDED(dev->DrawPrimitiveUP(D3DPT_POINTLIST, 1, point, sizeof(point)));
-    dev->SetRenderState(D3DRS_ZWRITEENABLE, TRUE);
-    dev->SetRenderState(D3DRS_ZENABLE, TRUE);
-    dev->SetRenderState(D3DRS_COLORWRITEENABLE, 0xF);
-    dev->SetRenderState(D3DRS_POINTSIZE, 0x7FA05000);   // RESZ
-
-    for (int i = 0; i < 4; i++) {
-        dev->SetRenderState(states[i], saved[i]);
-    }
-
-    dev->SetTexture(0, texture);
-    dev->SetVertexShader(vs);
-    dev->SetPixelShader(ps);
-    dev->SetVertexDeclaration(decl);
-
-    if (fvf) {
-        dev->SetFVF(fvf);
-    }
-
-    dev->SetStreamSource(0, stream, offset, stride);
-
-    for (IUnknown* p : { static_cast<IUnknown*>(texture), static_cast<IUnknown*>(vs), static_cast<IUnknown*>(ps), static_cast<IUnknown*>(decl), static_cast<IUnknown*>(stream) }) {
-        if (p) {
-            p->Release();
-        }
-    }
-
-    return drawn;
+    d3d9scenedepth::Bound(this, bound);
 }
 
 CGxTex* CGxDeviceD3d9Ex::DeviceCopySceneDepth(bool* transient) {
-    if (!this->m_context || !this->m_sceneDepthTexture) {
-        return nullptr;
-    }
-
-    D3DSURFACE_DESC desc;
-
-    if (FAILED(this->m_sceneDepthTexture->GetLevelDesc(0, &desc))) {
-        return nullptr;
-    }
-
-    if (this->m_sceneDepthResz && !this->IResolveSceneDepthResz()) {
-        return nullptr;
-    }
-
-    if (!this->m_sceneDepthTex) {
-        CGxTexFlags flags(GxTex_Nearest);
-        // Render target: 9Ex's ISetTexture/ITexTouch then never try to acquire it or put it in the texture cache.
-        flags.m_renderTarget = 1;
-        this->m_sceneDepthTex = new CGxTex(GxTex_2d, desc.Width, desc.Height, 0, GxTex_D24X8, GxTex_D24X8, flags, nullptr, nullptr, "VFogSceneDepth");
-    }
-
-    CGxTex* texture = this->m_sceneDepthTex;
-    texture->m_width = desc.Width;
-    texture->m_height = desc.Height;
-    texture->m_apiSpecificData = this->m_sceneDepthTexture;
-    texture->m_needsCreation = 0;
-    texture->m_needsUpdate = 0;
-
-    return texture;
+    return d3d9scenedepth::Copy(this, transient);
 }
 
 // VERIFY: b2b2eee4 auto

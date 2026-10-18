@@ -1,6 +1,7 @@
 // Copies and read-backs off the scene image: D3D's StretchRect from the back buffer into a texture,
 // and the back buffer's pixels for a screenshot.
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Frame/Internal.hpp"
+#include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Texture/Internal.hpp"
 
 #include <cstring>
 
@@ -8,23 +9,11 @@ using namespace gxvk::vk::frame::detail;
 
 namespace
 {
-    /// A whole-image layout transition of one image on the main buffer.
+    /// A whole-image layout transition of one image (texture's shared helper).
     void Transition(VkCommandBuffer cmd, const texture::Image& img, VkImageLayout from, VkImageLayout to,
                     VkPipelineStageFlags srcStage, VkAccessFlags srcAccess, VkPipelineStageFlags dstStage, VkAccessFlags dstAccess)
     {
-        VkImageMemoryBarrier b = {};
-        b.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        b.srcAccessMask                   = srcAccess;
-        b.dstAccessMask                   = dstAccess;
-        b.oldLayout                       = from;
-        b.newLayout                       = to;
-        b.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
-        b.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
-        b.image                           = img.handle;
-        b.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
-        b.subresourceRange.levelCount     = img.levels;
-        b.subresourceRange.layerCount     = img.layers;
-        s.dapi->CmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &b);
+        gxvk::vk::texture::detail::Transition(cmd, img.handle, img.levels, img.layers, from, to, srcStage, srcAccess, dstStage, dstAccess);
     }
 
     constexpr VkPipelineStageFlags kReaders = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
@@ -34,7 +23,6 @@ namespace
     void TransitionDepth(VkCommandBuffer cmd, VkImage image, VkFormat format, VkImageLayout from, VkImageLayout to,
                          VkPipelineStageFlags srcStage, VkAccessFlags srcAccess, VkPipelineStageFlags dstStage, VkAccessFlags dstAccess)
     {
-        const bool stencil = format == VK_FORMAT_D24_UNORM_S8_UINT || format == VK_FORMAT_D32_SFLOAT_S8_UINT || format == VK_FORMAT_D16_UNORM_S8_UINT;
         VkImageMemoryBarrier b = {};
         b.sType                       = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         b.srcAccessMask               = srcAccess;
@@ -44,7 +32,7 @@ namespace
         b.srcQueueFamilyIndex         = VK_QUEUE_FAMILY_IGNORED;
         b.dstQueueFamilyIndex         = VK_QUEUE_FAMILY_IGNORED;
         b.image                       = image;
-        b.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | (stencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0u);
+        b.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | (gxvk::vk::HasStencil(format) ? VK_IMAGE_ASPECT_STENCIL_BIT : 0u);
         b.subresourceRange.levelCount = 1;
         b.subresourceRange.layerCount = 1;
         s.dapi->CmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &b);
@@ -57,7 +45,9 @@ namespace gxvk::vk::frame
 {
     bool CopyFromScene(texture::Image& dst, uint32_t layer, uint32_t level, const VkRect2D& src, const VkRect2D& dstRect, bool linear)
     {
-        if (dst.handle == VK_NULL_HANDLE || layer >= dst.layers || level >= dst.levels) return false;
+        // An active query pins the pass, and Outside() would hand out the pre-pass, which runs ahead
+        // of the draws whose colour is wanted: refused, as CopyDepthFromScene does.
+        if (dst.handle == VK_NULL_HANDLE || layer >= dst.layers || level >= dst.levels || s.queryActive) return false;
         VkCommandBuffer cmd = Outside();
         if (!cmd || s.scene.handle == VK_NULL_HANDLE || s.scene.layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) return false;
 
@@ -128,7 +118,8 @@ namespace gxvk::vk::frame
                         kReaders, 0,
                         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
 
-        // DEPTH aspect only: the stencil is never loaded across passes (stencilLoadOp DONT_CARE).
+        // DEPTH aspect only: the passes do keep the stencil (Targets.cpp), but the snapshot is read
+        // for its depth alone.
         VkImageCopy copy = {};
         copy.srcSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
         copy.srcSubresource.layerCount = 1;
@@ -153,7 +144,7 @@ namespace gxvk::vk::frame
 
     bool ReadScene(const VkRect2D& rect, uint8_t* out)
     {
-        if (!out || rect.extent.width == 0 || rect.extent.height == 0) return false;
+        if (!out || rect.extent.width == 0 || rect.extent.height == 0 || s.queryActive) return false;   // see CopyFromScene
         VkCommandBuffer cmd = Outside();
         if (!cmd || s.scene.handle == VK_NULL_HANDLE || s.scene.layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) return false;
         if (rect.offset.x < 0 || rect.offset.y < 0 || rect.offset.x + rect.extent.width > s.scene.extent.width

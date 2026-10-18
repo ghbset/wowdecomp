@@ -3,6 +3,7 @@
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Pipelines/Internal.hpp"
 
 #include <cstring>
+#include <new>
 
 namespace
 {
@@ -437,7 +438,7 @@ namespace
         depth.maxDepthBounds   = 1.0f;
         if (k.stencil & 1u)
         {
-            // EGxStencilCmp/Op are the D3D values, Vulkan's plus 1. The ref is in the key, not dynamic.
+            // EGxStencilCmp/Op are the D3D values, Vulkan's plus 1. The reference is dynamic state.
             VkStencilOpState face = {};
             face.compareOp   = static_cast<VkCompareOp>(((k.stencil >> 1) & 0xFu) - 1u);
             face.failOp      = static_cast<VkStencilOp>(((k.stencil >> 5) & 0xFu) - 1u);
@@ -445,7 +446,6 @@ namespace
             face.passOp      = static_cast<VkStencilOp>(((k.stencil >> 13) & 0xFu) - 1u);
             face.compareMask = k.stencilMasks & 0xFFu;
             face.writeMask   = (k.stencilMasks >> 8) & 0xFFu;
-            face.reference   = (k.stencilMasks >> 16) & 0xFFu;
             depth.stencilTestEnable = VK_TRUE;
             depth.front             = face;
             depth.back              = face;
@@ -456,10 +456,11 @@ namespace
         blending.attachmentCount = 1;
         blending.pAttachments    = &blend;
 
-        const VkDynamicState dynamics[4] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_DEPTH_BIAS, VK_DYNAMIC_STATE_BLEND_CONSTANTS };
+        const VkDynamicState dynamics[5] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_DEPTH_BIAS, VK_DYNAMIC_STATE_BLEND_CONSTANTS,
+                                             VK_DYNAMIC_STATE_STENCIL_REFERENCE };
         VkPipelineDynamicStateCreateInfo dynamic = {};
         dynamic.sType             = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-        dynamic.dynamicStateCount = 4;
+        dynamic.dynamicStateCount = 5;
         dynamic.pDynamicStates    = dynamics;
 
         VkGraphicsPipelineCreateInfo info = {};
@@ -495,20 +496,66 @@ namespace
 
 namespace gxvk::vk::pipelines::detail
 {
+    /// FNV-1a over the key's bytes (zeroed first, padding included).
+    static uint32_t HashOf(const Key& k)
+    {
+        const uint8_t* b = reinterpret_cast<const uint8_t*>(&k);
+        uint32_t h = 2166136261u;
+        for (size_t i = 0; i < sizeof k; ++i) h = (h ^ b[i]) * 16777619u;
+        return h;
+    }
+
+    /// Doubles the dense table and rebuilds the index (kFirstPipelines on the first call). Entry
+    /// pointers handed out earlier are stale afterwards; Record uses its entry before the next Lookup.
+    bool GrowPipelines()
+    {
+        const uint32_t cap   = s.entryCap ? s.entryCap * 2 : kFirstPipelines;
+        Entry*         dense = new (std::nothrow) Entry[cap];
+        uint32_t*      index = new (std::nothrow) uint32_t[cap * 2];
+        if (!dense || !index)
+        {
+            delete[] dense;
+            delete[] index;
+            Write(Error, "vulkan: pipelines: cannot grow the pipeline table to %u", cap);
+            return false;
+        }
+        std::memset(index, 0, sizeof(uint32_t) * cap * 2);
+        for (uint32_t i = 0; i < s.entryCount; ++i)
+        {
+            dense[i] = s.entries[i];
+            uint32_t p = HashOf(dense[i].key) & (cap * 2 - 1);
+            while (index[p]) p = (p + 1) & (cap * 2 - 1);
+            index[p] = i + 1;
+        }
+        delete[] s.entries;
+        delete[] s.index;
+        s.entries  = dense;
+        s.index    = index;
+        s.entryCap = cap;
+        return true;
+    }
+
     /// The entry of a key: found, or built and remembered -- a refused key too, with a null
-    /// pipeline, so its draws are skipped without a second attempt. Null when the table is full.
+    /// pipeline, so its draws are skipped without a second attempt. Null only when the table
+    /// cannot grow (out of memory).
     const Entry* Lookup(const Key& k)
     {
-        for (uint32_t i = 0; i < s.entryCount; ++i)
-            if (std::memcmp(&s.entries[i].key, &k, sizeof k) == 0) return &s.entries[i];
-        if (s.entryCount == kMaxPipelines)
-        {
-            if (!s.warnedFull)
+        // Consecutive draws mostly repeat the state.
+        if (s.lastHit && std::memcmp(&s.entries[s.lastHit - 1].key, &k, sizeof k) == 0) return &s.entries[s.lastHit - 1];
+
+        const uint32_t mask = s.entryCap * 2 - 1;
+        uint32_t       p    = HashOf(k) & mask;
+        for (; s.index[p]; p = (p + 1) & mask)
+            if (std::memcmp(&s.entries[s.index[p] - 1].key, &k, sizeof k) == 0)
             {
-                s.warnedFull = true;
-                Write(Warn, "vulkan: pipelines: %u pipelines live, the table is full; further distinct draws are skipped (logged once)", kMaxPipelines);
+                s.lastHit = s.index[p];
+                return &s.entries[s.index[p] - 1];
             }
-            return nullptr;
+        if (s.entryCount == s.entryCap)
+        {
+            if (!GrowPipelines()) return nullptr;
+            p = HashOf(k) & (s.entryCap * 2 - 1);
+            while (s.index[p]) p = (p + 1) & (s.entryCap * 2 - 1);
         }
         VkPipeline pipeline = VK_NULL_HANDLE;
         Build(k, pipeline);
@@ -516,6 +563,8 @@ namespace gxvk::vk::pipelines::detail
         // Bytewise, padding included: the lookup above compares the whole struct.
         std::memcpy(&e.key, &k, sizeof k);
         e.pipeline = pipeline;
+        s.index[p] = s.entryCount;
+        s.lastHit  = s.entryCount;
         if (pipeline != VK_NULL_HANDLE) ++s.stats.pipelines;
         return &e;
     }
@@ -527,6 +576,8 @@ namespace gxvk::vk::pipelines::detail
         for (uint32_t i = 0; i < s.entryCount; ++i)
             if (s.entries[i].pipeline != VK_NULL_HANDLE) s.dapi->DestroyPipeline(s.device, s.entries[i].pipeline, nullptr);
         s.entryCount      = 0;
+        s.lastHit         = 0;
+        if (s.index) std::memset(s.index, 0, sizeof(uint32_t) * s.entryCap * 2);
         s.stats.pipelines = 0;
         s.bound           = Bound();
     }

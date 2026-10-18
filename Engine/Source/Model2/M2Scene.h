@@ -71,7 +71,7 @@ class CM2Scene {
     /* 0054 */ TSGrowableArray<uint32_t> m_passElements [3];
     /* 0084 */ C44Matrix m_view;
     /* 00C4 */ C44Matrix m_viewInv;
-    /* 0104 */ void (*m_projectTextureCallback)(const CAaBox&, const CImVector&, int32_t, void*, int32_t);
+    /* 0104 */ int32_t (*m_projectTextureCallback)(const CAaBox&, const CImVector&, int32_t, void*, int32_t);   // BENILLA: returns whether anything was hit (12340: void)
     /* 0108 */ void* m_projectTextureParam;
     /* 010C */ int32_t (*m_projectPositionCallback)(const C3Vector&, float&, void*);
     /* 0110 */ void* m_projectPositionParam;
@@ -124,7 +124,7 @@ class CM2Scene {
     void SelectLights(CM2Lighting* lighting);
     void SetFloat18(float value);
     void SetProjectPositionCallback(int32_t (*callback)(const C3Vector&, float&, void*), void* param);
-    void SetProjectTextureCallback(void (*callback)(const CAaBox&, const CImVector&, int32_t, void*, int32_t), void* param);
+    void SetProjectTextureCallback(int32_t (*callback)(const CAaBox&, const CImVector&, int32_t, void*, int32_t), void* param);
     void SetTime(uint32_t time);
     void SortAdditiveParticleElements(uint32_t pass);
     uint32_t SphereTestModels(const C3Vector& start, const C3Vector& dir, float length, int32_t frameCheck);

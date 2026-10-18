@@ -93,13 +93,24 @@ static int32_t s_pumping;
 static uint32_t s_mipBitsSize;
 
 static void MipBitsReserve(uint32_t format, uint32_t width, uint32_t height) {
+    // One 4096^2 BLP grows the buffer to ~90 MB; Wow32's address space should not keep that for the session.
+    // After this many loads in a row that fit the stock 1024^2 size, it shrinks back to that.
+    constexpr uint32_t kShrinkAfter = 64;
+    static uint32_t smallRun;
+    const uint32_t base = MippedImgCalcSize(PIXEL_ARGB8888, 1024, 1024);
     uint32_t size = MippedImgCalcSize(format, width, height);
 
-    if (size > s_mipBitsSize) {
-        SMemFree(s_mipBits, __FILE__, __LINE__, 0);
-        s_mipBits = static_cast<MipBits*>(SMemAlloc(size, __FILE__, __LINE__, 0));
-        s_mipBitsSize = size;
+    smallRun = size <= base ? smallRun + 1 : 0;
+
+    if (size <= base && s_mipBitsSize > base && smallRun >= kShrinkAfter) {
+        size = base;
+    } else if (size <= s_mipBitsSize) {
+        return;
     }
+
+    SMemFree(s_mipBits, __FILE__, __LINE__, 0);
+    s_mipBits = static_cast<MipBits*>(SMemAlloc(size, __FILE__, __LINE__, 0));
+    s_mipBitsSize = size;
 }
 
 // STATIC: 0x00B49C98

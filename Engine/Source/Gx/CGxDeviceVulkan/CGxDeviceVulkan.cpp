@@ -193,7 +193,10 @@ int32_t CGxDeviceVulkan::ICreateVulkan(const CGxFormat& format) {
     this->m_vulkanPending = 0;
 
     if (context::Live()) {
-        frame::Drain();   // RENDERTHREAD: nothing in flight on the old swapchain while Rebind replaces it
+        // RENDERTHREAD: nothing in flight on the old swapchain while Rebind replaces it. An open
+        // frame is submitted first: the new generation makes EnsureImageObjects destroy the scene
+        // and framebuffers its unsubmitted commands name.
+        frame::Flush();
 
         // A device that is up and a window that is new: the format changed, or the engine restarted
         // its graphics. Rebind sees the HWND differ and rebuilds surface and swapchain.

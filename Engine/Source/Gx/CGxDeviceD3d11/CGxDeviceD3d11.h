@@ -13,6 +13,8 @@
 
 // D3D11 backend, modelled on 4.3.4 (15595) CGxDeviceD3d11 (vtable 0x00BD5710). Not part of 12340: no OFFSET tags.
 // Selected with `SET gxApi "D3D11"`. See README.md in this folder for what is real and what is stubbed.
+class CVar;
+
 class CGxDeviceD3d11 : public CGxDevice {
     public:
     // CGxPool::m_apiSpecific. Every pool keeps a CPU copy: locks write into it, unlocks push the locked range to
@@ -34,6 +36,7 @@ class CGxDeviceD3d11 : public CGxDevice {
         // What ITexDesc asked for at creation: a CGxTex whose flags have since changed (TexSetFlags, the texture
         // cache reusing it) is recreated when ITexDesc now asks for something else.
         D3D11_TEXTURE2D_DESC m_wanted;
+        uint32_t m_wantedKey[6];    // ITexDesc's inputs when m_wanted last matched (ITexMarkAsUpdated's fast path)
     };
 
     // CGxTex::m_apiSpecificData2, followed by the texels. Not stock: a CPU copy of what ITexUpload sent, for textures
@@ -65,16 +68,22 @@ class CGxDeviceD3d11 : public CGxDevice {
     ID3D11Texture2D* m_depthTexture;
     ID3D11DepthStencilView* m_depthDsv;
     ID3D11ShaderResourceView* m_depthSrv;
-    static constexpr int kRtDepthSlots = 4;     // FFX glow (full/half/quarter) + vfog low-res: one scratch depth each
+    // One scratch depth per colour-target size (FFX glow full/half/quarter, vfog low-res, water waves, RTT mips).
+    // ponytail: fixed 16 slots, round robin past that; a (w,h) map if more sizes ever show up.
+    static constexpr int kRtDepthSlots = 16;
     ID3D11Texture2D* m_rtDepthTexture[kRtDepthSlots];
     ID3D11DepthStencilView* m_rtDepthDsv[kRtDepthSlots];
     uint32_t m_rtDepthNext;     // slot replaced on the next miss (round robin)
     ID3D11Texture2D* m_resolveTexture;
+    bool m_resolveValid;    // m_resolveTexture matches the back buffer: no draw, clear or present since the resolve
     CGxTex* m_sceneDepthCopy; // VFOG: DeviceCopySceneDepth's GxTex_D24X8 (or R32F) snapshot of m_depthTexture
     ID3D11Buffer* m_constantBuffers[2]; // [0] VS b0, [1] PS b0: app register files (s_shadowConstants)
     // What m_constantBuffers hold. Only the dirty range of s_shadowConstants is copied in, as D3D9 uploads only
     // [dirtyMin, dirtyMax]: registers outside it keep their last value instead of the FLT_MAX the frame clear writes.
     float m_gpuConstants[2][256 * 4];
+    uint32_t m_cbBytes[2];  // b0 bytes the bound VS / PS declares (DxbcCb0Bytes; 0 for FF)
+    uint32_t m_cbSent[2];   // valid bytes in m_constantBuffers since its last DISCARD map
+    CVar* m_a2cVar;         // gxAlphaToCoverage
     ID3D11Buffer* m_ffConstantBuffers[2]; // [0] VS b0, [1] PS b0 while a fixed-function stage is bound
     ID3D11Buffer* m_devConstantBuffer; // b1 in both stages (shader-xlate README)
     ID3D11Buffer* m_fanIndexBuffer;

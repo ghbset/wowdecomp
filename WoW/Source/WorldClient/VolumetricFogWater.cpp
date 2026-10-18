@@ -63,7 +63,6 @@ constexpr float kSunVisibilityHalfWidth = 0.1f;
 constexpr float kWaterF0 = 0.02f;
 constexpr float kMinClarity = 0.01f;
 constexpr float kShoreDistancePerDepth = 4.0f;
-constexpr float kWindDirection[2] = { 0.8f, 0.6f };
 constexpr int kFftResolutionLow = 128;              // coa: 128 at WaterQuality=1, 256 above
 constexpr int kFftResolution = 256;
 constexpr uint32_t kMinTargetSize = 8;
@@ -504,13 +503,6 @@ CGxTex* s_flat;
 bool s_callbackAdded;
 bool s_shaderMissing;
 
-void DestroyTex(CGxTex*& tex) {
-    if (tex) {
-        GxTexDestroy(tex);
-        tex = nullptr;
-    }
-}
-
 void DestroyTextures() {
     DestroyTex(s_targets.sceneColour);
     DestroyTex(s_targets.sceneDepth);
@@ -532,13 +524,9 @@ void DestroyTextures() {
 
 void __fastcall OnDeviceRestored() {
     DestroyTextures();
-}
-
-CGxShader* Shader(CGxShader*& slot, const char* name) {
-    if (!slot) {
-        g_theGxDevicePtr->ShaderCreate(&slot, GxSh_Pixel, "Shaders\\Pixel", name, 1);
-    }
-    return slot && slot->Valid() ? slot : nullptr;
+    WaveGpuDeviceRestored();
+    DropInvalidShaders(&s_shaders.depth, sizeof(s_shaders) / sizeof(CGxShader*));
+    s_shaderMissing = false;    // a failed shader create is retried
 }
 
 CGxTex* CreateTex(uint32_t w, uint32_t h, EGxTexFormat format, EGxTexFilter filter, bool wrap, bool target, void* arg, GxTexUserFunc func, const char* name) {
@@ -1044,7 +1032,20 @@ bool WaterArm(Liquid::CInstance** instances, uint32_t count) {
     if (!any) {
         return false;
     }
-    std::stable_sort(instances, instances + count, [](const Liquid::CInstance* a, const Liquid::CInstance* b) { return ClassOf(a) < ClassOf(b); });
+    // Stable by class: a counting sort into a kept buffer (std::stable_sort allocates every call).
+    static std::vector<Liquid::CInstance*> s_sorted;
+    s_sorted.resize(count);
+    uint32_t start[kWaterClassCount + 1] = {};
+    for (uint32_t i = 0; i < count; i++) {
+        start[static_cast<int>(ClassOf(instances[i])) + 1]++;
+    }
+    for (int c = 0; c < kWaterClassCount; c++) {
+        start[c + 1] += start[c];
+    }
+    for (uint32_t i = 0; i < count; i++) {
+        s_sorted[start[static_cast<int>(ClassOf(instances[i]))]++] = instances[i];
+    }
+    std::copy(s_sorted.begin(), s_sorted.end(), instances);
     s_pass = {};
     s_pass.armed = true;
     s_pass.in = in;

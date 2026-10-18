@@ -121,10 +121,13 @@ namespace gxvk::vk::queries
     {
         Query* e = Of(q);
         if (!e || e->active || frame::QueryActive()) return false;
-        // The reset ahead of the frame, outside any pass; the begin on the frame's pass.
-        VkCommandBuffer pre = frame::PrePass();
-        if (!pre) return false;
-        s.dapi->CmdResetQueryPool(pre, s.pool, q - 1, 1);
+        // The reset ahead of the frame, outside any pass; the begin on the frame's pass. A query
+        // already ended in this frame is reset in order on the main buffer instead (the pass is
+        // cut for it): a second pre-pass reset would run before the first use.
+        const bool      reuse = e->serial != 0 && frame::UsedThisFrame(e->serial);
+        VkCommandBuffer reset = reuse ? frame::Outside() : frame::PrePass();
+        if (!reset) return false;
+        s.dapi->CmdResetQueryPool(reset, s.pool, q - 1, 1);
         if (!frame::BeginQuery(s.pool, q - 1, s.precise)) return false;
         e->active = true;
         e->issued = true;

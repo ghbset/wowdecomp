@@ -590,6 +590,9 @@ bool Active() {
     return s_active;
 }
 
+bool s_decidedInLiquid = false;    // the liquid status this frame's DecideFrame ran on
+void DecideFrame(bool inLiquid);
+
 void OnWorldUpdate() {
     // DayNight::UpdateFog rebuilt DNInfo fog this frame; a push left over from a frame that never rendered the world
     // (OnWorldDone not reached) must not be snapshotted as the stock fog.
@@ -606,8 +609,13 @@ void OnWorldUpdate() {
         LoadFogData();   // missing or invalid: the derived layers are used (coa)
     }
 
-    const bool inLiquid = World::SceneCamLiquidStatus(nullptr) != 0;
     s_glowFed = false;
+    DecideFrame(World::SceneCamLiquidStatus(nullptr) != 0);
+}
+
+// The per-frame activation from the camera's liquid status (OnWorldUpdate, and OnViewerLiquid when it changed).
+void DecideFrame(bool inLiquid) {
+    s_decidedInLiquid = inLiquid;
     s_active = s_cfg.enable && g_theGxDevicePtr->MasterEnable(GxMasterEnable_Fog) && (!inLiquid || s_cfg.underwater) && RendererReady();
 
     if (!s_active) {
@@ -637,7 +645,21 @@ void OnViewerLiquid() {
     // OnWorldUpdate decided on last frame's liquid status (UpdateViewerLiquid writes it later, in CWorldScene::Render,
     // which calls this right after it and before anything is drawn): the camera just went under, so the frame takes
     // the underwater branch, which has no composite. Give it the stock fog.
-    if (!s_active || s_in.inLiquid || !World::SceneCamLiquidStatus(nullptr)) {
+    const bool inLiquid = World::SceneCamLiquidStatus(nullptr) != 0;
+    if (inLiquid == s_decidedInLiquid) {
+        return;
+    }
+    if (!inLiquid) {
+        // Just surfaced: decide again for above water, so this frame is not left on the stock fog.
+        if (s_pushed) {
+            RestoreStockFog();
+        }
+        InvalidateHistory();
+        DecideFrame(false);
+        return;
+    }
+    s_decidedInLiquid = true;
+    if (!s_active) {
         return;
     }
     RestoreStockFog();

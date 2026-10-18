@@ -743,7 +743,7 @@ class Emitter(object):
 # The alpha test of every translated pixel module (misc.x = alphaRef / 255; < 0 = alpha-to-coverage).
 A2C_TEST = ('    if (regs.misc.x < 0.0) {{ {v}.a = clamp(({v}.a + regs.misc.x) / max(fwidth({v}.a), 1e-4) + 0.5, 0.0, 1.0); '
             'if ({v}.a <= 0.0) discard; }}\n'
-            '    else if (regs.misc.x > 0.0 && {v}.a < regs.misc.x) discard;')
+            '    else if (regs.misc.x > 0.0 && floor({v}.a * 255.0 + 0.5) < floor(regs.misc.x * 255.0 + 0.5)) discard;')
 
 RULES = {
     0: Emitter.r_nop, 1: Emitter.r_mov, 2: Emitter.r_add, 3: Emitter.r_sub, 4: Emitter.r_mad,
@@ -806,9 +806,9 @@ def companion_module(em, rec):
     else:
         P('//   stage 0 samples s0 at (0, 0): the vertex shader writes no texcoord;')
     P('//   the texel combines with CURRENT by the EGxTexOp in misc.z (colour) / misc.w (alpha)')
-    P('//   (0 Mod, 1 Mod2x, 2 Add, 3 PassThru, 4 Decal, 5 Fade; 6 = stage 0 has no texture, the')
-    P('//   cascade ends), saturated as D3D saturates each stage;')
-    P('//   the alpha test: discard when misc.x > 0 and a < misc.x;')
+    P('//   (0 Mod, 1 Mod2x, 2 Add, 3 PassThru, 4 Decal, 5 Fade; above 5 the stage is skipped),')
+    P('//   saturated as D3D saturates each stage;')
+    P('//   the alpha test: discard when misc.x > 0 and the 8-bit alpha < misc.x * 255;')
     if fixed_fog:
         P('//   fog: oFog is the fog FACTOR with a programmable vertex shader (FOGVERTEXMODE is')
         P('//   ignored), blended as f * rgb + (1 - f) * fogColor only while D3DRS_FOGENABLE is on.')

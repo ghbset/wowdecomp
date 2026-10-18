@@ -243,7 +243,7 @@ int32_t CM2Scene::SortHitNear(uint32_t a, uint32_t b, const void* param) {
 
 // VERIFY: 31f1f896 auto
 // OFFSET: 0x0081CC30
-void CM2Scene::SetProjectTextureCallback(void (*callback)(const CAaBox&, const CImVector&, int32_t, void*, int32_t), void* param) {
+void CM2Scene::SetProjectTextureCallback(int32_t (*callback)(const CAaBox&, const CImVector&, int32_t, void*, int32_t), void* param) {
     this->m_projectTextureCallback = callback;
     this->m_projectTextureParam = param;
 }

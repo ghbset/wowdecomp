@@ -237,6 +237,7 @@ namespace gxvk::vk::frame::detail
             Write(Debug, "vulkan: frame: the render thread saw VK_ERROR_SURFACE_LOST_KHR; the surface is remade");
         }
         if (rt.failed.load() && !s.failed) Fail(rt.failWhat ? rt.failWhat : "the render thread", rt.failResult);
+        gxvk::vk::present::LogPending();
     }
 
     bool RtHandOff(uint32_t fi, uint64_t serial, bool wantPresent)

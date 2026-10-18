@@ -23,8 +23,6 @@
 namespace VolumetricFog {
 namespace {
 
-constexpr double kLoopSeconds = 1024.0;
-constexpr double kMaxFoamStepSeconds = 0.1;     // coa kMaxFoamStepSeconds, as the CPU path
 constexpr int kMaxLevels = 9;                   // 256 -> 1
 
 struct GpuTile {
@@ -48,8 +46,9 @@ struct Gpu {
     CGxShader* fft = nullptr;
     CGxShader* surface = nullptr;
     CGxShader* mip = nullptr;
-    CGxShader* pack = nullptr;
-    bool unsupported = false;
+    CGxShader* pack = nullptr;      // evolve .. pack contiguous (WaveGpuDeviceRestored)
+    bool unsupported = false;       // missing caps or shaders: until the device is restored
+    double retryAt = -1.0;          // a texture create failed: the CPU path until then
     int resolution = 0;
     CGxTex* chain[3] = {};          // FFT ping-pong: [0] heightAndX, [2] alongY, [1] scratch
     CGxTex* moments[kMaxLevels] = {};
@@ -57,13 +56,8 @@ struct Gpu {
 };
 
 Gpu s_gpu;
-
-void Destroy(CGxTex*& tex) {
-    if (tex) {
-        GxTexDestroy(tex);
-        tex = nullptr;
-    }
-}
+constexpr double kRetrySeconds = 5.0;
+constexpr double kStepsPerSecond = 60.0;
 
 void H0Callback(EGxTexCommand command, uint32_t width, uint32_t height, uint32_t depth, uint32_t mipLevel, void* userArg, uint32_t& stride, const void*& texels) {
     // userArg = the tile's spectrum vector (h0 or h0Low)
@@ -83,12 +77,12 @@ CGxTex* Create(uint32_t side, EGxTexFormat format, EGxTexFilter filter, bool tar
 }
 
 void DestroyTile(GpuTile& t) {
-    Destroy(t.h0);
-    Destroy(t.h0Low);
-    Destroy(t.foam[0]);
-    Destroy(t.foam[1]);
-    Destroy(t.slopes);
-    Destroy(t.state);
+    DestroyTex(t.h0);
+    DestroyTex(t.h0Low);
+    DestroyTex(t.foam[0]);
+    DestroyTex(t.foam[1]);
+    DestroyTex(t.slopes);
+    DestroyTex(t.state);
     t.configured = false;
     t.foamValid = false;
     t.mapsValid = false;
@@ -96,10 +90,10 @@ void DestroyTile(GpuTile& t) {
 
 void DestroyAll() {
     for (CGxTex*& tex : s_gpu.chain) {
-        Destroy(tex);
+        DestroyTex(tex);
     }
     for (CGxTex*& tex : s_gpu.moments) {
-        Destroy(tex);
+        DestroyTex(tex);
     }
     for (GpuTile& t : s_gpu.tiles) {
         DestroyTile(t);
@@ -107,20 +101,13 @@ void DestroyAll() {
     s_gpu.resolution = 0;
 }
 
-CGxShader* Load(CGxShader*& slot, const char* name) {
-    if (!slot) {
-        g_theGxDevicePtr->ShaderCreate(&slot, GxSh_Pixel, "Shaders\\Pixel", name, 1);
-    }
-    return slot && slot->Valid() ? slot : nullptr;
-}
-
-bool Prepare(int n) {
+bool Prepare(int n, double seconds) {
     CGxDevice* device = g_theGxDevicePtr;
-    if (s_gpu.unsupported) {
+    if (s_gpu.unsupported || seconds < s_gpu.retryAt) {
         return false;
     }
-    if (!device->Caps().m_rttAbgr16161616F || !device->Caps().m_rttFormat[GxTex_Argb8888] || !Load(s_gpu.evolve, "VFogWaveEvolve")
-        || !Load(s_gpu.fft, "VFogWaveFft") || !Load(s_gpu.surface, "VFogWaveSurface") || !Load(s_gpu.mip, "VFogWaveMip") || !Load(s_gpu.pack, "VFogWavePack")) {
+    if (!device->Caps().m_rttAbgr16161616F || !device->Caps().m_rttFormat[GxTex_Argb8888] || !Shader(s_gpu.evolve, "VFogWaveEvolve")
+        || !Shader(s_gpu.fft, "VFogWaveFft") || !Shader(s_gpu.surface, "VFogWaveSurface") || !Shader(s_gpu.mip, "VFogWaveMip") || !Shader(s_gpu.pack, "VFogWavePack")) {
         s_gpu.unsupported = true;
         return false;
     }
@@ -137,7 +124,7 @@ bool Prepare(int n) {
     }
     if (!ok) {
         DestroyAll();
-        s_gpu.unsupported = true;
+        s_gpu.retryAt = seconds + kRetrySeconds;
         return false;
     }
     s_gpu.resolution = n;
@@ -255,7 +242,7 @@ void StepTile(GpuTile& t, double seconds) {
 }  // namespace
 
 bool WaveGpuStep(const std::vector<WaterFftTile>& tiles, uint32_t tileMask, const WaveSettings& settings, double seconds, const WorldViewport& vp) {
-    if (!g_theGxDevicePtr || !Prepare(settings.resolution)) {
+    if (!g_theGxDevicePtr || !Prepare(settings.resolution, seconds)) {
         return false;
     }
     bool ok = true;
@@ -266,14 +253,17 @@ bool WaveGpuStep(const std::vector<WaterFftTile>& tiles, uint32_t tileMask, cons
     }
     if (!ok) {
         WaveGpuRelease();
-        s_gpu.unsupported = true;
+        s_gpu.retryAt = seconds + kRetrySeconds;
         return false;
     }
     static SavedPassState s_saved;
     BeginPasses(s_saved);
     for (int i = 0; i < kWaterMaxTiles && i < static_cast<int>(tiles.size()); i++) {
-        if (tileMask & (1u << i)) {
-            StepTile(s_gpu.tiles[i], seconds);
+        GpuTile& t = s_gpu.tiles[i];
+        // At most kStepsPerSecond steps (the waves are smooth at that rate; the work no longer grows with fps).
+        const bool due = !t.mapsValid || t.lastSeconds < 0.0 || seconds < t.lastSeconds || seconds - t.lastSeconds >= 1.0 / kStepsPerSecond;
+        if ((tileMask & (1u << i)) && due) {
+            StepTile(t, seconds);
         }
     }
     GxRenderTargetSet(GxBuffers_Color, vp.target, 0);
@@ -292,6 +282,13 @@ bool WaveGpuMaps(int tile, CGxTex*& slopes, CGxTex*& state) {
 
 void WaveGpuRelease() {
     DestroyAll();
+}
+
+void WaveGpuDeviceRestored() {
+    DestroyAll();
+    DropInvalidShaders(&s_gpu.evolve, 5);     // evolve .. pack
+    s_gpu.unsupported = false;
+    s_gpu.retryAt = -1.0;
 }
 
 void WaveGpuShutdown() {

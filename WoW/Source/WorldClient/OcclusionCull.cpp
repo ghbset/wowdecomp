@@ -57,12 +57,28 @@ namespace {
     std::unordered_map<const void*, Entry> s_entries;
     std::vector<Entry*> s_toQuery;
     std::vector<CGxQuery*> s_free;
+    std::vector<CGxQuery*> s_draining;   ///< released while still in flight: free once their result is in
     uint32_t s_created;
 
-    void Release(Entry& e) {
+    /// `idle`: the query has no result pending (answered, or never begun), so it can be reused at once.
+    void Release(Entry& e, bool idle = false) {
         if (e.query) {
-            s_free.push_back(e.query);
+            (idle ? s_free : s_draining).push_back(e.query);
             e.query = nullptr;
+        }
+    }
+
+    void Drain() {
+        for (size_t i = 0; i < s_draining.size();) {
+            uint32_t available = 0;
+
+            if (GxQueryGetParam(s_draining[i], GxQueryParam_Unk1, &available) && available) {
+                s_free.push_back(s_draining[i]);
+                s_draining[i] = s_draining.back();
+                s_draining.pop_back();
+            } else {
+                i++;
+            }
         }
     }
 
@@ -125,6 +141,7 @@ void OcclusionCull::BeginFrame() {
         // swap is rare. Destroy them on the old device if that ever matters.
         ResetAll();
         s_free.clear();
+        s_draining.clear();
         s_created = 0;
         s_device = g_theGxDevicePtr;
     }
@@ -141,6 +158,7 @@ void OcclusionCull::BeginFrame() {
     s_lastCam = cam;
     s_frame++;
     s_toQuery.clear();
+    Drain();
 
     for (auto it = s_entries.begin(); it != s_entries.end();) {
         Entry& e = it->second;
@@ -153,7 +171,7 @@ void OcclusionCull::BeginFrame() {
                 uint32_t samples = 1;
                 e.occluded = GxQueryGetData(e.query, &samples) && samples == 0;
                 e.answerAt = e.queryAt;
-                Release(e);
+                Release(e, true);
             }
         }
 
@@ -212,8 +230,8 @@ void OcclusionCull::IssueQueries() {
     }
 
     // Each queued entry gets a query or is left without one (counts as visible next frame).
-    std::vector<Entry*> batch;
-    batch.reserve(s_toQuery.size());
+    static std::vector<Entry*> batch;   // static: reused every frame
+    batch.clear();
 
     for (Entry* e : s_toQuery) {
         if (CameraInside(e->box, kInsidePad)) {
@@ -301,7 +319,7 @@ void OcclusionCull::IssueQueries() {
         Entry* e = batch[b];
 
         if (!GxQueryBegin(e->query)) {
-            Release(*e);
+            Release(*e, true);
             e->occluded = false;
             continue;
         }

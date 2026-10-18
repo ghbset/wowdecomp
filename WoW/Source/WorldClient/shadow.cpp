@@ -503,12 +503,12 @@ static int32_t ProjectTexRenderGetQuery2d(const CAaBox& box, uint32_t flags, uin
 
 // VERIFY: f32d24b7 manual
 // OFFSET: 0x007E3AA0
-void ProjectTex2dDrawShaderEffect(const CAaBox& box, const CImVector& color, uint32_t triFlags, uint32_t flags, float polygonOffset) {
+int32_t ProjectTex2dDrawShaderEffect(const CAaBox& box, const CImVector& color, uint32_t triFlags, uint32_t flags, float polygonOffset) {
     int32_t doodads;
     int32_t tris;
 
     if (!ProjectTexRenderGetQuery2d(box, flags, triFlags, &doodads, &tris)) {
-        return;
+        return 0;   // BENILLA: returns the query hit (12340: void)
     }
 
     CGxAppRenderState* states = g_theGxDevicePtr->m_appRenderStates.m_data;
@@ -603,6 +603,8 @@ void ProjectTex2dDrawShaderEffect(const CAaBox& box, const CImVector& color, uin
     if (polygonOffset != 0.0f) {
         GxRsSet(GxRs_PolygonOffset, savedOffset);
     }
+
+    return 1;
 }
 
 // VERIFY: f18827e8 manual

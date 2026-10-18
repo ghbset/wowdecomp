@@ -461,9 +461,9 @@ void CGxDeviceVulkan::IRenderStates(pipelines::Draw& d) {
         float step;
 
         switch (frame::DepthFormat()) {
+            // D32: r = 2^(e-23) for the primitive's largest exponent e, so 2^-24 over [0.5,1) where
+            // the scene's depths are -- the same step as D24, matching D3D there.
             case VK_FORMAT_D16_UNORM:  step = 65536.0f;    break;
-            case VK_FORMAT_D32_SFLOAT:
-            case VK_FORMAT_D32_SFLOAT_S8_UINT: step = 8388608.0f;  break;
             default:                   step = 16777216.0f; break;
         }
 

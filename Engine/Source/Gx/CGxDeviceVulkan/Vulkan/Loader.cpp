@@ -311,6 +311,7 @@ namespace gxvk::vk::loader
         GXVK_DEVICE_PROC(CmdDraw);
         GXVK_DEVICE_PROC(CmdSetDepthBias);
         GXVK_DEVICE_PROC(CmdSetBlendConstants);
+        GXVK_DEVICE_PROC(CmdSetStencilReference);
 
         GXVK_DEVICE_PROC(CmdCopyImage);
         GXVK_DEVICE_PROC(CmdCopyImageToBuffer);

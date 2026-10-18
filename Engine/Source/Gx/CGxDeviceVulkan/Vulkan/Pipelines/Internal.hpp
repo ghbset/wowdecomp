@@ -56,9 +56,9 @@ namespace gxvk::vk::pipelines::detail
     using gxvk::vk::pipelines::VertexProgram;
     using gxvk::vk::pipelines::FragmentProgram;
 
-    /// Pipelines kept at once: a session's distinct combinations are some hundreds with the
-    /// translated families; a full table refuses the draw and says so once.
-    constexpr uint32_t kMaxPipelines = 2048;
+    /// The pipeline table's first capacity: a session's distinct combinations are some hundreds
+    /// with the translated families. A full table doubles (entries and index), so no key is refused.
+    constexpr uint32_t kFirstPipelines = 1024;
 
     /// The push constants of Shaders/Push.glsl: a mat4, a vec4 and three vec4 of texture transform,
     /// 128 bytes (Vulkan's guaranteed maxPushConstantsSize). Every pipeline layout carries the
@@ -139,7 +139,7 @@ namespace gxvk::vk::pipelines::detail
         uint16_t     fragmentRecord;
         uint32_t     layoutIndex;     ///< the set-0 layout (sampler-slot set)
         uint32_t     stencil;         ///< Draw::stencil (0: off)
-        uint32_t     stencilMasks;    ///< Draw::stencilMasks, 0 when off
+        uint32_t     stencilMasks;    ///< Draw::stencilMasks without the reference (dynamic state), 0 when off
         uint32_t     alphaToCoverage; ///< 0 / 1 (gxAlphaToCoverage, MSAA passes only)
     };
 
@@ -173,6 +173,8 @@ namespace gxvk::vk::pipelines::detail
         bool             biasSet          = false;
         float            blendConstant[4] = {};
         bool             blendSet         = false;
+        uint32_t         stencilRef       = 0;
+        bool             stencilRefSet    = false;
     };
 
     struct SamplerEntry
@@ -233,8 +235,11 @@ namespace gxvk::vk::pipelines::detail
         VkDescriptorPool      regsPool   = VK_NULL_HANDLE;    ///< the set-1 sets, for the session
         VkPipelineCache       cache      = VK_NULL_HANDLE;
         memory::Buffer        constant;                       ///< the constant stream (kConstantBytes)
-        Entry*                entries    = nullptr;           ///< kMaxPipelines, heap
+        Entry*                entries    = nullptr;           ///< entryCap, heap, dense
         uint32_t              entryCount = 0;
+        uint32_t              entryCap   = 0;
+        uint32_t*             index      = nullptr;           ///< 2 * entryCap slots, open-addressed: dense index + 1, 0 empty
+        uint32_t              lastHit    = 0;                 ///< dense index + 1 of the last key found, 0 none
         uint32_t              passGen    = 0;                 ///< the generation the entries were built for
         Bound                 bound;
 
@@ -255,8 +260,7 @@ namespace gxvk::vk::pipelines::detail
         bool           whiteCubeFailed = false;
 
         gxvk::vk::pipelines::Stats stats;
-        bool warnedFull     = false;
-        bool warnedKey      = false;
+            bool warnedKey      = false;
         bool warnedSamplers = false;
         bool warnedSets     = false;
         bool warnedLayouts  = false;
@@ -277,6 +281,7 @@ namespace gxvk::vk::pipelines::detail
 
     // Build.cpp
     const Entry* Lookup(const Key& k);
+    bool GrowPipelines();
     void DropPipelines();
 
     // Samplers.cpp
