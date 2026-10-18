@@ -96,6 +96,12 @@ CVar* CWorldParam::cvar_objectFade;
 
 // STATIC: 0x00CD85D0
 CVar* CWorldParam::cvar_objectFadeZFill;
+CVar* CWorldParam::cvar_lodObjectCull;
+CVar* CWorldParam::cvar_lodObjectCullSize;
+CVar* CWorldParam::cvar_lodObjectCullDist;
+CVar* CWorldParam::cvar_lodObjectMinSize;
+CVar* CWorldParam::cvar_lodObjectFadeScale;
+float CWorldParam::s_lodObjectPixScale;
 
 // STATIC: 0x00CD85D4
 CVar* CWorldParam::cvar_environmentDetail;
@@ -652,6 +658,12 @@ void CWorldParam::Initialize() {
     CWorldParam::cvar_groundEffectDist = CVar::Register("groundEffectDist", "Ground effect dist", 1, "70.0", CWorldParam::GroundEffectDistCallback, CATEGORY_GRAPHICS, false, nullptr, false);
     CWorldParam::cvar_objectFade = CVar::Register("objectFade", "Fade objects into view", 1, "1", CWorldParam::ObjectFadeCallback, CATEGORY_GRAPHICS, false, nullptr, false);
     CWorldParam::cvar_objectFadeZFill = CVar::Register("objectFadeZFill", "Fade objects using ZFill pass ", 1, "0", CWorldParam::ObjectFadeZFillCallback, CATEGORY_GRAPHICS, false, nullptr, false);
+    // LEGION objcull: values are clamped to the Legion ranges where they are read (World.cpp).
+    CWorldParam::cvar_lodObjectCull = CVar::Register("lodObjectCull", "Fade out world doodads only a few pixels tall (0/1)", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    CWorldParam::cvar_lodObjectCullSize = CVar::Register("lodObjectCullSize", "Doodad cull size, 5 = 1 pixel of projected height (1-100)", 1, "15", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    CWorldParam::cvar_lodObjectCullDist = CVar::Register("lodObjectCullDist", "Doodads nearer than this (yards) are never size culled (1-200)", 1, "30", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    CWorldParam::cvar_lodObjectMinSize = CVar::Register("lodObjectMinSize", "Doodads with a radius of at least this / 10 yards are never size culled (0-1000)", 1, "100", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    CWorldParam::cvar_lodObjectFadeScale = CVar::Register("lodObjectFadeScale", "Size cull fade band, percent of the cull size (50-300)", 1, "100", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     CWorldParam::cvar_environmentDetail = CVar::Register("environmentDetail", "Environment detail", 1, "1.0", CWorldParam::EnvironmentDetailCallback, CATEGORY_GRAPHICS, false, nullptr, false);
     CWorldParam::cvar_hwPCF = CVar::Register("hwPCF", "Hardware PCF Filtering", 1, "1", CWorldParam::HWPCFCallback, CATEGORY_GRAPHICS, false, nullptr, false);
     CWorldParam::cvar_extShadowQuality = CVar::Register("extShadowQuality", "Quality of exterior shadows (0-5)", 1, "0", CWorldParam::ExtShadowQualityCallback, CATEGORY_GRAPHICS, false, nullptr, false);

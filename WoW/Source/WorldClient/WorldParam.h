@@ -38,6 +38,13 @@ class CWorldParam {
     static CVar* cvar_extShadowQuality;
     static CVar* cvar_projectedTextures;
     static CVar* cvar_gxTextureCacheSize;
+    // LEGION objcull (7.3.5 0x00C6EE2D): screen-size small-doodad culling, see AddDoodadDefModelToModelScene.
+    static CVar* cvar_lodObjectCull;
+    static CVar* cvar_lodObjectCullSize;
+    static CVar* cvar_lodObjectCullDist;
+    static CVar* cvar_lodObjectMinSize;
+    static CVar* cvar_lodObjectFadeScale;
+    static float s_lodObjectPixScale;   // screen height / tan(fovy / 2), set per frame in CWorldScene::Render
 
     static bool BaseMipCallback(CVar* var, const char* oldValue, const char* value, void* arg);
     static bool BspCacheCallback(CVar* var, const char* oldValue, const char* value, void* arg);
