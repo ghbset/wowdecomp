@@ -346,6 +346,8 @@ extern DNStars g_stars;
 extern DNSky g_sky;
 extern DNClouds g_clouds;
 extern DNPlanets g_planets;
+extern C3Vector g_sunToward;    // not stock: unit, toward the sun disc (SetPlanets)
+extern C3Vector g_moonToward;   // not stock: unit, toward the moon disc
 extern DNSunGlare g_sunGlare;
 extern DNMoonGlare g_moonGlare;
 extern TSGrowableArray<const LightRec*> g_areaLights;

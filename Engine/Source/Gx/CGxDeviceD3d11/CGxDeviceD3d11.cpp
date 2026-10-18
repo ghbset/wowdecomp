@@ -2801,6 +2801,15 @@ void CGxDeviceD3d11::IStateSyncTextures() {
         desc.ComparisonFunc = D3D11_COMPARISON_NEVER;
         desc.MaxLOD = flags.m_filter <= GxTex_Linear ? 0.0f : D3D11_FLOAT32_MAX;
 
+        // Hardware PCF (S1b): a D24X8 render target here is a ShadowCache map (hwPCF), which the _pcf shaders read
+        // with SampleCmpLevelZero (shader-xlate pcf_slots). D3D9's depth-texture compare is ref <= depth, bilinear
+        // for a linear map. The vfog scene-depth copy is the one D24X8 read as plain depth. 4.3.4 IGetSamplerState.
+        if (texture->m_format == GxTex_D24X8 && flags.m_renderTarget && texture != this->m_sceneDepthCopy) {
+            desc.Filter = flags.m_filter == GxTex_Nearest ? D3D11_FILTER_COMPARISON_MIN_MAG_MIP_POINT : D3D11_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT;
+            desc.ComparisonFunc = D3D11_COMPARISON_LESS_EQUAL;
+            desc.MaxLOD = 0.0f;
+        }
+
         ID3D11SamplerState* sampler = static_cast<ID3D11SamplerState*>(this->IStateGet(State_Sampler, &desc, sizeof(desc)));
         this->m_d3dContext->PSSetSamplers(i, 1, &sampler);
     }

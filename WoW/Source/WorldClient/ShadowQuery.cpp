@@ -5,6 +5,8 @@
 #include <cmath>
 #include "Engine/Source/Model2/M2Light.h"
 #include "Engine/Source/ShaderEffect/ShadowCache.h"
+#include "Engine/Source/Os/TimeManager.h"
+#include "WoW/Source/WorldClient/DayNight.h"
 #include "WoW/Source/ObjectMgrClient/ObjectMgrClient.h"
 #include "WoW/Source/Object/ObjectClient/Object_C.h"
 #include "WoW/Source/UIUtil/Camera.h"
@@ -34,6 +36,11 @@
 #include "WoW/Source/WorldClient/MapObjGroup.h"
 #include "WoW/Source/WorldClient/CMapBaseObjLink.h"
 
+// Not stock: gfxSunShadows (wxl-light's Sun.cpp shadow_sun), gfxShadowSnap, gfxShadowAnchor (northlight).
+static CVar* s_cvSunShadows;
+static CVar* s_cvShadowSnap;
+static CVar* s_cvShadowAnchor;
+
 // STATIC: 0x00D25300
 uint8_t CShadowQuery::s_stamp;
 
@@ -60,6 +67,9 @@ void CShadowQuery::Initialize() {
     g_shadowCull = CVar::Register("shadowCull", "enable shadow frustum culling", 0, "1", nullptr, CATEGORY_DEFAULT, false, nullptr, false);
     g_shadowScissor = CVar::Register("shadowScissor", "enable scissoring when rendering shadowmaps", 0, "1", nullptr, CATEGORY_DEFAULT, false, nullptr, false);
     g_shadowInstancing = CVar::Register("shadowInstancing", "enable instancing when rendering shadowmaps", 0, "1", nullptr, CATEGORY_DEFAULT, false, nullptr, false);
+    s_cvSunShadows = CVar::Register("gfxSunShadows", "Shadows fall from the sun or moon in the sky (0 = stock steep light)", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    s_cvShadowSnap = CVar::Register("gfxShadowSnap", "Shadow maps move in whole texels so shadow edges do not crawl (0 = stock)", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    s_cvShadowAnchor = CVar::Register("gfxShadowAnchor", "Shadow cascades stay put while the player jumps (0 = stock)", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
 
     CShadowCache::Initialize();
 }
@@ -97,24 +107,206 @@ static void GetViewerPosition(C3Vector* position) {
     }
 }
 
+// The shadow light (gfxSunShadows): the sun disc while it is up, else the moon, kept between these elevations.
+// Under the floor shadows run off to infinity and the maps' fixed bias lets go of the ground; over the ceiling
+// noon is flat. (Re-applied from e258860 without its sun arc: the stock sun and moon share one bearing, 45 deg,
+// the same as the stock world light's, so the shading and the shadows agree on the side and only the length
+// follows the clock.)
+static const float kShadowMinElev = 12.0f, kShadowMaxElev = 70.0f;   // degrees
+// Degrees the light may move before the cached maps are redrawn, at 30 degrees up; scaled by sin^2 so a low sun
+// steps finer, never under kLatchFloor. (At 0.25 each step was a visible shift of every shadow, the user,
+// 2026-10-06; at 0.01 the light steps every two or three seconds by a twenty-fifth of that.)
+static const float kLatchStep = 0.01f, kLatchFloor = 0.004f;
+static const float kLatchJump = 5.0f;          // degrees: more than this at once (sun to moon) is taken at once
+static const uint32_t kLatchWaitMs = 2000;     // a step waits for the near maps to finish, but not longer
+static C3Vector s_latch(0.0f, 0.0f, 1.0f);     // toward the light, as the shadow maps have it
+static int32_t s_haveLatch;
+static uint32_t s_latchMs;
+static int32_t s_lightBody;                    // 0 the sun, 1 the moon
+
+/// Toward the sun or moon (unit) and its height in degrees, as DayNight::SetPlanets placed the discs. (Kept from
+/// SetPlanets' own sines rather than disc minus camera: at world coordinates that difference is noisy enough, a few
+/// thousandths of a degree, to trip the latch every frame while moving.)
+static bool LightBody(C3Vector& toward, float& elevDeg) {
+    const C3Vector dir[2] = { DayNight::g_sunToward, DayNight::g_moonToward };
+    float elev[2];
+
+    for (int32_t b = 0; b < 2; b++) {
+        if (!std::isfinite(dir[b].z)) {
+            return false;
+        }
+
+        float z = dir[b].z < -1.0f ? -1.0f : (dir[b].z > 1.0f ? 1.0f : dir[b].z);
+        elev[b] = std::asin(z) * 57.29578f;
+    }
+
+    if (elev[0] > 0.0f) {
+        s_lightBody = 0;
+    } else if (elev[1] > 0.0f) {
+        s_lightBody = 1;
+    }
+
+    toward = dir[s_lightBody];
+    elevDeg = elev[s_lightBody];
+    return true;
+}
+
+/// The direction the shadow maps' light travels this frame; false = the stock light.
+///
+/// Cached maps (shadow quality 3..4) are drawn for one direction and projected with whatever is stored now, so the
+/// stored direction moves in steps, and each step sends the idle maps round again (CShadowCache::s_bandRedraw).
+static bool SunShadowDir(C3Vector& out) {
+    EShadowMode mode = CShadowCache::GetShadowMode();
+    bool cached = mode > SHADOW_MEDIUM && mode < SHADOW_VERY_HIGH;
+
+    if (!s_cvSunShadows || !s_cvSunShadows->m_intValue) {
+        if (s_haveLatch && cached) {
+            CShadowCache::s_bandRedraw |= 7u;   // back to the stock light: the cached maps are for the old one
+        }
+
+        s_haveLatch = 0;
+        return false;
+    }
+
+    C3Vector body;
+    float elev;
+
+    if (!LightBody(body, elev)) {
+        return false;
+    }
+
+    // Toward the body, its elevation kept inside the floor and ceiling, its bearing as it is.
+    float clamped = elev < kShadowMinElev ? kShadowMinElev : (elev > kShadowMaxElev ? kShadowMaxElev : elev);
+    float el = clamped * 0.017453292f;
+    float h = std::sqrt(body.x * body.x + body.y * body.y);
+    C3Vector want(0.0f, 0.0f, 1.0f);
+
+    if (h > 1e-4f) {
+        want = C3Vector(body.x / h * std::cos(el), body.y / h * std::cos(el), std::sin(el));
+    }
+
+    uint32_t now = OsGetAsyncTimeMs();
+    bool step = !s_haveLatch || mode >= SHADOW_VERY_HIGH;
+    bool jumped = false;
+    const CShadowBand* bands = CShadowCache::s_extShadowBands;
+
+    if (!step) {
+        // By the chord, not acos of the dot: a hundredth of a degree is under what a float's dot can tell from 1.
+        float dx = want.x - s_latch.x, dy = want.y - s_latch.y, dz = want.z - s_latch.z;
+        float moved = std::sqrt(dx * dx + dy * dy + dz * dz) * 57.29578f;
+        float s = want.z * want.z / 0.25f;   // sin^2 against 30 degrees
+        s = s < 0.1f ? 0.1f : (s > 1.0f ? 1.0f : s);
+        float threshold = kLatchStep * s > kLatchFloor ? kLatchStep * s : kLatchFloor;
+        bool idle = bands[0].m_updateCount == 0 && bands[1].m_updateCount == 0;
+        jumped = moved > kLatchJump;
+        step = jumped || (moved > threshold && (idle || now - s_latchMs > kLatchWaitMs));
+    }
+
+    if (step) {
+        bool first = !s_haveLatch;
+        s_latch = want;
+        s_haveLatch = 1;
+        s_latchMs = now;
+
+        if (cached) {
+            for (uint32_t c = 0; c < 3; c++) {
+                // (after a jump, one caught half redrawn too: its finished tiles are for the old direction)
+                if (bands[c].m_updateCount == 0 || first || jumped) {
+                    CShadowCache::s_bandRedraw |= 1u << c;
+                }
+            }
+        }
+    }
+
+    out = C3Vector(-s_latch.x, -s_latch.y, -s_latch.z);
+    return true;
+}
+
+// Jump-stable cascade anchor (gfxShadowAnchor), after northlight's src/shadows/cascade_anchor.h (MIT, (c) 2026
+// lepola): the bands follow the viewer's x/y, but their z is the lowest viewer z over the last second, so a jump
+// (up and down in under a second) leaves the bands where they were and sends no cached band round again. Going
+// down follows at once; climbing lags by at most a second of climb, never more than kAnchorMaxLag. A teleport or
+// a new map starts afresh.
+static const uint32_t kAnchorWindowMs = 1000;
+static const float kAnchorReset = 40.0f;      // yd moved in one frame that counts as a teleport
+static const float kAnchorMaxLag = 24.0f;     // yd; band 0 reaches 40 yd, so the player stays well inside it
+static const uint32_t kAnchorCapacity = 256;  // window entries; when full the oldest drops (a shorter window)
+
+struct AnchorSample {
+    uint32_t ms;
+    float z;
+};
+
+static AnchorSample s_anchorMinima[kAnchorCapacity];   // ring, z and time increasing from the front
+static uint32_t s_anchorHead, s_anchorCount;
+static C3Vector s_anchorLast;
+static int32_t s_anchorMap = -1;
+
+static C3Vector JumpStableCentre(const C3Vector& pivot, uint32_t now) {
+    float dx = pivot.x - s_anchorLast.x, dy = pivot.y - s_anchorLast.y, dz = pivot.z - s_anchorLast.z;
+
+    if (s_anchorMap != DayNight::s_mapId || dx * dx + dy * dy + dz * dz > kAnchorReset * kAnchorReset) {
+        s_anchorCount = 0;
+    }
+
+    s_anchorMap = DayNight::s_mapId;
+    s_anchorLast = pivot;
+
+    while (s_anchorCount && s_anchorMinima[(s_anchorHead + s_anchorCount - 1) % kAnchorCapacity].z >= pivot.z) {
+        s_anchorCount--;
+    }
+
+    if (s_anchorCount == kAnchorCapacity) {
+        s_anchorHead = (s_anchorHead + 1) % kAnchorCapacity;
+        s_anchorCount--;
+    }
+
+    s_anchorMinima[(s_anchorHead + s_anchorCount) % kAnchorCapacity] = { now, pivot.z };
+    s_anchorCount++;
+
+    while (now - s_anchorMinima[s_anchorHead].ms > kAnchorWindowMs) {   // the newest sample always stays
+        s_anchorHead = (s_anchorHead + 1) % kAnchorCapacity;
+        s_anchorCount--;
+    }
+
+    float lowest = pivot.z - kAnchorMaxLag;
+    float z = s_anchorMinima[s_anchorHead].z;
+    return C3Vector(pivot.x, pivot.y, z > lowest ? z : lowest);
+}
+
 // VERIFY: aa0465cc auto
 // OFFSET: 0x007BB570
 void CShadowQuery::Update() {
     C3Vector direction = CMap::s_mapLight->m_light.m_dir;
     int32_t useCullFrustum = CWorldScene::frustumPortalView.m_maxViewDepth >= 0.0f || CWorldScene::s_hasPendingExteriorGroups;
-    float z = direction.z * 5.0f;
 
-    if (z < -1.2f) {
-        z = -1.2f;
+    // gfxSunShadows: the true sun (or moon) direction instead of the world light steepened (z x5, clamped).
+    if (!SunShadowDir(direction)) {
+        direction = CMap::s_mapLight->m_light.m_dir;
+        float z = direction.z * 5.0f;
+
+        if (z < -1.2f) {
+            z = -1.2f;
+        }
+
+        float inv = 1.0f / std::sqrt(direction.y * direction.y + direction.x * direction.x + z * z);
+        direction.x = direction.x * inv;
+        direction.y = direction.y * inv;
+        direction.z = z * inv;
     }
 
-    float inv = 1.0f / std::sqrt(direction.y * direction.y + direction.x * direction.x + z * z);
-    direction.x = direction.x * inv;
-    direction.y = direction.y * inv;
-    direction.z = z * inv;
     CShadowCache::PreUpdate(direction);
     C3Vector viewer(0.0f, 0.0f, 0.0f);
     GetViewerPosition(&viewer);
+
+    CShadowCache::s_texelSnap = s_cvShadowSnap && s_cvShadowSnap->m_intValue;
+    CShadowCache::s_haveBandCentre = s_cvShadowAnchor && s_cvShadowAnchor->m_intValue;
+
+    if (CShadowCache::s_haveBandCentre) {
+        CShadowCache::s_bandCentre = JumpStableCentre(viewer, OsGetAsyncTimeMs());
+    } else {
+        s_anchorCount = 0;
+    }
     CShadowCache::SetDebugParams(1.0f, 0);
     CShadowCache::Update(viewer, useCullFrustum);
     CShadowCache::PostUpdate();
