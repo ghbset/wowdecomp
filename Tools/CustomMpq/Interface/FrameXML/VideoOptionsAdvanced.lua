@@ -79,6 +79,8 @@ local PAGES = {
 	},
 	{ name = "World Effects", parent = "Advanced", title = "World Effects",
 	  { "groundDecals", "check", "Ground effects follow terrain", "Spell circles on the ground bend over hills instead of floating flat." },
+	  { "treeSway", "check", "Trees sway in the wind", "Living trees and bushes lean gently in passing gusts. Their shadows move with them." },
+	  { "treeSwayStrength", "slider", "Tree sway amount", "How far trees and bushes lean in the wind.", 0, 3, 0.05 },
 	  { "weatherSteadyRate", "check", "Steady weather", "Rain, snow and sand fall just as thickly at any frame rate." },
 	  { "selectionCircleStyle", "drop", "Target circle", "The look of the circle under your target.",
 	    { { "0", "Stock" }, { "1", "Arrow" }, { "2", "Arrow, no fill" }, { "3", "Ring" }, { "4", "Ring, no fill" } } },
