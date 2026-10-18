@@ -675,3 +675,21 @@ Published as `2026.10.18-vfog23`:
 - **FFX** (`FFX::Finish`): the glow is skipped when `GxTexCopy` fails instead of compositing a stale copy.
 
 No shader or custom.MPQ changes.
+
+## 2026-10-18: vfog24, audit leftovers and sun shadows
+
+Published as `2026.10.18-vfog24`:
+
+- **Audit leftovers** (`fix-leftovers`): scene depth is-a-copy and depth-fresh flags (P9, P13: the water's and the
+  fog's depth copies share one snapshot); Vulkan refills of sampled images renamed into the pre-pass, inline fills
+  deferred past queries (P4, L2); VFog model helpers shared (O4) and `RenderFog` split into pass functions (O3);
+  vertex register generation skips the slice memcmp (P3, partial). Merged with vfog23's `OutsideAfterClears()`: the
+  depth-fresh skip also requires no pending depth clear, so a skipped copy never returns pre-clear depth.
+- **Shadows S1** (`shadow-s1`): D3D11 comparison sampler (hardware PCF) for D24X8 shadow targets, with the new SM4
+  pack from shader-xlate 6f64417 in custom.MPQ (exe and pack ship together).
+- **Shadows S2** (`shadow-s2`): sun shadows follow the real sun/moon direction, shadow maps snap to whole texels,
+  cascade anchor holds through jumps; CVars `gfxSunShadows`, `gfxShadowSnap`, `gfxShadowAnchor` (default 1), new
+  Video Options > Advanced > Shadows page.
+
+custom.MPQ: 5121 files, vfog22's SPIR-V set unchanged (spirv-val clean); only the SM4 pack and
+`VideoOptionsAdvanced.lua` differ. Checks: `check_gpu_waves.py` PASS, GroundDecalCheck ok.
