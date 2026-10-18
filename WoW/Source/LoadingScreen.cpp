@@ -1,4 +1,5 @@
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <malloc.h>
 #include "Engine/Source/Base/Handle.h"
@@ -12,6 +13,7 @@
 #include "Engine/Source/Gx/Gx.h"
 #include "Engine/Source/Gxu/Gxu.h"
 #include "Engine/Source/Os/TimeManager.h"
+#include "Engine/Source/ConsoleBase/ConsoleVar.h"
 #include "Engine/Source/Scrn/Scrn.h"
 #include "Engine/Source/Services/TextBlock.h"
 #include "Engine/Source/SoundEngine/SoundEngine.h"
@@ -67,6 +69,7 @@ static float s_wideAspect = 1.6f;
 
 // STATIC: 0x00AB63BC
 static int32_t s_simpleMapID = -1;
+int32_t s_fastLoad = 1;   // BACKLOG F5: CVar fastLoad
 
 // STATIC: 0x00AB63C0
 static uint16_t s_indices[4] = { 0, 1, 2, 3 };
@@ -459,6 +462,49 @@ static void PaintLoadingBar(const BackgroundImage* images, int32_t count, CTextu
     }
 }
 
+// BACKLOG F5 (wxl-loading map_<id> lines): CVar loadingScreens = "<mapID>:<screenID>,<screenID>;<mapID>:...".
+// A map listed there gets a random one of its LoadingScreens.dbc ids each load; others keep their own.
+static int32_t PickLoadingScreen(int32_t mapID, int32_t screenID) {
+    CVar* cvar = CVar::Lookup("loadingScreens");
+    const char* p = cvar ? cvar->m_stringValue.m_str : nullptr;
+
+    while (p && *p) {
+        char* end;
+        long map = strtol(p, &end, 10);
+        const char* stop = strchr(p, ';');
+
+        if (!stop) {
+            stop = p + strlen(p);
+        }
+
+        if (end != p && *end == ':' && map == mapID) {
+            int32_t ids[64];
+            int32_t count = 0;
+
+            for (const char* q = end + 1; q < stop && count < 64;) {
+                long id = strtol(q, &end, 10);
+
+                if (end == q) {
+                    q++;
+                    continue;
+                }
+
+                if (id > 0) {
+                    ids[count++] = static_cast<int32_t>(id);
+                }
+
+                q = end;
+            }
+
+            return count ? ids[OsGetAsyncTimeMs() % count] : screenID;
+        }
+
+        p = *stop ? stop + 1 : stop;
+    }
+
+    return screenID;
+}
+
 // VERIFY: e5620ae9 manual
 // OFFSET: 0x00409ED0
 static bool LoadSimpleBackgroundTexture() {
@@ -466,7 +512,11 @@ static bool LoadSimpleBackgroundTexture() {
     MapRec* mapRec = g_mapDB.GetRecord(s_simpleMapID);
 
     if (mapRec) {
-        LoadingScreensRec* screenRec = g_loadingScreensDB.GetRecord(mapRec->m_loadingScreenID);
+        LoadingScreensRec* screenRec = g_loadingScreensDB.GetRecord(PickLoadingScreen(s_simpleMapID, mapRec->m_loadingScreenID));
+
+        if (!screenRec) {
+            screenRec = g_loadingScreensDB.GetRecord(mapRec->m_loadingScreenID);
+        }
 
         if (screenRec) {
             s_usingWideScreen = false;
@@ -767,6 +817,9 @@ void LoadingScreenEnable(int32_t mapID, bool loadingWorld) {
 
     s_simpleMapID = mapID;
     InitializeProgressBar(loadingWorld);
+
+    // BACKLOG F5: fast load while the screen is up.
+    OsSetFastSleep(s_fastLoad != 0);
 }
 
 // VERIFY: a0b9f60d auto
@@ -841,6 +894,8 @@ static void ClearDynamicData() {
 // VERIFY: 2116833b manual
 // OFFSET: 0x00409550
 void LoadingScreenDisable() {
+    OsSetFastSleep(false);   // BACKLOG F5
+
     if (s_loadingScreenLayer) {
         HandleClose(reinterpret_cast<HOBJECT>(s_loadingScreenLayer));
     }

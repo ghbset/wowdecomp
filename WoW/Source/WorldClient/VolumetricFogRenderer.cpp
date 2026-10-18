@@ -42,6 +42,7 @@ constexpr uint32_t kShadowRegister = 56;           // vf_shadow.hlsli c56-c61 ba
 constexpr uint32_t kShadowMaskRegister = 10;      // VFogShadowMask c10-c13 (light, ambient + bias, diffuse, stock fog)
 constexpr float kShadowMaskSurfaceBias = 4.0f;     // yd: the ADT surface between WDL vertices may sit this far under them
 constexpr int kShadowStage = 5;                     // vf_shadow.hlsli s5 band 1, s6 band 2, s7 terrain
+constexpr int kMarchDepthStage = 8;                 // vf_composite.hlsli sMarchDepth: the depth the low-res fog was marched at
 constexpr uint32_t kSavedPixelRegisters = kLocalLightRegister + 4 * kMaxLocalLights;    // c0-c131
 static_assert(kSavedPixelRegisters == kPassSavedPixelRegisters, "SavedPassState holds the whole register range");
 constexpr float kDensityNoiseSize = 32.0f;          // coa noise_volume.h kDensityNoiseSize
@@ -870,6 +871,7 @@ void CompositePass(FogFrame& f, CGxTex* fogResult) {
     Bind(2, nullptr);
     Bind(3, sceneCopy);
     Bind(4, s_targets.march);
+    Bind(kMarchDepthStage, f.depth);   // the upsample's tap depths; stays the behind depth for the fade over-pass
     // The full-res fallback march (vf_composite FogWithoutMatchingTap, at silhouettes no low-res tap matches) samples
     // the noise as the march does (coa leaves them bound). Unbound, Vulkan's white slot doubled the density there and
     // D3D's black one dropped it: a fog-coloured outline round objects in front of the fog.
@@ -890,6 +892,8 @@ void CompositePass(FogFrame& f, CGxTex* fogResult) {
         // wxl-vfog Renderer::DrawOverMarked: out = lerp(frame fogged behind, the unfogged copy fogged at the model's
         // own depth, alpha), the alpha in eight steps from the stencil's top three bits (step 0 is left as is).
         // The depth-stencil stays bound for the test; s0 is the R32F copy, so nothing samples it.
+        // s0 is the depth with the models, s8 (kMarchDepthStage) still the depth behind them that the fog was marched
+        // at: a model pixel matches no upsample tap and is fogged at its own depth, not handed the background's fog.
         // MSAA with the split: its near side (c80 = 0, nothing clipped) fogs a marked sample at the nearest depth of
         // its 3x3, i.e. the model's own where sample 0 is the background behind its edge (else a halo of background fog).
         compositeConstants[0][3] = static_cast<float>(f.fog.linear ? Blend_LinearOverSceneCopy : Blend_GammaOverSceneCopy);
@@ -913,6 +917,7 @@ void CompositePass(FogFrame& f, CGxTex* fogResult) {
     }
     Bind(9, nullptr);
     Bind(10, nullptr);
+    Bind(kMarchDepthStage, nullptr);
     BindShadows(f, false);
 }
 

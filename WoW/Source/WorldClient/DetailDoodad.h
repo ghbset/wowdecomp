@@ -35,6 +35,12 @@ class CDetailDoodad {
     static SShaderConstants s_shaderConstants;
     static CGxShader* s_vertexShader[6];
     static uint32_t s_vtxBufItems;
+    // GRASSWIND: not in 12340 (wxl-grasswind). CVars grassWind / grassWindStrength / grassParting; the motion
+    // constants (vs c35-c42 of our DetailDoodad.bls, Tools/CustomMpq/ShaderSrc/DetailDoodad.hlsl).
+    static int32_t s_grassWind;
+    static float s_grassWindStrength;
+    static int32_t s_grassParting;
+    static float s_grassConstants[8][4];
 
     static CDetailDoodadInst* AllocInst();
     static void CreateAlphaRampTexture(const void*& texels);
@@ -48,6 +54,7 @@ class CDetailDoodad {
     static int32_t LoadModel(uint32_t id);
     static void SetupVertexShader(const C44Matrix& world, uint32_t index);
     static void UpdateAlphaRampTexture(EGxTexCommand command, uint32_t width, uint32_t height, uint32_t face, uint32_t level, void* userArg, uint32_t& texelStrideInBytes, const void*& texels);
+    static void UpdateGrassWind(const C44Matrix& view);
     static void UpdatePools();
 };
 

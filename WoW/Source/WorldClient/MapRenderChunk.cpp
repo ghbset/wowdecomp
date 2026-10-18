@@ -1,4 +1,5 @@
 #include "MapRenderChunk.h"
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include "Engine/Source/Gx/CGxBuf.h"
@@ -91,6 +92,11 @@ CGxBatch CMapRenderChunk::s_chunkBatch;
 
 // STATIC: 0x00D1D058
 int32_t CMapRenderChunk::s_bPoolsDirty;
+#if defined(_WIN64)
+uint32_t CMapRenderChunk::s_poolMaxMB = 0;     // 64-bit: no address-space pressure, keep stock sizing
+#else
+uint32_t CMapRenderChunk::s_poolMaxMB = 128;   // wraithhost-lite terrain_pool_max_mb default
+#endif
 
 // STATIC: 0x00D1D05C
 uint32_t CMapRenderChunk::s_pnEstimateIndex;
@@ -591,12 +597,22 @@ void CMapRenderChunk::UpdatePools() {
     CMapRenderChunk::Destroy();
 
     int32_t radius = 1 - static_cast<int32_t>(World::s_farClip * -0.03f);
+    uint32_t stride = CMapRenderChunk::s_gxBufVertexFormat == GxVBF_PNC ? sizeof(CGxVertexPNC) : sizeof(CGxVertexPN);
+
+    // BACKLOG F3 (wraithhost-lite, 0x007BA600): the pools grow with farclip^2 (about 0.9 GB at 10000 yd).
+    // Cap them to terrainPoolMaxMB; chunks that find no free block are skipped by AllocBuf, as in stock.
+    // Bytes per radius^2: 2 blocks of 145 verts and 768 u16 indices.
+    if (CMapRenderChunk::s_poolMaxMB) {
+        double perRadius2 = 2.0 * (145.0 * stride + 768.0 * 2.0);
+        int32_t maxRadius = static_cast<int32_t>(std::floor(std::sqrt(CMapRenderChunk::s_poolMaxMB * 1048576.0 / perRadius2)));
+        radius = std::min(radius, std::max(maxRadius, 1));
+    }
+
     uint32_t count = (2 * radius * radius + 1) & ~1u;
 
     CMapRenderChunk::s_pnEstimateVertex = 145 * count;
     CMapRenderChunk::s_pnEstimateIndex = 768 * count;
 
-    uint32_t stride = CMapRenderChunk::s_gxBufVertexFormat == GxVBF_PNC ? sizeof(CGxVertexPNC) : sizeof(CGxVertexPN);
     CMapRenderChunk::s_gxVertexPool = g_theGxDevicePtr->PoolCreate(GxPoolTarget_Vertex, GxPoolUsage_Dynamic, CMapRenderChunk::s_pnEstimateVertex * stride, GxPoolHintBit_Unk3, "CMapRenderChunk_vtx");
     CMapRenderChunk::s_gxIndexPool = g_theGxDevicePtr->PoolCreate(GxPoolTarget_Index, GxPoolUsage_Dynamic, CMapRenderChunk::s_pnEstimateIndex * 2, GxPoolHintBit_Unk3, "CMapRenderChunk_idx");
 

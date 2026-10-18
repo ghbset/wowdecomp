@@ -806,3 +806,25 @@ so the shading disagreed with all three.
   0 is the stock sky and light exactly (only the shadow body pick remains, with its old rule).
 
 custom.MPQ: 5121 files, only `Interface\FrameXML\VideoOptionsAdvanced.lua` differs from vfog26's (SPIR-V set from sunocc). No shaders.
+
+## 2026-10-18: vfog29, fading models fogged like the background (fix-fadefog)
+
+Published as `2026.10.18-vfog29`.
+
+The fading-model over-pass in `CompositePass` (wxl-vfog DrawOverMarked, vfogFadeStencil) bound the depth *with* the
+models at s0, but the low-res fog it upsamples was marched at the depth *behind* them. `DepthAwareUpsample` read its
+tap depths from s0 too, so on a fading doodad the taps matched the doodad's own depth and it was handed the
+background's fog: the whole doodad looked fogged like the scene behind it until its fade ended. (wxl-vfog has the same
+bug despite its comment; coa-vfog has no fade pass.)
+
+- **Shader** (`vf_composite.hlsli`): the upsample's and the edge test's tap depths (`DepthAwareUpsample`,
+  `GatherBilinearTaps`) read `sMarchDepth` at s8, the depth the fog was marched at; the pixel's own depth stays s0.
+  On a fading model the taps (background) no longer match, so `FogWithoutMatchingTap` integrates the fog at the
+  model's own depth; where both depths agree nothing changes.
+- **Renderer**: `CompositePass` binds `f.depth` (the march's depth: the behind copy when fading) at s8
+  (`kMarchDepthStage`) for the plain composite and leaves it there for the over-pass, unbound after.
+  No new variant (the plain composite gets s0 == s8), so the file count is unchanged; `build_shaders.py` masks s8 in
+  for VFogComposite* / VFogCompositeSplit*.
+
+custom.MPQ: 5121 files; the 24 VFogComposite*/VFogCompositeSplit* records rebuilt (ps_3_0, ps_4_0, SPIR-V, spirv-val
+clean), the SM4 pack from shadow-s1.
