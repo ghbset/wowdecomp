@@ -1789,6 +1789,14 @@ void CGGameUI::InitializeFrameXML() {
     }
 #endif
 
+    // Not in 12340: our own interface file from custom.MPQ (Video Options > Advanced), run after the stock
+    // FrameXML.toc so the stock files and their signature stay untouched; outside the signed digest.
+    if (SFile::FileExistsEx("Interface\\FrameXML\\VideoOptionsAdvanced.lua", 1)) {
+        MD5_CTX customMd5;
+        MD5Init(&customMd5);
+        FrameXML_ProcessFile("Interface\\FrameXML\\VideoOptionsAdvanced.lua", nullptr, &customMd5, &status);
+    }
+
     CGGameUI::m_UISimpleParent = static_cast<CSimpleFrame*>(CScriptObject::GetScriptObjectByName("UIParent", CSimpleFrame::GetObjectType()));
 
     if (!CGGameUI::m_UISimpleParent) {

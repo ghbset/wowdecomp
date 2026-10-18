@@ -21,6 +21,8 @@ Contents:
                           coa-vfog data/fogdata.bin, read by VolumetricFogData.cpp; waterdata.bin: the Forever
                           water presets, FFT tiles and foam masks, coa-vfog data/waterdata.bin, read by
                           VolumetricFogWater.cpp).
+  Interface\\...         every file in Tools/CustomMpq/Interface (FrameXML\\VideoOptionsAdvanced.lua: the Video
+                          Options > Advanced page, run by GameUI.cpp after the stock FrameXML.toc).
 Cache/vkpipelines.bin is a runtime cache and stays loose.
 
 Needs StormLib (libstorm.so, Debian package libstorm9). Python 3.8+, standard library only.
@@ -160,15 +162,17 @@ def main(argv):
     files.update(ours)
     vfog = folder_files('VFog', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'VFog'))
     files.update(vfog)
+    ui = folder_files('Interface', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Interface'))
+    files.update(ui)
 
     write_mpq(lib, a.out, files)
     back = mpq_files(lib, a.out)
     bad = [n for n in files if back.get(n) != files[n]]
     if bad:
         sys.exit('verify failed for %d file(s), first %s' % (len(bad), bad[0]))
-    print('%s: %d file(s) (%d Vulkan, %d D3D11, %d textures, %d own shaders, %d vfog data), %d bytes, verified' %
-          (a.out, len(back), len(files) - len(sm4) - len(textures) - len(ours) - len(vfog), len(sm4), len(textures),
-           len(ours), len(vfog), os.path.getsize(a.out)))
+    print('%s: %d file(s) (%d Vulkan, %d D3D11, %d textures, %d own shaders, %d vfog data, %d interface), %d bytes, verified' %
+          (a.out, len(back), len(files) - len(sm4) - len(textures) - len(ours) - len(vfog) - len(ui), len(sm4),
+           len(textures), len(ours), len(vfog), len(ui), os.path.getsize(a.out)))
     return 0
 
 
