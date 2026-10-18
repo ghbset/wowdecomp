@@ -96,6 +96,7 @@ local PAGES = {
 	},
 	{ name = "Loading & Memory", parent = "Advanced", title = "Loading & Memory",
 	  { "terrainPoolMaxMB", "slider", "Terrain memory budget (MB)", "Caps the memory kept for drawing ground at long view distances. Far ground that does not fit is skipped. 0 = no cap.", 0, 1024, 32 },
+	  { "spellQueueWindow", "slider", "Spell queue window (ms)", "Lets a spell be pressed this long before the global cooldown ends; it casts the moment the cooldown is over. 0 turns it off.", 0, 400, 10 },
 	},
 	{ name = "Debug", parent = "Advanced", title = "Debug & Technical",
 	  text = "For testing. The defaults are right for normal play.",

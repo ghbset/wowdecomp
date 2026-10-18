@@ -9,6 +9,7 @@
 #include "WoW/Common/AaBsp.h"
 #include "WoW/Source/UIUtil/PortraitButton.h"
 #include "WoW/Source/WorldClient/Map.h"
+#include "WoW/Source/Magic/MagicClient/Spell_C.h"
 #include "WoW/Source/WorldClient/MapRenderChunk.h"
 #include "WoW/Source/WorldClient/Types.h"
 #include "WoW/Source/WorldClient/World.h"
@@ -673,6 +674,12 @@ void CWorldParam::Initialize() {
         CMapRenderChunk::SetDirty();
         return true;
     }, CATEGORY_GRAPHICS, false, nullptr, false);
+
+    // BACKLOG F4: spell queue window in ms (ClientExtensions [SpellQueue] window); 0 = stock "not ready" during the GCD.
+    CVar::Register("spellQueueWindow", "Cast this many ms before a cooldown ends; the server queues it (0 = off)", 1, "150", [](CVar*, const char*, const char* value, void*) -> bool {
+        s_spellQueueWindow = SStrToInt(value);
+        return true;
+    }, CATEGORY_GAME, false, nullptr, false);
 
     AddConsoleDeviceDefaultCallback(CWorldParam::SetDefaults);
 
