@@ -252,6 +252,9 @@ class CGxDevice {
     // VFOG: D3D9's scene depth IS the bound depth-stencil; false unbinds it before a draw that samples it, true
     // puts it back (coa renderer.cpp PrepareFullscreenPasses). No-op where the depth is a separate copy.
     virtual void DeviceSceneDepthBound(bool bound) {}
+    // VFOG: true where DeviceCopySceneDepth returns a snapshot that later draws do not change (D3D9 RESZ, D3D11,
+    // Vulkan); false where it is the live depth-stencil (D3D9 INTZ), which the caller must copy to keep.
+    virtual bool DeviceSceneDepthIsCopy() { return false; }
 
     static HSLOG m_log;
     static C2iVector s_clientAdjust;

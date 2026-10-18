@@ -259,6 +259,7 @@ class CGxDeviceD3d9Ex : public CGxDevice {
     LPDIRECT3DTEXTURE9 m_sceneDepthTexture;
     LPDIRECT3DSURFACE9 m_sceneDepthUnbound = nullptr;  // the depth-stencil DeviceSceneDepthBound(false) took off
     bool m_sceneDepthResz = false;  // MSAA: INTZ is not bound; DeviceCopySceneDepth fills it from the MSAA depth by RESZ
+    bool m_sceneDepthFresh = false; // RESZ: INTZ still matches the depth (no depth-writing draw, depth clear or present since)
     CGxTex* m_sceneDepthTex;
 
     virtual void ITexMarkAsUpdated(CGxTex* texId);
@@ -284,6 +285,7 @@ class CGxDeviceD3d9Ex : public CGxDevice {
     virtual void DeviceResolveDepthBuffer(CGxTex* texture);
     virtual CGxTex* DeviceCopySceneDepth(bool* transient = nullptr);
     virtual void DeviceSceneDepthBound(bool bound);
+    virtual bool DeviceSceneDepthIsCopy() { return m_sceneDepthResz; }
     virtual void DeviceCopyTex(CGxTex* source, uint32_t sourcePlane, CGxTex* dest, uint32_t destPlane);
     virtual void DeviceOverride(EGxOverride override, uint32_t value);
     virtual void CapsWindowSize(CRect& rect);

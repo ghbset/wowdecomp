@@ -117,6 +117,7 @@ class CGxDeviceVulkan : public CGxDevice {
     virtual void DeviceUnk83(uint32_t a, uint32_t b);
     // VFOG: the scene depth snapshot (CGxDeviceVulkanTexture.cpp, frame::CopyDepthFromScene).
     virtual CGxTex* DeviceCopySceneDepth(bool* transient = nullptr);
+    virtual bool DeviceSceneDepthIsCopy() { return true; }
 
     static LRESULT CALLBACK WindowProcVulkan(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam);
 

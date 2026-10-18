@@ -76,6 +76,7 @@ class CGxDeviceD3d11 : public CGxDevice {
     uint32_t m_rtDepthNext;     // slot replaced on the next miss (round robin)
     ID3D11Texture2D* m_resolveTexture;
     bool m_resolveValid;    // m_resolveTexture matches the back buffer: no draw, clear or present since the resolve
+    bool m_sceneDepthFresh; // VFOG: m_sceneDepthCopy matches the depth: no depth-writing draw, depth clear or present since
     CGxTex* m_sceneDepthCopy; // VFOG: DeviceCopySceneDepth's GxTex_D24X8 (or R32F) snapshot of m_depthTexture
     ID3D11Buffer* m_constantBuffers[2]; // [0] VS b0, [1] PS b0: app register files (s_shadowConstants)
     // What m_constantBuffers hold. Only the dirty range of s_shadowConstants is copied in, as D3D9 uploads only
@@ -147,6 +148,7 @@ class CGxDeviceD3d11 : public CGxDevice {
     virtual void DeviceRestoreDepthSurface();
     virtual void DeviceResolveDepthBuffer(CGxTex* texture);
     virtual CGxTex* DeviceCopySceneDepth(bool* transient = nullptr);
+    virtual bool DeviceSceneDepthIsCopy() { return true; }
     virtual void DeviceCopyTex(CGxTex* source, uint32_t sourcePlane, CGxTex* dest, uint32_t destPlane);
     virtual void DeviceOverride(EGxOverride override, uint32_t value);
     virtual void CapsWindowSize(CRect& rect);

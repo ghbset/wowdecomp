@@ -365,6 +365,10 @@ void CGxDeviceVulkan::Draw(CGxBatch* batch, int32_t count) {
         return;
     }
 
+    if (d.depthWrite) {
+        frame::DepthWritten();   // VFOG: the next scene-depth copy is taken again
+    }
+
     if (!pipelines::Record(cmd, frame::RenderPass(), frame::PassGeneration(), frame::PassSamples(), frame::Serial(), frame::Slot(), d)) {
         return;
     }

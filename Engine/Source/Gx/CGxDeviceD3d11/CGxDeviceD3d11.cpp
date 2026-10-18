@@ -145,6 +145,7 @@ CGxDeviceD3d11::CGxDeviceD3d11() {
     this->m_constantBuffers[0] = nullptr;
     this->m_constantBuffers[1] = nullptr;
     this->m_resolveValid = false;
+    this->m_sceneDepthFresh = false;
     memset(this->m_cbBytes, 0, sizeof(this->m_cbBytes));
     memset(this->m_cbSent, 0, sizeof(this->m_cbSent));
     this->m_a2cVar = nullptr;
@@ -1374,6 +1375,7 @@ CGxTex* CGxDeviceD3d11::DeviceCopySceneDepth(bool* transient) {
     CGxTex* texture = this->m_sceneDepthCopy;
 
     if (texture->m_needsCreation || !texture->m_apiSpecificData) {
+        this->m_sceneDepthFresh = false;
         this->ITexCreate(texture);
     }
 
@@ -1383,12 +1385,19 @@ CGxTex* CGxDeviceD3d11::DeviceCopySceneDepth(bool* transient) {
         return nullptr;
     }
 
+    // Nothing wrote or cleared depth since the last copy (water, then fog): it still holds it (audit P13).
+    if (this->m_sceneDepthFresh) {
+        retry = false;
+        return texture;
+    }
+
     if (copy) {
         this->m_d3dContext->CopyResource(api->m_texture, this->m_depthTexture);
     } else if (!this->IBlit(this->m_depthSrv, desc.Width, desc.Height, nullptr, texture, 0, 0, nullptr, false, ps)) {
         return nullptr;
     }
 
+    this->m_sceneDepthFresh = true;
     retry = false;
     return texture;
 }
@@ -1489,6 +1498,7 @@ void CGxDeviceD3d11::ScenePresent() {
         int32_t scrShotClick = this->m_scrShotClick;
 
         this->m_resolveValid = false;
+        this->m_sceneDepthFresh = false;
         CGxDevice::ScenePresent();
         // Software cursor (no hardware cursor in D3D11). Draws through the normal path, so it shows from phase 2 on.
         this->ICursorDraw();
@@ -1560,6 +1570,10 @@ void CGxDeviceD3d11::SceneClear(uint32_t mask, CImVector color) {
     }
 
     this->m_resolveValid = false;
+
+    if (mask & GxBufferBit_Depth) {
+        this->m_sceneDepthFresh = false;
+    }
 
     if (this->m_viewportDirty) {
         this->IXformSetViewport();
@@ -3070,6 +3084,10 @@ void CGxDeviceD3d11::Draw(CGxBatch* batch, int32_t count) {
 
     this->m_resolveValid = false;
     this->IStateSync();
+
+    if (this->m_dsDesc.DepthWriteMask != D3D11_DEPTH_WRITE_MASK_ZERO) {
+        this->m_sceneDepthFresh = false;
+    }
 
     if (s_dumpFrame) {
         const CGxAppRenderState* rs = this->m_appRenderStates.m_data;

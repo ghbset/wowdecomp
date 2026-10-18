@@ -3251,6 +3251,7 @@ void CGxDeviceD3d::ISceneBegin() {
 void CGxDeviceD3d::ScenePresent() {
     if (this->m_context) {
         int32_t scrShotClick = this->m_scrShotClick;
+        this->m_sceneDepthFresh = false;    // VFOG
 
         CGxDevice::ScenePresent();
         this->ISceneEnd();
@@ -3313,6 +3314,10 @@ void CGxDeviceD3d::Draw(CGxBatch* batch, int32_t count) {
     }
 
     this->IStateSync();
+
+    if (this->m_deviceStates[Ds_ZWriteEnable] != 0) {
+        this->m_sceneDepthFresh = false;    // VFOG: the next RESZ copy resolves again
+    }
 
     uint32_t baseVertexIndex = 0;
 
@@ -3426,6 +3431,7 @@ void CGxDeviceD3d::SceneClear(uint32_t mask, CImVector color) {
 
     if (mask & GxBufferBit_Depth) {
         flags |= D3DCLEAR_ZBUFFER;
+        this->m_sceneDepthFresh = false;    // VFOG
     }
 
     // DECOMP: stencil clear (an error on a depth buffer without stencil)

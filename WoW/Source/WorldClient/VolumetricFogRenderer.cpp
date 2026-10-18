@@ -728,10 +728,18 @@ bool RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg,
 
     // wxl-vfog 0.6.3 (vfogFadeStencil): with the fading models' depth behind them kept, the frame is fogged from that
     // depth, and the composite at the live depth goes over each model by its stencil-marked alpha (after the composite).
+    // Where the backend's depth is already a snapshot (D3D9 RESZ, D3D11, Vulkan) it is the "with" depth as is; only
+    // D3D9's live INTZ needs the R32F copy (audit P9).
     CGxTex* fadeDepth = nullptr;
-    if (fadeArmed && s_fade.behind && !prevTarget && CopyRawDepth(s_fade.with, depth)) {
-        fadeDepth = s_fade.with;
-        depth = s_fade.behind;
+    if (fadeArmed && s_fade.behind && !prevTarget) {
+        if (device->DeviceSceneDepthIsCopy()) {
+            fadeDepth = depth;
+        } else if (CopyRawDepth(s_fade.with, depth)) {
+            fadeDepth = s_fade.with;
+        }
+        if (fadeDepth) {
+            depth = s_fade.behind;
+        }
     }
 
     const float* proj = in.glProjection;

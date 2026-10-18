@@ -190,6 +190,11 @@ namespace gxvk::vk::frame::detail
         uint32_t passFb        = UINT32_MAX;  ///< the framebuffer of the open pass
         bool     sceneTouched  = false;       ///< a pass was opened on the scene this frame
         bool        queryActive = false;      ///< an occlusion query is begun on the open pass
+        /// CopyDepthFromScene's last copy (source depth buffer -> snapshot) still matches the depth:
+        /// no depth write or depth clear recorded since (audit P13). Reset with the frame.
+        bool    depthCopyFresh = false;
+        VkImage depthCopySrc   = VK_NULL_HANDLE;
+        VkImage depthCopyDst   = VK_NULL_HANDLE;
         VkQueryPool queryPool   = VK_NULL_HANDLE;
         uint32_t    queryIndex  = 0;
 

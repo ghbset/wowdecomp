@@ -104,6 +104,12 @@ namespace gxvk::vk::frame
             if (s.depths[i].extent.width == s.scene.extent.width && s.depths[i].extent.height == s.scene.extent.height) depth = &s.depths[i];
         if (!depth || !depth->initialised || !UsedThisFrame(depth->lastUsed)) return false;
 
+        // Nothing wrote or cleared depth since the last copy into this snapshot: it still holds it,
+        // and the pass is not broken for a second copy (water, then fog: audit P13).
+        if (s.depthCopyFresh && s.depthCopySrc == depth->image && s.depthCopyDst == dst.handle
+            && dst.layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+            return true;
+
         VkCommandBuffer cmd = Outside();
         if (!cmd) return false;
 
@@ -138,6 +144,9 @@ namespace gxvk::vk::frame
                         kReaders, VK_ACCESS_SHADER_READ_BIT);
         dst.layout      = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         depth->lastUsed = s.serial;
+        s.depthCopyFresh = true;
+        s.depthCopySrc   = depth->image;
+        s.depthCopyDst   = dst.handle;
         ++s.stats.depthCopies;
         return true;
     }

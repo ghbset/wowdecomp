@@ -123,6 +123,7 @@ namespace gxvk::vk::frame::detail
         s.noImage            = false;
         s.sceneTouched       = false;
         s.queryActive        = false;
+        s.depthCopyFresh     = false;
         s.queryPool          = VK_NULL_HANDLE;
         s.clearColourPending = false;
         s.clearDepthPending  = false;
@@ -337,6 +338,7 @@ namespace gxvk::vk::frame
     void Clear(uint32_t mask, const float colour[4], const VkRect2D* rect)
     {
         if (!(mask & 7u) || !EnsureFrame()) return;
+        if (mask & 2u) s.depthCopyFresh = false;
         if (s.passOpen)
         {
             ClearInPass(mask, colour, rect);
@@ -392,6 +394,8 @@ namespace gxvk::vk::frame
     }
 
     bool QueryActive() { return s.open && s.queryActive; }
+
+    void DepthWritten() { s.depthCopyFresh = false; }
 
     void Flush()
     {

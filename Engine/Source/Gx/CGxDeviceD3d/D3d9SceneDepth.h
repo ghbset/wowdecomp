@@ -63,6 +63,7 @@ void Create(Dev* d) {
 template <class Dev>
 void Release(Dev* d) {
     d->m_sceneDepthResz = false;
+    d->m_sceneDepthFresh = false;
     if (d->m_sceneDepthTex) {
         d->m_sceneDepthTex->m_apiSpecificData = nullptr;
     }
@@ -183,8 +184,12 @@ CGxTex* Copy(Dev* d, bool* transient) {
         return nullptr;
     }
 
-    if (d->m_sceneDepthResz && !ResolveResz(d)) {
-        return nullptr;
+    // RESZ: nothing wrote or cleared depth since the last resolve (water, then fog), so INTZ still holds it (audit P13).
+    if (d->m_sceneDepthResz && !d->m_sceneDepthFresh) {
+        if (!ResolveResz(d)) {
+            return nullptr;
+        }
+        d->m_sceneDepthFresh = true;
     }
 
     if (!d->m_sceneDepthTex) {
