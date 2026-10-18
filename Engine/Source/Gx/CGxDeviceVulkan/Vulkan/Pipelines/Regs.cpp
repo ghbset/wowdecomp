@@ -95,6 +95,7 @@ namespace gxvk::vk::pipelines::detail
             ss.regsCursor     = 0;
             ss.lastSliceBytes = 0;
             ss.lastSliceSet   = VK_NULL_HANDLE;
+            ss.lastVertexGen  = 0;
         }
 
         // The slice's pieces, compared in place against the last one written (no copy when it is
@@ -107,8 +108,10 @@ namespace gxvk::vk::pipelines::detail
             { kSliceBytesLarge, extRows ? draw.pixelRegsFull + kPixelRows * 4 : nullptr, extRows * 16 },
         };
         bool same = ss.lastSliceSet != VK_NULL_HANDLE && ss.lastSliceBytes == bytes;
+        // The vertex rows (up to 4 KiB) unchanged since the last slice by their generation: not compared.
+        const bool vertexSame = draw.vertexRegsGen != 0 && draw.vertexRegsGen == ss.lastVertexGen;
         for (uint32_t i = 0; same && i < 4; ++i)
-            same = !pieces[i].bytes || std::memcmp(ss.lastSlice + pieces[i].at, pieces[i].src, pieces[i].bytes) == 0;
+            same = !pieces[i].bytes || (i == 2 && vertexSame) || std::memcmp(ss.lastSlice + pieces[i].at, pieces[i].src, pieces[i].bytes) == 0;
         if (same)
         {
             set    = ss.lastSliceSet;
@@ -152,6 +155,7 @@ namespace gxvk::vk::pipelines::detail
         ss.lastSliceBytes  = bytes;
         ss.lastSliceSet    = set;
         ss.lastSliceOffset = offset;
+        ss.lastVertexGen   = draw.vertexRegsGen;
         ++s.stats.regsSlices;
         s.stats.regsBytes += bytes;
         return true;

@@ -350,6 +350,7 @@ void CGxDeviceVulkan::Draw(CGxBatch* batch, int32_t count) {
     }
     d.pixelRegs = pixelRows;
     d.vertexRegs = this->m_vertexRegs;
+    d.vertexRegsGen = this->m_vertexRegsGen;
 
     if (!this->IPlaceD3d(d.viewport, d.scissor)) {
         return;

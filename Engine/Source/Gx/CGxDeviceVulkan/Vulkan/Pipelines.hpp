@@ -158,6 +158,9 @@ namespace gxvk::vk::pipelines
         /// 0, colour op, alpha op). Read when either program is of the translated family.
         const float* vertexRegs = nullptr;
         uint32_t     vertexRows = kVertexRowsSmall;
+        /// Bumped whenever the vertex register file changes (0: unknown, always compared): the
+        /// slice skips its memcmp of the vertex rows when it matches the last slice's (audit P3).
+        uint64_t     vertexRegsGen = 0;
         const float* pixelRegs  = nullptr;
         float        misc[4]    = {};
 

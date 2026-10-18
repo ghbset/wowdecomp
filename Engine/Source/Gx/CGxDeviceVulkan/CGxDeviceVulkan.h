@@ -52,6 +52,7 @@ class CGxDeviceVulkan : public CGxDevice {
     // and persist across the shadow's per-present clear as D3D's registers do.
     float m_vertexRegs[256 * 4];
     float m_pixelRegs[256 * 4];
+    uint64_t m_vertexRegsGen = 1;   // bumped by every write to m_vertexRegs (pipelines::Draw::vertexRegsGen)
     // The hardware cursor: a Win32 cursor built from the engine's 32x32 cursor image, remade when
     // the image changes (CursorUnlock), shown over the client area by WM_SETCURSOR.
     HCURSOR m_hcursor;
