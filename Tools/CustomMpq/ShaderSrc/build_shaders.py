@@ -23,7 +23,7 @@ Grading (coa vp_grade): VFogGrade.
 Water (coa vw_*): VFogWaterDepth, VFogWaterMask, VFogWater{1,2,3} (SSR_STEPS 0/16/32) and VFogRippleStep;
 GPU waves VFogWave{Evolve,Fft,Surface,Mip,Pack}.
 Grass wind (wxl-grasswind, MULTI): Shaders/Vertex/vs_3_0|vs_4_0/DetailDoodad.bls, the stock grass VS's 6 permutations.
-Fading models (wxl-vfog 0.6.3): VFogDepthCopy. Legion FFX post: LegionPost{0,1,2}. Land shadow mask (shadowMask): VFogShadowMask. MSAA sample split (coa): VFogSilhouette and VFogCompositeSplit{Q}[L][N].
+Fading models (wxl-vfog 0.6.3): VFogDepthCopy. Legion FFX post: LegionPost{0,1,2}. Legion heat haze (refraction): LegionRefraction. Land shadow mask (shadowMask): VFogShadowMask. MSAA sample split (coa): VFogSilhouette and VFogCompositeSplit{Q}[L][N].
 """
 import argparse
 import concurrent.futures
@@ -82,6 +82,8 @@ SHADERS = {
     'LegionPost0': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0), 0, 'LegionPost', {'FXAA_STEPS': 0}),
     'LegionPost1': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0), 0, 'LegionPost', {'FXAA_STEPS': 5}),
     'LegionPost2': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0), 0, 'LegionPost', {'FXAA_STEPS': 12}),
+    # Legion refraction (docs/LEGION_PORT.md): heat haze over tagged fire emitters; s0 scene depth, s1 scene copy
+    'LegionRefraction': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 1), 0, 'LegionRefraction', {}),
 }
 # VFogWater{1,2,3}: coa ps_vw_shade_low/mid/high (SSR_STEPS 0/16/32, cmake/WaterShaders.cmake)
 for _v, _ssr in ((1, 0), (2, 16), (3, 32)):

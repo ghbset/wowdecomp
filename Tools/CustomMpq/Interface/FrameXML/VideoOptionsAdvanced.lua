@@ -132,6 +132,9 @@ local PAGES = {
 	    { { "0", "Off" }, { "1", "Protanopia (red)" }, { "2", "Deuteranopia (green)" }, { "3", "Tritanopia (blue)" } } },
 	  { "daltonize", "check", "Correct colours", "On shifts colours so they are easier to tell apart with that colour blindness. Off shows how the world looks with it." },
 	  { "colorblindWeaknessFactor", "slider", "Strength", "How strong the colour blindness view or correction is.", 0, 1, 0.05 },
+	  { "refraction", "drop", "Heat haze", "Air shimmers above fires, braziers, lava and burning spells.",
+	    { { "0", "Off" }, { "1", "On" }, { "2", "High" } } },
+	  { "refractionStrength", "slider", "Heat haze strength", "How strongly the hot air bends what is behind it.", 0, 4, 0.25 },
 	},
 }
 

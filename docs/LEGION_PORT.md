@@ -113,3 +113,42 @@ shift, `I + E (I - sim)` with E = [[0,0,0],[0.7,1,0],[0.7,0,1]], folded into one
 labels CVar) is untouched and independent.
 
 Options: Video Options > Advanced > Post Processing ("Anti-Aliasing & Colour").
+
+## 2026-10-18: Legion refraction (survey item 7, 2.6: heat haze)
+
+Legion's `refraction` writes UV offsets from `Particle_Refraction` particles into a distortion target and
+`refractionapply` offsets a scene copy by them. 3.3.5a M2 particles have no refraction blend, so we tag emitters and
+draw the haze ourselves (cheapest workable design, one pass, no distortion target):
+
+- **Tagging** (`HotEmitter`, VolumetricFog.cpp): a blended particle element (type 4 in M2 passes 1 and 2, blend not
+  opaque/modulate) whose model path or particle texture contains `fire flame lava magma brazier torch burn exhaust
+  immolat inferno`, and neither contains `smoke steam mist fog cloud firefl firework candle frost` (the texture's
+  "cool" word wins, so a fire model's smoke emitter is left out). Same idea as `groundDecals`' name test.
+- **Sources** (`CollectRefraction`, in `OnOpaqueDone` after Animate built the pass lists): each emitter's
+  `WorldBounds()` (world space, from its last draw, so one frame old), skipped when inverted (not drawn yet) or over
+  50 yd; widened 15% and raised by 0.75 x its height; the nearest 12 within 80 yd (`refraction 1`) or 32 within 160 yd
+  (`2`). `DepthUser_Refraction` (bit 5) is set only while there is at least one source, so no fire = no cost.
+- **Draw** (`RenderRefraction`, VolumetricFogRenderer.cpp; `VolumetricFog::OnHeatHaze` right after `OnLiquidDone` in
+  WorldFrame): above water only, after the liquids and the early fog composite, before the blended M2 pass, weather and
+  barriers. One copy of the world viewport (`CopySceneBeforeFog`) and the scene depth; each box is projected on the
+  CPU to a screen rect and drawn as one `LegionRefraction` quad scissored to it, opaque RGB. The shader reads the copy
+  at an offset: rising two-axis sine noise in the source's yards (a second octave at `2`), an elliptical fade to the
+  rect's edge, zero on pixels in front of the source (scene depth < its near depth, 1 yd ramp) and zero where the tap
+  lands in front of it (no foreground smear). Amplitude ~2 cm per yard of flame height (0.5-4 yd) x
+  `refractionStrength`, in pixels at the source's distance, capped at 12 px x strength.
+- Pass-2 particles (the common case above water) are drawn before the haze, so the flames themselves shimmer a little
+  with what is behind them; split-lighting (liquid plane) ones in pass 1 draw after it, sharp.
+
+| CVar | range | default | |
+|---|---|---|---|
+| `refraction` | 0-2 | 1 | 0 off, 1 on (12 sources, 80 yd), 2 high (32, 160 yd, second noise octave) |
+| `refractionStrength` | 0-4 | 1 | haze amplitude scale |
+
+Options: Video Options > Advanced > Post Processing ("Heat haze", "Heat haze strength").
+Shader: `Tools/CustomMpq/ShaderSrc/LegionRefraction.hlsl` (ours; s0 depth, s1 scene copy; c0-c3/c99 vf_common,
+c10 rect px, c11 near yd / offset px / seconds / high, c12 rect size yd).
+
+Known limits (ponytail): no lava liquid surfaces (only lava/magma particle emitters); none under water (that branch has
+no `OnLiquidDone`); overlapping sources do not add up (each reads the undistorted copy, last drawn wins); a box the near
+plane cuts (camera inside the fire) is skipped; names are tested per element per frame (cache on CM2Shared if it ever
+shows in a profile); the tag word list is a guess, untested in game: check torches/braziers/spell auras and trim it.
