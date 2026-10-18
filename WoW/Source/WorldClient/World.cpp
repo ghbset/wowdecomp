@@ -1179,6 +1179,7 @@ void World::ObjectDestroy(CMapEntity* entity) {
 // OFFSET: 0x00780860
 void World::PrepareAreaOfInterest(const C3Vector& position) {
     World::s_currentWorldPos = position;
+    AsyncFileReadSetViewPos(position.x, position.y);   // LEGION worldLoadSort
 
     CGCamera* camera = CGWorldFrame::GetActiveCamera();
     float farZ = camera->m_farZ;
