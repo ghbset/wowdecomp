@@ -643,3 +643,25 @@ run stock effects that already ship.
   instead of one 2-triangle draw. CPU only; no extra passes or targets.
 - Check: `clang++ -std=c++17 -I. Tools/GroundDecalCheck/check.cpp -o /tmp/gdc && /tmp/gdc`.
 - Not done: doodad receivers (benilla has none either); a multi-texture ground batch keeps the flat plane.
+
+## 2026-10-18: vfog22, client audit fixes
+
+The 2026-10-18 audit's findings, fixed on four branches and merged together (published as `2026.10.18-vfog22`):
+
+- **Vulkan** (`fix-vk`): hashed pipeline table that grows (stencil ref is dynamic state); frame flushed before a
+  rebind; same-frame query reuse reset in order; recreated colour targets re-set; pending clears applied before
+  present; scene copies refused inside an active query; D32 bias step 2^24; translated alpha test on 8-bit alpha.
+  The translator changed, so every SPIR-V module was regenerated (1633 records + 2 companions, spirv-val clean).
+- **D3D9 / 9Ex / D3D11** (`fix-d3d`): RESZ resolve re-sends state from Gx's caches instead of `Get*` (PUREDEVICE);
+  shared INTZ/RESZ code in `D3d9SceneDepth.h`; scene-depth copy reports transient failures; D3D11 binds nothing for
+  a viewless colour target, keeps stencil on depth clears, sizes b0 to the shader, caches MSAA resolves and per-mip
+  RTVs; textures split into `CGxDeviceD3d11Texture.cpp`.
+- **VFog** (`fix-vfog`): fade depth survives target rebuilds (C1 crash); CPU wave batches no longer dropped; exact
+  foam integration (no 2-cycle); camera surfacing re-decides the frame; texture/shader failures retry; register
+  restore bounded; unlit march as bands around the lit rect; GPU waves capped at 60 steps/s per tile.
+- **Misc** (`fix-misc`): `OnWorldDone` runs before WorldFrame restores the outer viewport; ground-decal slab pad
+  halved, rerouted decals drape M2 doodads and fall back to the flat batch over water (the project-texture
+  callback returns the hit); occlusion queries drain before reuse; particle/query scratch vectors static;
+  `s_mipBits` shrinks back after small loads; dead `NDEBUG` returns removed from DebugLog.
+
+Checks: `check_gpu_waves.py` PASS (no foam exemption), GroundDecalCheck ok.
