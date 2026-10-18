@@ -159,6 +159,11 @@ def main(argv):
     textures = folder_files('Textures', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Textures'))
     files.update(textures)
     ours = folder_files('Shaders', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Shaders'))
+    # ours replace a stock SM4 file of the same name (DetailDoodad.bls); MPQ names are case-insensitive
+    replaced = {n.lower() for n in ours}
+    for n in [n for n in files if n.lower() in replaced]:
+        del files[n]
+        sm4.pop(n, None)
     files.update(ours)
     vfog = folder_files('VFog', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'VFog'))
     files.update(vfog)

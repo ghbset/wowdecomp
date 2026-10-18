@@ -18,6 +18,7 @@
 #include "Engine/Source/Model2/M2Scene.h"
 #include "Engine/Source/Model2/M2TreeSway.h"
 #include "WoW/Source/WorldClient/TreeLeaves.h"
+#include "WoW/Source/WorldClient/DetailDoodad.h"
 #include "Engine/Source/ConsoleBase/IConsole.h"
 #include "Engine/Source/Storm/H/storm.h"
 #include "WoW/Source/ConsoleDevice/ConsoleDevice.h"
@@ -691,6 +692,22 @@ void CWorldParam::Initialize() {
     CVar::Register("treeLeavesDensity", "Falling leaf slots per tree (1..48, 18 = wxl-treewind)", 1, "18", [](CVar*, const char*, const char* value, void*) -> bool {
         float v = SStrToFloat(value);
         TreeLeaves::s_perTree = v < 1.0f ? 1.0f : (v > 48.0f ? 48.0f : v);
+        return true;
+    }, CATEGORY_GRAPHICS, false, nullptr, false);
+
+    // GRASSWIND: not in 12340 (wxl-grasswind). Grass sways in the wind and parts around the player; our
+    // DetailDoodad.bls in custom.MPQ reads the constants (0 = zero motion, the stock blade positions).
+    CVar::Register("grassWind", "Grass sways in the wind", 1, "1", [](CVar*, const char*, const char* value, void*) -> bool {
+        CDetailDoodad::s_grassWind = SStrToInt(value) != 0;
+        return true;
+    }, CATEGORY_GRAPHICS, false, nullptr, false);
+    CVar::Register("grassWindStrength", "How far grass sways in the wind (1 = default)", 1, "1.0", [](CVar*, const char*, const char* value, void*) -> bool {
+        float v = SStrToFloat(value);
+        CDetailDoodad::s_grassWindStrength = v < 0.0f ? 0.0f : (v > 4.0f ? 4.0f : v);
+        return true;
+    }, CATEGORY_GRAPHICS, false, nullptr, false);
+    CVar::Register("grassParting", "Grass parts around the player", 1, "1", [](CVar*, const char*, const char* value, void*) -> bool {
+        CDetailDoodad::s_grassParting = SStrToInt(value) != 0;
         return true;
     }, CATEGORY_GRAPHICS, false, nullptr, false);
 

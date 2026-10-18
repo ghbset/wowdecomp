@@ -22,6 +22,7 @@ plus VFogTemporal and VFogHistoryDepth, and the god rays VFogRayMask, VFogRayBlu
 Grading (coa vp_grade): VFogGrade.
 Water (coa vw_*): VFogWaterDepth, VFogWaterMask, VFogWater{1,2,3} (SSR_STEPS 0/16/32) and VFogRippleStep;
 GPU waves VFogWave{Evolve,Fft,Surface,Mip,Pack}.
+Grass wind (wxl-grasswind, MULTI): Shaders/Vertex/vs_3_0|vs_4_0/DetailDoodad.bls, the stock grass VS's 6 permutations.
 Fading models (wxl-vfog 0.6.3): VFogDepthCopy. MSAA sample split (coa): VFogSilhouette and VFogCompositeSplit{Q}[L][N].
 """
 import argparse
@@ -98,25 +99,37 @@ for _q, _steps in ((1, 16), (2, 24), (3, 32)):
                                                        dict(_defs, SPLIT=1))
 
 
+# Containers of several permutations, replacing a stock .bls of the same name: name -> (profile, [(a, b, c, d,
+# entry, defines) per permutation, in the engine's order]). The record masks are the stock ones.
+# DetailDoodad (wxl-grasswind, grassWind): the stock vs_3_0 grass shader plus wind sway and parting; permutation
+# 3 * point lights + shadow (CDetailDoodad::SetupVertexShader), b = the stock output masks per shadow level.
+MULTI = {
+    'DetailDoodad': ('vs_3_0', [(0xA09, b, 0, 0, 'DetailDoodad', {'LIGHTS': lights, 'SHADOW': shadow})
+                                for lights in (0, 1) for shadow, b in enumerate((0xE81, 0x7E81, 0x1FE81))]),
+}
+
+
 # The shadow band slots of vf_shadow.hlsli: hardware-compare samplers in the SM4 pack (D3D11 binds a LESS_EQUAL
 # comparison sampler for a D24X8 target under hwPCF), like the stock _pcf families' (shader-xlate pcf_slots).
 def compare_slots(name):
     return (5, 6) if name.startswith(('VFogMarch', 'VFogComposite')) else ()
 
 
-def bls(code, a, b, c, d):
-    rec = struct.pack('<IIHHI', a, b, c, d, len(code)) + code
-    rec += b'\0' * (-len(rec) % 4)
-    return struct.pack('<4sII', b'HSXG', 0x10003, 1) + rec
+def bls(recs):
+    out = struct.pack('<4sII', b'HSXG', 0x10003, len(recs))
+    for code, a, b, c, d in recs:
+        rec = struct.pack('<IIHHI', a, b, c, d, len(code)) + code
+        out += rec + b'\0' * (-len(rec) % 4)
+    return out
 
 
-def build(name, a, vk, env):
-    prof, ra, rb, rc, rd, entry, defines = SHADERS[name]
+def compile_sm3(name, prof, entry, defines, a, vk, env):
+    """-> (bytecode, None) or (None, error)."""
     src = ''.join('#define %s %s\n' % kv for kv in sorted(defines.items())) + '#include "%s.hlsl"\n' % entry
     r = subprocess.run([os.path.join(vk, 'bin', 'vkd3d-compiler'), '-x', 'hlsl', '-E', '-o', '-', '-'],
                        input=src.encode(), capture_output=True, env=env, cwd=HERE)
     if r.returncode or not r.stdout:
-        return '%s: preprocess failed: %s' % (name, r.stderr.decode(errors='replace'))
+        return None, '%s: preprocess failed: %s' % (name, r.stderr.decode(errors='replace'))
     with tempfile.TemporaryDirectory() as tmp:
         with open(os.path.join(tmp, name + '.hlsl'), 'wb') as f:
             f.write(r.stdout)
@@ -126,21 +139,36 @@ def build(name, a, vk, env):
                            env=dict(os.environ, WINEPREFIX=os.environ.get('WINEPREFIX', '/tmp/testprefix'),
                                     WINEDEBUG='-all'))
         if r.returncode or not os.path.isfile(out):
-            return '%s: fxc failed: %s' % (name, r.stdout.decode(errors='replace')[-2000:])
+            return None, '%s: fxc failed: %s' % (name, r.stdout.decode(errors='replace')[-2000:])
         with open(out, 'rb') as f:
-            code = f.read()
+            return f.read(), None
+
+
+def build(name, a, vk, env):
+    if name in MULTI:
+        prof, perms = MULTI[name]
+    else:
+        prof, ra, rb, rc, rd, entry, defines = SHADERS[name]
+        perms = [(ra, rb, rc, rd, entry, defines)]
+    recs, sm4recs = [], []
+    for k, (ra, rb, rc, rd, entry, defines) in enumerate(perms):
+        code, err = compile_sm3('%s:%d' % (name, k), prof, entry, defines, a, vk, env)
+        if err:
+            return err
+        recs.append((code, ra, rb, rc, rd))
+        st, why, dx = xlate.compile_one(code, None, compare_slots(name))[:3]
+        if st != 'ok':
+            return '%s:%d: xlate failed: %s %s' % (name, k, st, why)
+        sm4recs.append((ra, rb, rc | rd << 16, dx))
     kind = 'Pixel' if prof.startswith('ps') else 'Vertex'
     d3d9 = os.path.join(OUT, kind, prof, name + '.bls')
     os.makedirs(os.path.dirname(d3d9), exist_ok=True)
     with open(d3d9, 'wb') as f:
-        f.write(bls(code, ra, rb, rc, rd))
+        f.write(bls(recs))
     sm4 = os.path.join(OUT, kind, prof[:3] + '4_0', name + '.bls')
     os.makedirs(os.path.dirname(sm4), exist_ok=True)
-    st, why, dx = xlate.compile_one(code, None, compare_slots(name))[:3]
-    if st != 'ok':
-        return '%s: xlate failed: %s %s' % (name, st, why)
     with open(sm4, 'wb') as f:
-        f.write(xlate.write_bls([(ra, rb, rc | rd << 16, dx)]))
+        f.write(xlate.write_bls(sm4recs))
     print('%s: %s (%d bytes), %s (%d bytes)' % (name, d3d9, os.path.getsize(d3d9), sm4, os.path.getsize(sm4)),
           flush=True)
     return None
@@ -160,10 +188,10 @@ def main(argv):
     vk = os.environ.get('VKD3D_PREFIX', os.path.join(a.xlate, '..', 'vkd3d-install'))
     env = dict(os.environ, LD_LIBRARY_PATH=os.path.join(vk, 'lib'))
     for name in a.names:
-        if name not in SHADERS:
+        if name not in SHADERS and name not in MULTI:
             sys.exit('unknown shader %s' % name)
     with concurrent.futures.ThreadPoolExecutor(a.j) as pool:
-        errors = [e for e in pool.map(lambda n: build(n, a, vk, env), a.names or list(SHADERS)) if e]
+        errors = [e for e in pool.map(lambda n: build(n, a, vk, env), a.names or list(SHADERS) + list(MULTI)) if e]
     if errors:
         sys.exit('\n'.join(errors))
     return 0
