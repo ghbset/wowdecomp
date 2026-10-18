@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <new>
 #include "Engine/Source/Gx/CGxDevice/CGxDevice.h"
+#include "Engine/Source/Services/AsyncFile.h"
 #include "Engine/Source/Services/GfxSingletonManager.h"
 #include "Engine/Source/Services/Texture.h"
 #include "Engine/Source/ShaderEffect/ShaderEffect.h"
@@ -662,6 +663,17 @@ void CWorldParam::Initialize() {
     // BENILLA: not in 12340. Ground spell quads drape the terrain (CM2Scene IsGroundDecalBatch); 0 = stock flat planes.
     CVar::Register("groundDecals", "Ground spell effects follow the terrain", 1, "1", [](CVar*, const char*, const char* value, void*) -> bool {
         CM2Scene::s_groundDecals = SStrToInt(value) != 0;
+        return true;
+    }, CATEGORY_GRAPHICS, false, nullptr, false);
+    // LEGION stream: not in 12340. Disk readers load the queued model/WMO nearest the camera first (Legion worldLoadSort).
+    CVar::Register("worldLoadSort", "Load world models nearest the camera first", 1, "1", [](CVar*, const char*, const char* value, void*) -> bool {
+        g_asyncLoadSort = SStrToInt(value) != 0;
+        return true;
+    }, CATEGORY_GRAPHICS, false, nullptr, false);
+    // LEGION stream: not in 12340. Most streamed textures created per frame in game (0 = unlimited; loading screens never capped).
+    CVar::Register("texUploadLimit", "Most streamed textures created per frame (0 = unlimited)", 1, "24", [](CVar*, const char*, const char* value, void*) -> bool {
+        int32_t limit = SStrToInt(value);
+        g_asyncTexUploadLimit = limit < 0 ? 0 : limit;
         return true;
     }, CATEGORY_GRAPHICS, false, nullptr, false);
 

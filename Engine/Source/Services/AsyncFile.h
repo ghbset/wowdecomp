@@ -53,6 +53,33 @@ uint32_t STORMAPI AsyncFileReadThread(void* param);
 void AsyncFileReadUnloadPostList();
 void AsyncFileReadWait(CAsyncObject* object);
 void AsyncFileReadWaitAll();
+// Not stock (worldLoadSort / texUploadLimit).
+extern int32_t g_asyncLoadSort;
+extern int32_t g_asyncTexUploadLimit;
+void AsyncFileReadSetViewPos(float x, float y);
+
+// Main thread: objects allocated while one is alive are tagged with this world x/y (nests, restores the outer one).
+extern bool g_asyncLoadOriginSet;
+extern float g_asyncLoadOrigin[2];
+
+struct AsyncLoadOrigin {
+    bool m_set = g_asyncLoadOriginSet;
+    float m_x = g_asyncLoadOrigin[0];
+    float m_y = g_asyncLoadOrigin[1];
+
+    AsyncLoadOrigin(float x, float y) {
+        g_asyncLoadOriginSet = true;
+        g_asyncLoadOrigin[0] = x;
+        g_asyncLoadOrigin[1] = y;
+    }
+
+    ~AsyncLoadOrigin() {
+        g_asyncLoadOriginSet = this->m_set;
+        g_asyncLoadOrigin[0] = this->m_x;
+        g_asyncLoadOrigin[1] = this->m_y;
+    }
+};
+
 void DefaultAsyncObjectCleanupCallback(CAsyncObject* object);
 int32_t NetQueuePromoteLocalFiles(const void* data, void* param);
 
