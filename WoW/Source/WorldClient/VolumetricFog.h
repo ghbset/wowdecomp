@@ -203,6 +203,8 @@ bool CompositeOverSceneCopy();              // last RenderFog blended over a sce
 bool RenderShadowMask(const FrameInputs& in, float softYards, bool stockFogInColour);
 // SSAO: ambient occlusion over the opaque world (multiply); mode 1 half res, 2 full; blur 0-2. False = nothing drawn.
 bool RenderSsao(const FrameInputs& in, int mode, int blur, float distance, float strength, bool stockFogInColour);
+// LEGION refraction: heat haze over world boxes (b.xyz, t.xyz) of tagged fire emitters. False = nothing drawn.
+bool RenderRefraction(const FrameInputs& in, const float (*boxes)[6], uint32_t count, bool high, float strength, double seconds);
 void RenderGodRays();                       // OnWorldDone: the rays the last RenderFog masked, over the finished world
 void RendererShutdown();
 
@@ -214,6 +216,7 @@ void OnViewerLiquid();                      // CWorldScene::Render, right after 
 void OnOpaqueDone();                        // after scene->Draw(M2PASS_0)
 void OnSolidDone();                         // after the detail doodads, before liquids: the shadow mask (shadowMask)
 void OnLiquidDone();                        // after RenderLiquidPass, above-water branch only
+void OnHeatHaze();                          // LEGION refraction: after OnLiquidDone, heat haze over tagged fire emitters
 void OnWorldDone();                         // end of CGWorldFrame::OnWorldRender
 void OnWorldRendered();                     // CGWorldFrame::RenderWorld, after OnWorldRender (glow done), before names
 bool GlareDrawn();                          // OnLiquidDone drew DayNight::RenderGlares under the fog: skip the stock call

@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <vector>
 #include "Engine/Source/Gx/CGxDevice/CGxDevice.h"
 #include "Engine/Source/Gx/CGxDevice/CGxShader.h"
 #include "Engine/Source/Gx/CGxTex.h"
@@ -38,6 +39,7 @@ constexpr uint32_t kSampleSideRegister = 80;        // VFogCompositeSplit c80 (c
 constexpr uint32_t kDitherRegister = 79;            // vf_common cDither (x on, y frame)
 constexpr uint32_t kGradeRegister = 10;             // VFogGrade c10 strength, c11-c18 curve
 constexpr uint32_t kPostRegister = 10;              // LegionPost c10 FXAA, c11-c13 colour matrix
+constexpr uint32_t kRefractRegister = 10;           // LegionRefraction c10 rect, c11 haze, c12 size
 constexpr uint32_t kLocalLightRegister = 100;
 constexpr uint32_t kShadowRegister = 56;           // vf_shadow.hlsli c56-c61 band rows, c62 control, c63 terrain
 constexpr uint32_t kShadowMaskRegister = 10;      // VFogShadowMask c10-c13 (light, ambient + bias, diffuse, stock fog)
@@ -79,6 +81,7 @@ struct Shaders {
     CGxShader* shadowMask;              // VFogShadowMask: the land's sun shadow over the opaque world (shadowMask)
     CGxShader* post[3];                 // LegionPost{0,1,2}: colour shift, + FXAA low, + FXAA high (ffxAntiAliasingMode)
     CGxShader* ssao[4];                 // LegionSsao, LegionSsaoBox, LegionSsaoBilateral, LegionSsaoApply (SSAO)
+    CGxShader* refraction;              // LegionRefraction: heat haze over one fire emitter (refraction)
 };
 
 struct Targets {
@@ -1524,6 +1527,125 @@ bool RenderPost(int fxaa, const float colourShift[3][4], const WorldViewport& wo
     device->RsSet(GxRs_PixelShader, s_shaders.post[fxaa]);
     DrawQuad(static_cast<uint32_t>(world.w), static_cast<uint32_t>(world.h), world.minX, world.maxX, world.minY, world.maxY);
     EndPasses(s_saved, live);
+    return true;
+}
+
+// LEGION refraction (survey 2.6, docs/LEGION_PORT.md): heat haze over tagged fire emitters. Each world box is projected
+// on the CPU to a screen rect and drawn as one scissored LegionRefraction quad over a copy of the world viewport.
+bool RenderRefraction(const FrameInputs& in, const float (*boxes)[6], uint32_t count, bool high, float strength, double seconds) {
+    CGxDevice* device = g_theGxDevicePtr;
+    if (!count || !device || s_depthUnsupported || !Shader(s_shaders.refraction, "LegionRefraction")) {
+        return false;
+    }
+    float viewToWorld[16];
+    float worldToView[16];
+    const WorldViewport vp = LiveWorldViewport();
+    if (vp.target || vp.w < 1.0f || vp.h < 1.0f || !WorldViewFromCameraRelative(in, viewToWorld, worldToView)) {
+        return false;
+    }
+    const float* proj = in.glProjection;
+    const auto mul = [](const float v[4], const float* m, float out[4]) {
+        for (int j = 0; j < 4; j++) {
+            out[j] = v[0] * m[j] + v[1] * m[4 + j] + v[2] * m[8 + j] + v[3] * m[12 + j];
+        }
+    };
+    struct Quad {
+        float rect[4];      // px, top-left origin, unclipped (the mask's frame)
+        CRect scissor;      // normalised, Gx (bottom-up) like the viewport
+        float haze[4];
+        float size[4];
+    };
+    static std::vector<Quad> quads;
+    quads.clear();
+    const float t = static_cast<float>(std::fmod(seconds, 1024.0));
+    for (uint32_t i = 0; i < count; i++) {
+        const float* b = boxes[i];
+        float lo[2] = { 1e30f, 1e30f }, hi[2] = { -1e30f, -1e30f }, nearZ = 1e30f;
+        for (int c = 0; c < 8; c++) {
+            const float p[4] = { b[(c & 1) ? 3 : 0], b[(c & 2) ? 4 : 1], b[(c & 4) ? 5 : 2], 1.0f };
+            float v[4], clip[4];
+            mul(p, worldToView, v);
+            mul(v, proj, clip);
+            nearZ = std::min(nearZ, clip[3]);
+            if (clip[3] > 0.1f) {
+                for (int k = 0; k < 2; k++) {
+                    lo[k] = std::min(lo[k], clip[k] / clip[3]);
+                    hi[k] = std::max(hi[k], clip[k] / clip[3]);
+                }
+            }
+        }
+        // ponytail: a box the nearZ plane cuts (camera in the fire) is skipped, not clipped
+        if (nearZ < 0.5f || lo[0] >= 1.0f || hi[0] <= -1.0f || lo[1] >= 1.0f || hi[1] <= -1.0f) {
+            continue;
+        }
+        Quad q;
+        q.rect[0] = vp.x + (lo[0] * 0.5f + 0.5f) * vp.w;
+        q.rect[1] = vp.y + (0.5f - hi[1] * 0.5f) * vp.h;
+        q.rect[2] = vp.x + (hi[0] * 0.5f + 0.5f) * vp.w;
+        q.rect[3] = vp.y + (0.5f - lo[1] * 0.5f) * vp.h;
+        const float sx = vp.maxX - vp.minX;
+        const float sy = vp.maxY - vp.minY;
+        q.scissor.minX = vp.minX + (std::max(lo[0], -1.0f) * 0.5f + 0.5f) * sx;
+        q.scissor.maxX = vp.minX + (std::min(hi[0], 1.0f) * 0.5f + 0.5f) * sx;
+        q.scissor.minY = vp.minY + (std::max(lo[1], -1.0f) * 0.5f + 0.5f) * sy;
+        q.scissor.maxY = vp.minY + (std::min(hi[1], 1.0f) * 0.5f + 0.5f) * sy;
+        const float width = std::max(b[3] - b[0], b[4] - b[1]);
+        const float height = b[5] - b[2];
+        // ~2 cm of shimmer per yard of flame (capped), in pixels at the source's distance, at most 12 px
+        const float yards = 0.02f * strength * std::clamp(height, 0.5f, 4.0f);
+        const float pixels = std::min(yards * proj[5] * 0.5f * vp.h / nearZ, 12.0f * strength);
+        if (pixels < 0.25f) {
+            continue;
+        }
+        q.haze[0] = nearZ;
+        q.haze[1] = pixels;
+        q.haze[2] = t;
+        q.haze[3] = high ? 1.0f : 0.0f;
+        q.size[0] = width;
+        q.size[1] = height;
+        q.size[2] = q.size[3] = 0.0f;
+        quads.push_back(q);
+    }
+    if (quads.empty()) {
+        return false;
+    }
+    bool transient = false;
+    CGxTex* depth = device->DeviceCopySceneDepth(&transient);
+    if (!depth || vp.x < 0.0f || vp.y < 0.0f || vp.x + vp.w > depth->m_width || vp.y + vp.h > depth->m_height) {
+        return false;
+    }
+    CGxTex* scene = CopySceneBeforeFog(static_cast<uint32_t>(vp.x), static_cast<uint32_t>(vp.y), static_cast<uint32_t>(vp.w), static_cast<uint32_t>(vp.h));
+    if (!scene) {
+        return false;
+    }
+    const float worldMinZ = in.viewport[4];
+    const float worldExtent = in.viewport[5] - in.viewport[4];
+    const float common[4][4] = {     // vf_common c0-c3, as RenderShadowMask
+        { vp.x, vp.y, vp.w, vp.h },
+        { 1.0f, 0.0f, 1.0f / depth->m_width, 1.0f / depth->m_height },
+        { proj[0], proj[5], proj[8], proj[9] },
+        { worldMinZ + worldExtent * (1.0f + proj[10]) * 0.5f, worldExtent * proj[14] * 0.5f, std::max(in.horizonBand[3], 1.0f), in.viewport[5] },
+    };
+
+    static SavedPassState s_saved;
+    BeginPasses(s_saved);
+    GxRsSet(GxRs_ColorWrite, 7);
+    GxRsSet(GxRs_ScissorTest, 1);
+    SetPs(0, &common[0][0], 4);
+    SetPs(kHorizonBandRegister, in.horizonBand, 1);
+    Bind(0, depth);
+    Bind(1, scene);
+    device->RsSet(GxRs_PixelShader, s_shaders.refraction);
+    device->DeviceSceneDepthBound(false);   // D3D9: s0 is the INTZ depth-stencil the back buffer uses
+    for (const Quad& q : quads) {
+        device->SetScissor(q.scissor);
+        SetPs(kRefractRegister, q.rect, 1);
+        SetPs(kRefractRegister + 1, q.haze, 1);
+        SetPs(kRefractRegister + 2, q.size, 1);
+        DrawQuad(static_cast<uint32_t>(vp.w), static_cast<uint32_t>(vp.h), vp.minX, vp.maxX, vp.minY, vp.maxY);
+    }
+    device->DeviceSceneDepthBound(true);
+    EndPasses(s_saved, vp);
     return true;
 }
 

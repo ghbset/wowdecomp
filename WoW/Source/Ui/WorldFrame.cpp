@@ -1770,6 +1770,7 @@ void CGWorldFrame::OnWorldRender() {
         scene->Draw(M2PASS_2);
         CWorldScene::RenderLiquidPass();
         VolumetricFog::OnLiquidDone();   // VFOG: not in 12340 (early composite, above water only)
+        VolumetricFog::OnHeatHaze();     // LEGION refraction: not in 12340 (heat haze over fires, above water only)
         CWorldScene::RenderWeather();
         CWorldScene::RenderBarriers(this->m_elapsedSec);
         scene->Draw(M2PASS_1);

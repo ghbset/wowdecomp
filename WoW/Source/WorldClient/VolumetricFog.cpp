@@ -17,6 +17,7 @@
 #include "Engine/Source/Model2/M2Model.h"
 #include "Engine/Source/Model2/M2Shared.h"
 #include "Engine/Source/Model2/M2Scene.h"
+#include "Engine/Source/Services/ParticleSystem2.h"
 #include "WoW/Source/UIUtil/Camera.h"
 #include "WoW/Source/Ui/WorldFrame.h"
 #include "WoW/Source/WorldClient/CataWater.h"
@@ -597,6 +598,108 @@ void PreparePost() {
     s_post.pending = true;
 }
 
+// LEGION refraction (survey 2.6, docs/LEGION_PORT.md): heat haze over fire. 3.3.5a particles have no refraction blend,
+// so blended emitters are tagged by name (model path or particle texture), as groundDecals tags ground spell effects.
+CVar* s_refractionCVar;          // refraction 0 off, 1 on, 2 high
+CVar* s_refractionStrengthCVar;  // refractionStrength 0..4
+constexpr uint32_t kMaxRefractionSources = 32;
+float s_refractBoxes[kMaxRefractionSources][6];
+uint32_t s_refractCount = 0;
+
+// Case-insensitive: does name (count chars, may stop at a NUL) contain one of words (lower case, nullptr-ended)?
+bool NameHas(const char* name, uint32_t count, const char* const* words) {
+    char lower[264];
+    uint32_t n = 0;
+    for (; n < count && n < sizeof(lower) - 1 && name[n]; n++) {
+        lower[n] = static_cast<char>(name[n] >= 'A' && name[n] <= 'Z' ? name[n] + 32 : name[n]);
+    }
+    lower[n] = 0;
+    for (; *words; words++) {
+        if (std::strstr(lower, *words)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool HotEmitter(const M2Element& e) {
+    static const char* const kHot[] = { "fire", "flame", "lava", "magma", "brazier", "torch", "burn", "exhaust", "immolat", "inferno", nullptr };
+    static const char* const kCool[] = { "smoke", "steam", "mist", "fog", "cloud", "firefl", "firework", "candle", "frost", nullptr };
+    const CParticleEmitter2* emitter = e.m_emitter;
+    const CM2Shared* shared = e.m_model ? e.m_model->m_shared : nullptr;
+    const M2Data* data = shared ? shared->m_data : nullptr;
+    const uint32_t blend = emitter ? emitter->m_params.m_materialBlend : 0;
+    if (!data || blend == 0 || blend == 4 || blend == 5) {
+        return false;       // opaque or modulate (shadows, darkening): never a flame
+    }
+    const char* texture = nullptr;
+    uint32_t textureLength = 0;
+    for (uint32_t i = 0; i < data->m_particles.m_count; i++) {
+        if (e.m_model->m_particleEmitters[i] == emitter) {
+            const M2Particle& particle = data->m_particles[i];
+            const uint32_t index = (particle.m_flags & 0x10000000) ? particle.m_textureIndex & 0x1F : particle.m_textureIndex;
+            if (index < data->m_textures.m_count) {
+                texture = data->m_textures[index].m_filename.Data();
+                textureLength = data->m_textures[index].m_filename.m_count;
+            }
+            break;
+        }
+    }
+    if (texture && NameHas(texture, textureLength, kCool)) {
+        return false;
+    }
+    return (NameHas(shared->m_fileName, sizeof(shared->m_fileName), kHot) && !NameHas(shared->m_fileName, sizeof(shared->m_fileName), kCool)) ||
+           (texture && NameHas(texture, textureLength, kHot));
+}
+
+// From the blended M2 passes (built by Animate, drawn after OnOpaqueDone): the nearest tagged emitters' last-drawn world
+// bounds, widened and raised so the haze sits around and above the flame. ponytail: names are tested per element per
+// frame (a few strstr each); cache the tag on CM2Shared if a profile ever shows it.
+void CollectRefraction(int mode) {
+    s_refractCount = 0;
+    CM2Scene* scene = World::s_m2Scene;
+    if (!mode || !scene) {
+        return;
+    }
+    const float maxDistance = mode == 2 ? 160.0f : 80.0f;
+    const uint32_t cap = mode == 2 ? kMaxRefractionSources : 12;
+    const C3Vector& cam = CWorldScene::s_activeWorldView;
+    float distance[kMaxRefractionSources];
+    for (int pass = M2PASS_1; pass <= M2PASS_2; pass++) {
+        const TSGrowableArray<uint32_t>& list = scene->m_passElements[pass];
+        for (uint32_t i = 0; i < list.m_count; i++) {
+            const M2Element& e = scene->m_elements.m_data[list.m_data[i]];
+            if (e.m_type != 4 || !e.m_emitter || !HotEmitter(e)) {
+                continue;
+            }
+            const CAaBox& box = e.m_emitter->WorldBounds();
+            const float w = box.t.x - box.b.x, d = box.t.y - box.b.y, h = box.t.z - box.b.z;
+            if (!(w >= 0.0f && d >= 0.0f && h >= 0.0f && w < 50.0f && d < 50.0f && h < 50.0f)) {
+                continue;       // nothing drawn yet (inverted box), or a spell-wide area
+            }
+            const float cx = (box.b.x + box.t.x) * 0.5f - cam.x, cy = (box.b.y + box.t.y) * 0.5f - cam.y, cz = (box.b.z + box.t.z) * 0.5f - cam.z;
+            const float dist = std::sqrt(cx * cx + cy * cy + cz * cz);
+            if (dist > maxDistance) {
+                continue;
+            }
+            uint32_t slot = s_refractCount;
+            if (slot == cap) {       // full: replace the farthest if this one is nearer
+                slot = static_cast<uint32_t>(std::max_element(distance, distance + cap) - distance);
+                if (distance[slot] <= dist) {
+                    continue;
+                }
+            } else {
+                s_refractCount++;
+            }
+            const float grow = std::max(w, d) * 0.15f + 0.1f;
+            const float rise = std::max(h, 1.0f) * 0.75f;
+            const float b[6] = { box.b.x - grow, box.b.y - grow, box.b.z, box.t.x + grow, box.t.y + grow, box.t.z + rise };
+            std::memcpy(s_refractBoxes[slot], b, sizeof(b));
+            distance[slot] = dist;
+        }
+    }
+}
+
 }  // namespace
 
 void RegisterCVars() {
@@ -664,6 +767,9 @@ void RegisterCVars() {
     s_ssaoCVars.blur = reg("SSAOBlur", "Ambient occlusion blur: 0 = off (noisy), 1 = box, 2 = depth-weighted (keeps edges, default)", "2");
     s_ssaoCVars.strength = reg("SSAOStrength", "Ambient occlusion strength, 0..2", "1");
     s_postCVars.daltonize = reg("daltonize", "Color blindness: 0 = simulate the type colorblindSimulator names, 1 = correct the 3D view's colours for it", "0");
+    // LEGION refraction (Legion 7.3.5 name and range; its Particle_Refraction blend does not exist here, see CollectRefraction)
+    s_refractionCVar = reg("refraction", "Heat haze over fires, lava and braziers: 0 = off, 1 = on, 2 = high (more sources, farther, finer)", "1");
+    s_refractionStrengthCVar = reg("refractionStrength", "Heat haze strength, 0..4", "1");
 
     g_vfogM2BatchFog = &BatchFog;
     g_vfogM2FogParticles = &FogParticles;
@@ -773,7 +879,10 @@ void OnOpaqueDone() {
     const bool ssao = CVarInt(s_ssaoCVars.mode, 0) > 0 && RendererReady();
     CGxDevice::SetDepthUser(CGxDevice::DepthUser_ShadowMask, mask);   // LEGION SetDepthUser: read in OnSolidDone
     CGxDevice::SetDepthUser(CGxDevice::DepthUser_Ssao, ssao);
-    if (!s_active && !mask && !ssao) {
+    // above water only: WorldFrame calls OnHeatHaze in that branch alone
+    CollectRefraction(RendererReady() && !World::SceneCamLiquidStatus(nullptr) ? std::clamp(CVarInt(s_refractionCVar, 1), 0, 2) : 0);
+    CGxDevice::SetDepthUser(CGxDevice::DepthUser_Refraction, s_refractCount > 0);   // read in OnLiquidDone
+    if (!s_active && !mask && !ssao && !s_refractCount) {
         return;
     }
     if (!s_active) {
@@ -936,6 +1045,19 @@ void OnLiquidDone() {
     s_fit = FitStockFog(s_params, s_in, s_cfg);
     s_fitStamp++;
     s_armed = true;
+}
+
+// LEGION refraction: above water, after the liquids and the early fog composite (WorldFrame, after OnLiquidDone),
+// before the blended M2 pass, so the haze bends the fogged scene behind the flames.
+void OnHeatHaze() {
+    if (s_refractCount && s_opaqueValid) {
+        const int mode = std::clamp(CVarInt(s_refractionCVar, 1), 0, 2);
+        const float strength = std::clamp(CVarFloat(s_refractionStrengthCVar, 1.0f), 0.0f, 4.0f);
+        if (strength > 0.0f) {
+            RenderRefraction(s_in, s_refractBoxes, s_refractCount, mode == 2, strength, FrameTime::s_curTimeMs * 0.001);
+        }
+    }
+    s_refractCount = 0;
 }
 
 bool GlareDrawn() {

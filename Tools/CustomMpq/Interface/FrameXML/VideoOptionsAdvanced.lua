@@ -147,6 +147,9 @@ local PAGES = {
 	    { { "0", "Off" }, { "1", "Box" }, { "2", "Edge-aware" } } },
 	  { "SSAODistance", "slider", "Ambient occlusion distance", "How far away (yards) the occlusion reaches before it fades out.", 25, 400, 25 },
 	  { "SSAOStrength", "slider", "Ambient occlusion strength", "How dark the occlusion is.", 0, 2, 0.1 },
+	  { "refraction", "drop", "Heat haze", "Air shimmers above fires, braziers, lava and burning spells.",
+	    { { "0", "Off" }, { "1", "On" }, { "2", "High" } } },
+	  { "refractionStrength", "slider", "Heat haze strength", "How strongly the hot air bends what is behind it.", 0, 4, 0.25 },
 	},
 }
 

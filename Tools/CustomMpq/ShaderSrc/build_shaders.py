@@ -24,6 +24,7 @@ Water (coa vw_*): VFogWaterDepth, VFogWaterMask, VFogWater{1,2,3} (SSR_STEPS 0/1
 GPU waves VFogWave{Evolve,Fft,Surface,Mip,Pack}.
 Grass wind (wxl-grasswind, MULTI): Shaders/Vertex/vs_3_0|vs_4_0/DetailDoodad.bls, the stock grass VS's 6 permutations.
 Fading models (wxl-vfog 0.6.3): VFogDepthCopy. Legion FFX post: LegionPost{0,1,2}. Legion SSAO: LegionSsao{,Box,Bilateral,Apply}. Land shadow mask (shadowMask): VFogShadowMask. MSAA sample split (coa): VFogSilhouette and VFogCompositeSplit{Q}[L][N].
+Fading models (wxl-vfog 0.6.3): VFogDepthCopy. Legion FFX post: LegionPost{0,1,2}. Legion heat haze (refraction): LegionRefraction. Land shadow mask (shadowMask): VFogShadowMask. MSAA sample split (coa): VFogSilhouette and VFogCompositeSplit{Q}[L][N].
 """
 import argparse
 import concurrent.futures
@@ -87,6 +88,8 @@ SHADERS = {
     'LegionSsaoBox': ('ps_3_0', TEXCOORD0, COLOR0, samplers(1), 0, 'LegionSsao', {'PASS': 1}),
     'LegionSsaoBilateral': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 1), 0, 'LegionSsao', {'PASS': 2}),
     'LegionSsaoApply': ('ps_3_0', TEXCOORD0, COLOR0, samplers(1), 0, 'LegionSsao', {'PASS': 3}),
+    # Legion refraction (docs/LEGION_PORT.md): heat haze over tagged fire emitters; s0 scene depth, s1 scene copy
+    'LegionRefraction': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 1), 0, 'LegionRefraction', {}),
 }
 # Cata water (waterStyle 1, docs/BACKLOG_PORT.md "Cata water"): the ProcWater VS and ProcWaterAbove / Below PS,
 # drawn by the liquid material in place of vsLiquidWater / psLiquidWater (WorldClient/CataWater.cpp).
