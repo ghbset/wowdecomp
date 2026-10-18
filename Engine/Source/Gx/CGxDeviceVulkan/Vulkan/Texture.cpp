@@ -249,6 +249,40 @@ namespace gxvk::vk::texture
         return true;
     }
 
+    bool RecordCopy(VkCommandBuffer cmd, Image& src, Image& dst)
+    {
+        if (!s.ready || !cmd || src.handle == VK_NULL_HANDLE || dst.handle == VK_NULL_HANDLE || src.layout != kSampled
+            || src.format != dst.format || src.extent.width != dst.extent.width || src.extent.height != dst.extent.height
+            || src.levels != dst.levels || src.layers != dst.layers || src.levels > 16)
+            return false;
+        Transition(cmd, src.handle, src.levels, src.layers, kSampled, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   kReaders | VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                   VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+        Transition(cmd, dst.handle, dst.levels, dst.layers, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                   VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+        VkImageCopy copies[16];
+        const uint32_t levels = src.levels;
+        for (uint32_t i = 0; i < levels; ++i)
+        {
+            VkImageCopy& c = copies[i];
+            c = VkImageCopy{};
+            c.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            c.srcSubresource.mipLevel   = i;
+            c.srcSubresource.layerCount = src.layers;
+            c.dstSubresource            = c.srcSubresource;
+            c.extent = VkExtent3D{ LevelSide(src.extent.width, i), LevelSide(src.extent.height, i), 1 };
+        }
+        s.dapi->CmdCopyImage(cmd, src.handle, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst.handle, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, levels, copies);
+        Transition(cmd, src.handle, src.levels, src.layers, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, kSampled,
+                   VK_PIPELINE_STAGE_TRANSFER_BIT, 0, kReaders, VK_ACCESS_SHADER_READ_BIT);
+        Transition(cmd, dst.handle, dst.levels, dst.layers, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, kSampled,
+                   VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                   kReaders | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                   VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
+        dst.layout = kSampled;
+        return true;
+    }
+
     bool RecordGenerateMips(VkCommandBuffer cmd, Image& img)
     {
         if (!s.ready || !cmd || img.handle == VK_NULL_HANDLE || img.levels < 2) return false;

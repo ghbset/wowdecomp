@@ -98,6 +98,8 @@ namespace {
         uint64_t refused;         ///< regions refused (no staging, outside the level, a decode failure)
         uint64_t reentered;       ///< updates asked for the texture whose fill is running
         uint64_t recreated;       ///< records dropped by ITexForceRecreation
+        uint64_t renamed;         ///< refills of an image this frame already sampled: a fresh copy filled ahead of the frame
+        uint64_t deferred;        ///< inline refills left pending while an occlusion query pinned the pass
     };
     Stats g_stats;
 
@@ -117,6 +119,38 @@ namespace {
     /// The transfer rule: a fill goes inline when this frame's main buffer already named the image.
     bool MainNamed(const TexRec& r) {
         return frame::UsedThisFrame(r.lastUsed) || frame::UsedThisFrame(r.lastRef);
+    }
+
+    /// A refill of an image this frame's draws already sampled (and no inline fill touched): the draws
+    /// before keep the old image, retired with the frame, and the refill lands in a fresh copy of it
+    /// recorded in the pre-pass, so the scene pass is not ended for the transfer (audit P4). The pre-pass
+    /// runs ahead of the frame, so the copy holds the old image as those draws saw it. False: the
+    /// fill goes inline as before (a render target, an inline fill already this frame, no memory).
+    // ponytail: one image create + whole-image copy per refill; reuse a retired twin if refills per frame get hot.
+    bool RenameForRefill(TexRec& r) {
+        if (r.renderTarget || !frame::UsedThisFrame(r.lastUsed) || frame::UsedThisFrame(r.lastRef)
+            || r.image.handle == VK_NULL_HANDLE || r.image.layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+            return false;
+        }
+
+        VkCommandBuffer pre = frame::PrePass();
+        texture::Image fresh;
+        const bool made = r.image.cube ? texture::CreateCube(r.image.extent.width, r.image.levels, r.image.format, fresh)
+                                       : texture::CreateMipped(r.image.extent.width, r.image.extent.height, r.image.levels, r.image.format, fresh);
+
+        if (!pre || !made || !texture::RecordCopy(pre, r.image, fresh)) {
+            if (made) {
+                texture::DestroyIdle(fresh);
+            }
+            return false;
+        }
+
+        frame::RetireImage(r.image, LastRef(r));
+        r.image = fresh;
+        r.lastUsed = 0;
+        r.prePass = frame::Serial();
+        g_stats.renamed++;
+        return true;
     }
 
     /// The record goes: its image retired by the last frame that named it.
@@ -349,6 +383,16 @@ void CGxDeviceVulkan::ITexMarkAsUpdated(CGxTex* texId) {
         this->ITexCreate(texId);
     }
 
+    // Audit L2: a fill that would go inline while an occlusion query pins the pass would land in the
+    // pre-pass, ahead of the draws that already sampled the old texels. Renamed when it can be (the
+    // fill then goes to the pre-pass legitimately), else left pending (the texture's own m_needsUpdate
+    // is the queue): the first bind after QueryEnd uploads it, and a draw inside the query samples
+    // the old texels, as it would have before the update.
+    if (frame::QueryActive() && texId->m_apiSpecificData && MainNamed(*RecOf(texId)) && !RenameForRefill(*RecOf(texId))) {
+        g_stats.deferred++;
+        return;
+    }
+
     if (!texId->m_needsCreation && texId->m_apiSpecificData) {
         if (texId->m_userFunc) {
             CGxTex* outer = this->m_filling;
@@ -480,6 +524,10 @@ void CGxDeviceVulkan::ITexCreate(CGxTex* texId) {
 void CGxDeviceVulkan::ITexUpload(CGxTex* texId) {
     TexRec& r = *RecOf(texId);
     g_stats.uploads++;
+
+    if (MainNamed(r)) {
+        RenameForRefill(r);
+    }
 
     uint32_t texelStrideInBytes = 0;
     const void* texels = nullptr;
@@ -780,7 +828,7 @@ void CGxDeviceVulkan::IReleaseTextures() {
 
     texture::Stats t;
     texture::GetStats(t);
-    Write(Debug, "vulkan: textures: %llu record(s), %llu image(s) (%llu without one), %llu render target(s), %llu cube(s), %llu decoded, %llu with a generated chain (%llu refused); %llu upload(s): %llu region(s) ahead of the frame, %llu inline, %llu batch(es), %llu chain(s), %llu KiB staged, %llu refused; %llu re-entered, %llu recreated; images made %llu / destroyed %llu, peak %u, %llu MiB asked",
+    Write(Debug, "vulkan: textures: %llu record(s), %llu image(s) (%llu without one), %llu render target(s), %llu cube(s), %llu decoded, %llu with a generated chain (%llu refused); %llu upload(s): %llu region(s) ahead of the frame, %llu inline, %llu batch(es), %llu chain(s), %llu KiB staged, %llu refused; %llu re-entered, %llu recreated, %llu renamed, %llu deferred; images made %llu / destroyed %llu, peak %u, %llu MiB asked",
           static_cast<unsigned long long>(g_stats.records), static_cast<unsigned long long>(g_stats.images),
           static_cast<unsigned long long>(g_stats.noImage), static_cast<unsigned long long>(g_stats.renderTargets),
           static_cast<unsigned long long>(g_stats.cubes), static_cast<unsigned long long>(g_stats.decoded),
@@ -789,6 +837,7 @@ void CGxDeviceVulkan::IReleaseTextures() {
           static_cast<unsigned long long>(g_stats.regionsInline), static_cast<unsigned long long>(g_stats.batches),
           static_cast<unsigned long long>(g_stats.chains), static_cast<unsigned long long>(g_stats.bytes / 1024),
           static_cast<unsigned long long>(g_stats.refused), static_cast<unsigned long long>(g_stats.reentered),
-          static_cast<unsigned long long>(g_stats.recreated), static_cast<unsigned long long>(t.created),
+          static_cast<unsigned long long>(g_stats.recreated), static_cast<unsigned long long>(g_stats.renamed),
+          static_cast<unsigned long long>(g_stats.deferred), static_cast<unsigned long long>(t.created),
           static_cast<unsigned long long>(t.destroyed), t.livePeak, static_cast<unsigned long long>(t.bytes >> 20));
 }
