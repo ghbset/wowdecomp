@@ -155,6 +155,9 @@ void BeginPasses(SavedPassState& saved);
 void EndPasses(const SavedPassState& saved, const WorldViewport& vp);   // unbinds stages 0-4 (BeginPasses turns the stencil test off)
 // The Gx stencil (GxRs_Stencil*, docs "Stencil"): false when the scene depth has no stencil bits (every user falls back).
 bool StencilAvailable();
+// Stencil bits shared in one frame: the fading-model alpha (DrawFadingEarly, read in RenderFog) and the MSAA sample split.
+constexpr int32_t kFadeBits = 0xE0;
+constexpr int32_t kSplitBits = 0x1F;
 // Test on, front and back: func against ref under readMask; pass / zfail ops written under writeMask; fail keeps.
 void SetStencil(EGxStencilCmp func, int32_t ref, int32_t readMask, int32_t writeMask, EGxStencilOp pass, EGxStencilOp zfail = GxStencilOp_Keep);
 

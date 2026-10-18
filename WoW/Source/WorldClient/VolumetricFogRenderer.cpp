@@ -544,16 +544,21 @@ bool CopyRawDepth(CGxTex*& target, CGxTex* depth) {
 // 0xFF, near = 1, the rest 0), then the plain composite draws (everywhere when it overwrites, i.e. over the scene copy;
 // else the unmarked samples), and the split composite fogs the near and the far samples at their own side's depth.
 // The pixel shader runs once per pixel; the stencil test is per sample, so each side lands on its own samples.
-void DrawCompositeBySampleDepth(CGxShader* composite, CGxShader* split, bool overwrites, const WorldViewport& vp) {
+// Stencil bits (docs section 3, "Stencil"): the split owns the low five (near 1, far 0x1F), the fading-model alpha the
+// top three (0xE0, DrawFadingEarly). fadeMarks = those are this frame's: DrawFadingEarly cleared the whole stencil and
+// wrote only 0xE0, so the low bits are already 0 and the clear (which would wipe the marks) is skipped.
+void DrawCompositeBySampleDepth(CGxShader* composite, CGxShader* split, bool overwrites, bool fadeMarks, const WorldViewport& vp) {
     CGxDevice* device = g_theGxDevicePtr;
     const uint32_t w = static_cast<uint32_t>(vp.w);
     const uint32_t h = static_cast<uint32_t>(vp.h);
     GxXformSetViewport(vp.minX, vp.maxX, vp.minY, vp.maxY, 0.0f, 1.0f);
-    GxSceneClear(GxBufferBit_Stencil, CImVector { 0, 0, 0, 0 });
+    if (!fadeMarks) {
+        GxSceneClear(GxBufferBit_Stencil, CImVector { 0, 0, 0, 0 });
+    }
     GxRsSet(GxRs_ColorWrite, 0);
     GxRsSet(GxRs_DepthTest, 1);
     GxRsSet(GxRs_DepthFunc, 3);     // LESS (s_cmpFunc[3])
-    SetStencil(GxStencilCmp_Always, 1, 0xFF, 0xFF, GxStencilOp_Invert, GxStencilOp_Replace);
+    SetStencil(GxStencilCmp_Always, 1, kSplitBits, kSplitBits, GxStencilOp_Invert, GxStencilOp_Replace);
     device->RsSet(GxRs_PixelShader, s_shaders.silhouette);
     DrawQuad(w, h, vp.minX, vp.maxX, vp.minY, vp.maxY);
     GxRsSet(GxRs_DepthTest, 0);
@@ -564,15 +569,15 @@ void DrawCompositeBySampleDepth(CGxShader* composite, CGxShader* split, bool ove
     if (overwrites) {
         GxRsSet(GxRs_StencilTest, 0);
     } else {
-        SetStencil(GxStencilCmp_Equal, 0, 0xFF, 0, GxStencilOp_Keep);
+        SetStencil(GxStencilCmp_Equal, 0, kSplitBits, 0, GxStencilOp_Keep);
     }
     device->RsSet(GxRs_PixelShader, composite);
     DrawQuad(w, h, vp.minX, vp.maxX, vp.minY, vp.maxY);
     device->RsSet(GxRs_PixelShader, split);
-    SetStencil(GxStencilCmp_Equal, 1, 0xFF, 0, GxStencilOp_Keep);
+    SetStencil(GxStencilCmp_Equal, 1, kSplitBits, 0, GxStencilOp_Keep);
     SetPs(kSampleSideRegister, nearSide, 1);
     DrawQuad(w, h, vp.minX, vp.maxX, vp.minY, vp.maxY);
-    SetStencil(GxStencilCmp_Equal, 0xFF, 0xFF, 0, GxStencilOp_Keep);
+    SetStencil(GxStencilCmp_Equal, kSplitBits, kSplitBits, 0, GxStencilOp_Keep);
     SetPs(kSampleSideRegister, farSide, 1);
     DrawQuad(w, h, vp.minX, vp.maxX, vp.minY, vp.maxY);
     GxRsSet(GxRs_StencilTest, 0);
@@ -583,8 +588,10 @@ void DrawCompositeBySampleDepth(CGxShader* composite, CGxShader* split, bool ove
 bool KeepDepthBehindFading() {
     s_fade.armed = false;
     CGxDevice* device = g_theGxDevicePtr;
-    // wxl-vfog: not on a multisampled depth (the sample split would clear the marks); the weights need BLENDFACTOR.
-    if (!device || s_depthUnsupported || !StencilAvailable() || device->m_format.m_multisampleCount > 1 || !device->m_caps.m_blendFactor
+    // The weights need BLENDFACTOR. With MSAA (unlike wxl-vfog 0.6.3) too: the copy is the single-sample depth every
+    // pass reads (sample 0: D3D9 RESZ, D3D11 blit_depth_ms_ps, Vulkan's SAMPLE_ZERO resolve), the marks are per sample
+    // and the sample split keeps them (its own stencil bits).
+    if (!device || s_depthUnsupported || !StencilAvailable() || !device->m_caps.m_blendFactor
         || !device->Caps().m_rttFormat[GxTex_R32F] || LiveWorldViewport().target || !Shader(s_shaders.depthCopy, "VFogDepthCopy")) {
         return false;
     }
@@ -618,6 +625,9 @@ bool RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg,
     }
 
     s_godRays.pending = false;
+    // Taken once, so an early return cannot leave it armed for a later frame (whose stencil the split would then keep).
+    const bool fadeArmed = s_fade.armed;
+    s_fade.armed = false;
     const WorldViewport vp = LiveWorldViewport();
     CGxTex* prevTarget = vp.target;
     const float vpX = vp.x, vpY = vp.y, vpW = vp.w, vpH = vp.h;
@@ -683,18 +693,16 @@ bool RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg,
     }
 
     if (vpX < 0.0f || vpY < 0.0f || vpX + vpW > depth->m_width || vpY + vpH > depth->m_height) {
-        s_fade.armed = false;
         return false;
     }
 
     // wxl-vfog 0.6.3 (vfogFadeStencil): with the fading models' depth behind them kept, the frame is fogged from that
     // depth, and the composite at the live depth goes over each model by its stencil-marked alpha (after the composite).
     CGxTex* fadeDepth = nullptr;
-    if (s_fade.armed && !prevTarget && CopyRawDepth(s_fade.with, depth)) {
+    if (fadeArmed && !prevTarget && CopyRawDepth(s_fade.with, depth)) {
         fadeDepth = s_fade.with;
         depth = s_fade.behind;
     }
-    s_fade.armed = false;
 
     const float* proj = in.glProjection;
 
@@ -904,7 +912,7 @@ bool RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg,
     device->RsSet(GxRs_PixelShader, composite);
     // VFogComposite reads TEXCOORD0 as uv across the world viewport (vf_common FullPixelFromUv: c0.xy + uv * c0.zw).
     if (splitComposite) {
-        DrawCompositeBySampleDepth(composite, splitComposite, sceneCopy != nullptr, vp);   // MSAA: INTZ is a copy, the MS depth stays bound
+        DrawCompositeBySampleDepth(composite, splitComposite, sceneCopy != nullptr, fadeDepth != nullptr, vp);   // MSAA: INTZ is a copy, the MS depth stays bound
     } else {
         device->DeviceSceneDepthBound(false);   // D3D9: s0 is the INTZ depth-stencil the back buffer uses
         DrawQuad(static_cast<uint32_t>(vpW), static_cast<uint32_t>(vpH), vpMinX, vpMaxX, vpMinY, vpMaxY);
@@ -915,14 +923,21 @@ bool RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg,
         // wxl-vfog Renderer::DrawOverMarked: out = lerp(frame fogged behind, the unfogged copy fogged at the model's
         // own depth, alpha), the alpha in eight steps from the stencil's top three bits (step 0 is left as is).
         // The depth-stencil stays bound for the test; s0 is the R32F copy, so nothing samples it.
+        // MSAA with the split: its near side (c80 = 0, nothing clipped) fogs a marked sample at the nearest depth of
+        // its 3x3, i.e. the model's own where sample 0 is the background behind its edge (else a halo of background fog).
         compositeConstants[0][3] = static_cast<float>(fog.linear ? Blend_LinearOverSceneCopy : Blend_GammaOverSceneCopy);
         SetPs(kCompositeRegister, &compositeConstants[0][0], 1);
+        if (splitComposite) {
+            const float nearSide[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+            SetPs(kSampleSideRegister, nearSide, 1);
+            device->RsSet(GxRs_PixelShader, splitComposite);
+        }
         Bind(0, fadeDepth);
         Bind(3, copy);
         GxRsSet(GxRs_BlendingMode, GxBlend_ConstantAlpha);
         for (int32_t step = 1; step <= 7; step++) {
             const float weight = step == 7 ? 1.0f : (2 * step + 1) / 16.0f + 0.5f / 255.0f;
-            SetStencil(GxStencilCmp_Equal, step << 5, 0xE0, 0, GxStencilOp_Keep);
+            SetStencil(GxStencilCmp_Equal, step << 5, kFadeBits, 0, GxStencilOp_Keep);
             GxRsSet(Unk84, weight);     // BLENDFACTOR (GxBlend_ConstantAlpha)
             DrawQuad(static_cast<uint32_t>(vpW), static_cast<uint32_t>(vpH), vpMinX, vpMaxX, vpMinY, vpMaxY);
         }
