@@ -174,6 +174,8 @@ void SetStencil(EGxStencilCmp func, int32_t ref, int32_t readMask, int32_t write
 // coa GradingRenderer::Grade (VolumetricFogRenderer.cpp): the 32-entry curve over a copy of the world viewport,
 // opaque, RGB. False when it could not draw (shader missing, world not on the back buffer, no copy).
 bool RenderGrade(const float* curve32, float strength, int dither, uint32_t frame, const WorldViewport& world);
+// LEGION FFX post: fxaa 0 (colour shift only), 1 low, 2 high, then the 3x3 linear-light colour matrix (rows in xyz).
+bool RenderPost(int fxaa, const float colourShift[3][4], const WorldViewport& world);
 
 // Driver accessors (VolumetricFog.cpp): this frame's inputs once OnOpaqueDone captured them.
 bool WaterFrame(const FrameInputs*& in, const Config*& cfg);

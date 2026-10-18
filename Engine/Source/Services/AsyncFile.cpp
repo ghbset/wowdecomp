@@ -9,6 +9,7 @@
 #include "Engine/Source/Gx/CGxDevice/CGxDevice.h"
 #include "Engine/Source/Os/TimeManager.h"
 #include "Engine/Source/Storm/H/storm.h"
+#include "Engine/Source/Services/Texture.h"
 
 // STATIC: 0x00AC3438
 static const char* s_asyncQueueNames[3] = { "Disk Queue", "Net Geometry Queue", "Net Texture Queue" };
@@ -74,6 +75,54 @@ static TSGrowableArray<int32_t (*)()> s_asyncStatusHandlers;
 // STATIC: 0x00B4A240
 SCritSect g_queueLock;
 
+// Not stock (Legion worldLoadSort): disk readers take the queued load nearest the camera first (see AsyncPickNearest).
+int32_t g_asyncLoadSort = 1;
+bool g_asyncLoadOriginSet;
+float g_asyncLoadOrigin[2];
+static float s_asyncViewPos[2];
+
+// Not stock (Legion componentTexLoadLimit-style texUploadLimit): at most this many BLP textures are created (GPU
+// texture alloc + upload) per frame by the poll handler; the rest wait in this list for the next frames. 0 = no cap.
+int32_t g_asyncTexUploadLimit = 24;
+static TSExplicitList<CAsyncObject, offsetof(CAsyncObject, m_link)> s_asyncFileReadDeferList;
+
+void AsyncFileReadSetViewPos(float x, float y) {
+    g_queueLock.Enter();
+    s_asyncViewPos[0] = x;
+    s_asyncViewPos[1] = y;
+    g_queueLock.Leave();
+}
+
+// Not stock. Caller holds g_queueLock. Among the first entries sharing the head's priority, return the one nearest
+// the camera. Objects without a position, the waited-on object and anything queued > 120 frames ago keep stock
+// (head-first) order, so nothing starves. ponytail: scans at most 64 entries per pop; a heap if queues get huge.
+static CAsyncObject* AsyncPickNearest(CAsyncQueue* queue, CAsyncObject* head) {
+    if (!g_asyncLoadSort || head == s_asyncWaitObject || !head->m_hasLoadPos || g_theGxDevicePtr->m_frameCount - head->m_linkFrame > 120) {
+        return head;
+    }
+
+    CAsyncObject* best = head;
+    float bestDist = 3.4e38f;
+    uint32_t scanned = 0;
+
+    for (CAsyncObject* object = head; !queue->m_readList.IsEnd(object) && object->m_priority == head->m_priority && scanned < 64; object = queue->m_readList.RawNext(object), scanned++) {
+        if (!object->m_hasLoadPos) {
+            return object;
+        }
+
+        float dx = object->m_loadX - s_asyncViewPos[0];
+        float dy = object->m_loadY - s_asyncViewPos[1];
+        float dist = dx * dx + dy * dy;
+
+        if (dist < bestDist) {
+            bestDist = dist;
+            best = object;
+        }
+    }
+
+    return best;
+}
+
 // VERIFY: 5a8ab5a9 auto
 // OFFSET: 0x004B50A0
 int32_t CAsyncObject::IsPending() {
@@ -113,6 +162,11 @@ void AsyncFile::LeaveQueueLock() {
 void AsyncFileReadUnloadPostList() {
     CAsyncObject* object;
 
+    // Not stock: deferred textures (texUploadLimit) are unloaded with the rest.
+    while ((object = s_asyncFileReadDeferList.Head()) != nullptr) {
+        s_asyncFileReadPostList.LinkToTail(object);
+    }
+
     while ((object = s_asyncFileReadPostList.Head()) != nullptr) {
         object->m_link.Unlink();
 
@@ -124,8 +178,21 @@ void AsyncFileReadUnloadPostList() {
 
 // VERIFY: acd49bbd manual
 // OFFSET: 0x004B9B20
-int32_t AsyncFileReadPollHandler(const void* data, void* param) {
+// Not stock: the stock poll body, with a texture-creation cap when `capped` (the per-frame EVENT_ID_POLL path only;
+// AsyncFileReadWait / WaitAll (loading screens) poll uncapped so they always drain).
+static void AsyncFileReadPoll(bool capped) {
     uint32_t start = OsGetAsyncTimeMs();
+    int32_t texLimit = capped ? g_asyncTexUploadLimit : 0;
+    int32_t texCount = 0;
+
+    // Textures deferred on earlier frames go first, in their original order.
+    g_queueLock.Enter();
+
+    while (CAsyncObject* deferred = s_asyncFileReadDeferList.Tail()) {
+        s_asyncFileReadPostList.LinkToHead(deferred);
+    }
+
+    g_queueLock.Leave();
 
     while (true) {
         g_queueLock.Enter();
@@ -137,6 +204,12 @@ int32_t AsyncFileReadPollHandler(const void* data, void* param) {
             break;
         }
 
+        if (texLimit > 0 && object != s_asyncWaitObject && object->m_userPostloadCallback == reinterpret_cast<void*>(AsyncTextureSuccessCallback) && texCount++ >= texLimit) {
+            s_asyncFileReadDeferList.LinkToTail(object);
+            g_queueLock.Leave();
+            continue;
+        }
+
         object->m_link.Unlink();
 
         if (object == s_asyncWaitObject) {
@@ -144,8 +217,20 @@ int32_t AsyncFileReadPollHandler(const void* data, void* param) {
         }
 
         object->m_isProcessed = 1;
+
+        // Not stock (worldLoadSort): loads issued by this postload (skins, textures, WMO groups) inherit its position.
+        bool hasPos = object->m_hasLoadPos;
+        float x = object->m_loadX;
+        float y = object->m_loadY;
         g_queueLock.Leave();
-        reinterpret_cast<void (*)(void*)>(object->m_userPostloadCallback)(object->m_userArg);
+
+        if (hasPos) {
+            AsyncLoadOrigin origin(x, y);
+            reinterpret_cast<void (*)(void*)>(object->m_userPostloadCallback)(object->m_userArg);
+        } else {
+            reinterpret_cast<void (*)(void*)>(object->m_userPostloadCallback)(object->m_userArg);
+        }
+
         s_progressCount--;
 
         if (OsGetAsyncTimeMs() - start > s_handlerTimeout) {
@@ -156,7 +241,10 @@ int32_t AsyncFileReadPollHandler(const void* data, void* param) {
     for (uint32_t i = 0; i < s_asyncPollHandlers.Count(); i++) {
         s_asyncPollHandlers[i]();
     }
+}
 
+int32_t AsyncFileReadPollHandler(const void* data, void* param) {
+    AsyncFileReadPoll(true);
     return 1;
 }
 
@@ -316,7 +404,7 @@ void AsyncFileReadWait(CAsyncObject* object) {
             s_ingameProgressCallback(0.0f, 0);
         }
 
-        AsyncFileReadPollHandler(nullptr, nullptr);
+        AsyncFileReadPoll(false);
 
         if (!s_asyncWaitObject) {
             break;
@@ -356,6 +444,10 @@ CAsyncObject* AsyncFileReadAllocObject() {
     object->m_char25 = 0;
     object->m_queuedFrame = 0;
     object->m_priority = 126;
+    object->m_hasLoadPos = g_asyncLoadOriginSet;
+    object->m_loadX = g_asyncLoadOrigin[0];
+    object->m_loadY = g_asyncLoadOrigin[1];
+    object->m_linkFrame = 0;
 
     return object;
 }
@@ -429,6 +521,10 @@ uint32_t STORMAPI AsyncFileReadThread(void* param) {
                     AsyncFileReadLinkStaleObject(object, 1);
                     g_queueLock.Leave();
                     continue;
+                }
+
+                if (!queue->m_frameLimited) {
+                    object = AsyncPickNearest(queue, object);
                 }
             } else {
                 object = queue->m_staleList.Head();
@@ -573,6 +669,7 @@ void AsyncFileReadObject(CAsyncObject* object, int32_t urgent) {
 
     g_queueLock.Enter();
     object->m_queue = queue;
+    object->m_linkFrame = g_theGxDevicePtr->m_frameCount;
 
     if (object == s_asyncWaitObject) {
         object->m_priority = object->m_priority > 127 ? 128 : 0;
@@ -674,7 +771,7 @@ bool AsyncFileReadIsReading() {
         }
     }
 
-    if (s_asyncFileReadPostList.Head()) {
+    if (s_asyncFileReadPostList.Head() || s_asyncFileReadDeferList.Head()) {
         reading = true;
     }
 
@@ -697,7 +794,7 @@ void AsyncFileReadWaitAll() {
     s_progressCount = total;
 
     while (AsyncFileReadIsReading()) {
-        AsyncFileReadPollHandler(nullptr, nullptr);
+        AsyncFileReadPoll(false);
 
         if (s_asyncProgressCallback) {
             float progress = 1.0f;

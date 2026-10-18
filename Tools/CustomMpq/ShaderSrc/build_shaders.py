@@ -23,7 +23,7 @@ Grading (coa vp_grade): VFogGrade.
 Water (coa vw_*): VFogWaterDepth, VFogWaterMask, VFogWater{1,2,3} (SSR_STEPS 0/16/32) and VFogRippleStep;
 GPU waves VFogWave{Evolve,Fft,Surface,Mip,Pack}.
 Grass wind (wxl-grasswind, MULTI): Shaders/Vertex/vs_3_0|vs_4_0/DetailDoodad.bls, the stock grass VS's 6 permutations.
-Fading models (wxl-vfog 0.6.3): VFogDepthCopy. Land shadow mask (shadowMask): VFogShadowMask. MSAA sample split (coa): VFogSilhouette and VFogCompositeSplit{Q}[L][N].
+Fading models (wxl-vfog 0.6.3): VFogDepthCopy. Legion FFX post: LegionPost{0,1,2}. Land shadow mask (shadowMask): VFogShadowMask. MSAA sample split (coa): VFogSilhouette and VFogCompositeSplit{Q}[L][N].
 """
 import argparse
 import concurrent.futures
@@ -78,6 +78,10 @@ SHADERS = {
     'LiquidProcMagma': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 1, 2, 3), 0, 'LiquidProcMagma', {}),
     # shadowMask (Legion survey 2.7): the land's sun shadow over the opaque world, a multiply; s5/s6 cascades, s7 land
     'VFogShadowMask': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 5, 6, 7), 0, 'VFogShadowMask', {}),
+    # Legion FFX post (docs/LEGION_PORT.md): colour shift only, FXAA low + colour shift, FXAA high + colour shift
+    'LegionPost0': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0), 0, 'LegionPost', {'FXAA_STEPS': 0}),
+    'LegionPost1': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0), 0, 'LegionPost', {'FXAA_STEPS': 5}),
+    'LegionPost2': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0), 0, 'LegionPost', {'FXAA_STEPS': 12}),
 }
 # Cata water (waterStyle 1, docs/BACKLOG_PORT.md "Cata water"): the ProcWater VS and ProcWaterAbove / Below PS,
 # drawn by the liquid material in place of vsLiquidWater / psLiquidWater (WorldClient/CataWater.cpp).

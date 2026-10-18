@@ -311,9 +311,14 @@ float LayersMarchStart()
                min(LayerMarchStart(LoadConstantFogLayer(2)), LayerMarchStart(LoadConstantFogLayer(3))));
 }
 
+// vfogTemporal 0 keeps coa's fixed mid-step sample, except with the shadowed sun: its on/off compares at fixed
+// distances along every ray turn the shadow volumes into shells round the camera, scaled by each pixel's depth (a
+// warped copy of the background in the fog, fixed to the screen). There the step is dithered in space alone, a
+// static noise the upsample blurs, instead of the frame-animated jitter only the temporal filter averages.
 float StepJitter(float2 lowResTexel)
 {
-    return JitterEnabled() ? frac(InterleavedGradientNoise(lowResTexel) + FrameIndex() * kGoldenRatioFraction) : 0.5;
+    // cMarch.x: 1 = animated (vfogTemporal), 0.5 = spatial only (temporal off, shadowed sun), 0 = none.
+    return JitterEnabled() ? frac(InterleavedGradientNoise(lowResTexel) + FrameIndex() * kGoldenRatioFraction * step(1, cMarch.x)) : 0.5;
 }
 
 float4 IntegrateFogAtDepth(float2 pixel, float depth, float jitter)

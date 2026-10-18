@@ -828,3 +828,30 @@ bug despite its comment; coa-vfog has no fade pass.)
 
 custom.MPQ: 5121 files; the 24 VFogComposite*/VFogCompositeSplit* records rebuilt (ps_3_0, ps_4_0, SPIR-V, spirv-val
 clean), the SM4 pack from shadow-s1.
+## 2026-10-18: vfog32, temporal filter and the shadowed sun (fix-temporal)
+
+What the user saw on vfog25 (Vulkan, Wow64): with `vfogTemporal` on, turning the camera left a ghosted image of the
+area in the fog that flickered and settled; with `vfogTemporal 0` a warped, fogged copy of the background stayed fixed
+on screen.
+
+- Checked and ruled out: the temporal-off composite reads the current march (`TemporalPass` returns
+  `s_targets.march`, s1 = s4 = march); the history ping-pong (`history[2]`, `historyDepth[2]`) flips once per filtered
+  frame and nowhere else; `StoreHistory` stores the view/projection once per `RenderFog`, after the passes, as
+  pre-O3 (bb9d49a^) and coa-vfog `renderer.cpp:1510-1522` do; validity (first frame, resize, rotation > 45 degrees,
+  settings, temporal off -> on) as coa `:1320`. Vulkan: no target is sampled while bound (`ITexResolve` binds white
+  for the current target), render passes carry the external colour -> fragment-read dependency, descriptor sets are
+  keyed by never-reused image ids.
+- Cause 1 (`vf_integrate.hlsli` `StepJitter`): with `vfogTemporal 0` the march has no jitter (coa's fixed mid-step
+  sample). Since vfog25 every step also does an on/off shadow compare (`SunVisibility`), so at fixed fractions of each
+  ray's length the shafts are sampled as shells round the camera, scaled by the pixel's depth: the shadow pattern
+  turned into a warped copy of the scene behind, fixed to the screen. Now, with temporal off and a sun shadow tested (cascades
+  c62.x or `gfxTerrainShadow` c63.w), the step is dithered in space alone (IGN of the low-res texel, no frame term; c11.x = 0.5 selects it, 1 = animated, 0 = none); without either it stays 0.5.
+- Cause 2 (`VolumetricFogRenderer.cpp` `TemporalPass`): the shafts are in the air, but the history is reprojected by
+  the surface depth, so when the orbit camera moves as it turns, the old shafts land in the wrong place. Their
+  jittered four-tap compares make the 3x3 clamp range too wide to catch them, so they blended in as a ghost until the
+  camera stopped. A shadowed sun (either) now counts as changing light (`adaptive`, `cTemporal.z`): the existing lighting
+  reject (`LightingHistoryWeight`) drops history that differs from the current frame by more than 20-40 %.
+- `SameSettings` now also compares `shadowedSun` and `canopy`, so toggling them resets the history.
+
+Shaders: VFogMarch* / VFogComposite* / VFogCompositeSplit* rebuilt (ps_3_0, ps_4_0), SPIR-V regenerated (spirv-val
+clean), custom.MPQ rebuilt with shadow-s1's SM4 pack.

@@ -37,6 +37,7 @@ constexpr uint32_t kHorizonBandRegister = 99;
 constexpr uint32_t kSampleSideRegister = 80;        // VFogCompositeSplit c80 (coa c99, which is the horizon band here)
 constexpr uint32_t kDitherRegister = 79;            // vf_common cDither (x on, y frame)
 constexpr uint32_t kGradeRegister = 10;             // VFogGrade c10 strength, c11-c18 curve
+constexpr uint32_t kPostRegister = 10;              // LegionPost c10 FXAA, c11-c13 colour matrix
 constexpr uint32_t kLocalLightRegister = 100;
 constexpr uint32_t kShadowRegister = 56;           // vf_shadow.hlsli c56-c61 band rows, c62 control, c63 terrain
 constexpr uint32_t kShadowMaskRegister = 10;      // VFogShadowMask c10-c13 (light, ambient + bias, diffuse, stock fog)
@@ -75,6 +76,7 @@ struct Shaders {
     CGxShader* grade;
     CGxShader* depthCopy;               // VFogDepthCopy: the scene depth into an R32F target (fading cross-fade)
     CGxShader* shadowMask;              // VFogShadowMask: the land's sun shadow over the opaque world (shadowMask)
+    CGxShader* post[3];                 // LegionPost{0,1,2}: colour shift, + FXAA low, + FXAA high (ffxAntiAliasingMode)
 };
 
 struct Targets {
@@ -349,7 +351,7 @@ bool SameSettings(const Config& a, const Config& b) {
         && a.classicNoise == b.classicNoise && a.glowCompensation == b.glowCompensation
         && a.maxDistance == b.maxDistance && a.startOffset == b.startOffset && a.temporal == b.temporal
         && a.debugView == b.debugView && a.interiorFarFog == b.interiorFarFog && a.underwater == b.underwater
-        && a.stockFog == b.stockFog && a.sunMarker == b.sunMarker;
+        && a.stockFog == b.stockFog && a.sunMarker == b.sunMarker && a.shadowedSun == b.shadowedSun && a.canopy == b.canopy;
 }
 
 // wxl-vfog ec1c66b TangentSpan: tangents (lateral over depth) of the directions ahead that can meet a circle.
@@ -705,6 +707,7 @@ struct FogFrame {
     CGxTex* copy;       // CompositePass: the scene copy (linear blend, rays, fade), or nullptr
     float shadow[8][4]; // vf_shadow.hlsli c56-c62 (control x = 0: sun unshadowed), c63 terrain (w = 0: off)
     CGxTex* terrainShadow;  // s7, gfxTerrainShadow
+    bool sunShadowed;       // a cascade or the terrain shadow is tested (c62.x, c63.w)
     CGxTex* shadowMaps[2];
 };
 
@@ -813,7 +816,9 @@ void MarchPass(const FogFrame& f) {
 // Returns the fog the composite reads: the march, or with vfogTemporal the filtered history.
 CGxTex* TemporalPass(const FogFrame& f) {
     // ---- temporal + history depth (coa FilterWithHistory :980-1004) ---------------------------------
-    bool adaptive = f.lit || s_history.localLightCount > 0 || f.cfg.noiseAmount > 0.0f || f.noisy;
+    // A shadowed sun (cascades or terrain) counts as changing light: its shafts are in the air, not on the surface the history
+    // is reprojected by, so where the orbit camera's move shifts them the stale ones are rejected, not blended in (ghosts).
+    bool adaptive = f.lit || s_history.localLightCount > 0 || f.cfg.noiseAmount > 0.0f || f.noisy || f.sunShadowed;
     CGxTex* fogResult = s_targets.march;
     if (f.temporal) {
         int read = s_history.index;
@@ -1221,6 +1226,13 @@ bool RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg,
     f.rays = rays;
     f.copy = nullptr;
     ShadowConstants(cfg.shadowedSun, cfg.canopy, in, viewToWorld, f.shadow, f.shadowMaps, f.terrainShadow);
+    // c11.x, the march jitter (vf_integrate StepJitter): 1 animated (vfogTemporal), 0 none (coa), and 0.5 spatial only
+    // when temporal is off but a sun shadow is tested: its compares at fixed mid-steps draw the shadow volumes as shells
+    // round the camera scaled by each pixel's depth, a warped copy of the scene in the fog fixed to the screen.
+    f.sunShadowed = f.shadow[6][0] > 0.0f || f.shadow[7][3] > 0.0f;
+    if (!temporal && f.sunShadowed) {
+        f.march[0] = 0.5f;
+    }
 
     // ---- state: everything below is undone at the end --------------------------------------------
     static SavedPassState s_saved;     // 2 KB of constants, off the stack
@@ -1385,6 +1397,43 @@ bool RenderShadowMask(const FrameInputs& in, float softYards, bool stockFogInCol
         Bind(stage, nullptr);
     }
     EndPasses(s_saved, vp);
+    return true;
+}
+
+// LEGION FFX post (ffxAntiAliasingMode, FFXColorShift): FXAA and the colour matrix over a bilinear copy of the world
+// viewport, like RenderGrade (after it, before names and the UI). docs/LEGION_PORT.md.
+bool RenderPost(int fxaa, const float colourShift[3][4], const WorldViewport& world) {
+    static const char* const kNames[3] = { "LegionPost0", "LegionPost1", "LegionPost2" };
+    CGxDevice* device = g_theGxDevicePtr;
+    if (!device || fxaa < 0 || fxaa > 2 || world.w < 1.0f || world.h < 1.0f || !Shader(s_shaders.post[fxaa], kNames[fxaa])) {
+        return false;
+    }
+    const WorldViewport live = LiveWorldViewport();
+    if (live.target) {
+        return false;
+    }
+    if (!s_callbackAdded) {     // the scene copy goes with a reset even while vfog is off
+        device->AddDeviceRestoredCallback(OnDeviceRestored);
+        s_callbackAdded = true;
+    }
+    CGxTex* scene = CopySceneBeforeFog(static_cast<uint32_t>(world.x), static_cast<uint32_t>(world.y), static_cast<uint32_t>(world.w), static_cast<uint32_t>(world.h));
+    if (!scene) {
+        return false;
+    }
+
+    static SavedPassState s_saved;
+    BeginPasses(s_saved);
+    ScissorToWorld(world);
+    const float viewport[4] = { world.x, world.y, world.w, world.h };
+    // FXAA 3.11 quality defaults: subpix 0.75, edge threshold 0.166 / 0.125, edge threshold min 0.0833 / 0.0625.
+    const float fxaaParams[4] = { 0.75f, fxaa == 2 ? 0.125f : 0.166f, fxaa == 2 ? 0.0625f : 0.0833f, 0.0f };
+    SetPs(0, viewport, 1);
+    SetPs(kPostRegister, fxaaParams, 1);
+    SetPs(kPostRegister + 1, &colourShift[0][0], 3);
+    Bind(0, scene);
+    device->RsSet(GxRs_PixelShader, s_shaders.post[fxaa]);
+    DrawQuad(static_cast<uint32_t>(world.w), static_cast<uint32_t>(world.h), world.minX, world.maxX, world.minY, world.maxY);
+    EndPasses(s_saved, live);
     return true;
 }
 

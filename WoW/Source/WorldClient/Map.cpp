@@ -2241,6 +2241,7 @@ void CMap::PrepareMapObjDefs(bool addToScene) {
             if (CWorld::s_objectAreaOfInterest.b.x <= box.t.x && CWorld::s_objectAreaOfInterest.b.y <= box.t.y && CWorld::s_objectAreaOfInterest.b.z <= box.t.z && CWorld::s_objectAreaOfInterest.t.x >= box.b.x && CWorld::s_objectAreaOfInterest.t.y >= box.b.y && CWorld::s_objectAreaOfInterest.t.z >= box.b.z) {
                 if (!(group->m_unkLoadedFlag & 1)) {
                     if (!group->m_asyncObjPtr) {
+                        AsyncLoadOrigin loadOrigin((box.b.x + box.t.x) * 0.5f, (box.b.y + box.t.y) * 0.5f);   // LEGION worldLoadSort
                         mapObj->ReadGroup(defGroup->m_groupNum);
                     }
 
@@ -2636,6 +2637,8 @@ CMapDoodadDef* CMap::CreateDoodadDef(const char* fileName, SMDoodadDef* doodadDe
     mapDoodadDef->m_mat.Scale(mapDoodadDef->m_scale);
     mapDoodadDef->m_identity = C44Matrix();
 
+    // LEGION worldLoadSort: tag the model's file loads with where it stands.
+    AsyncLoadOrigin loadOrigin(mapDoodadDef->m_position.x, mapDoodadDef->m_position.y);
     CM2Model* model = World::s_m2Scene->CreateModel(fileName, 0x20);
     mapDoodadDef->m_model = model;
 
@@ -2719,6 +2722,7 @@ CMapDoodadDef* CMap::CreateDoodadDef(uint32_t doodadRef, SMODoodadDef* doodadDef
     *reinterpret_cast<uint32_t*>(&limit) = 112;
     mapDoodadDef->AdjustLightmap(&doodadDef->m_color, &mapDoodadDef->m_m2DiffuseColor, limit, &mapDoodadDef->m_m2AmbientColor, 96);
 
+    AsyncLoadOrigin loadOrigin(mapDoodadDef->m_position.x, mapDoodadDef->m_position.y);   // LEGION worldLoadSort
     CM2Model* model = World::s_m2Scene->CreateModel(name, 0x20);
     mapDoodadDef->m_model = model;
 
@@ -2815,6 +2819,7 @@ CMapObjDef* CMap::CreateMapObjDef(char* fileName, SMMapObjDef* mapObjectDef, C3V
     mapObjDef->m_sphere.r = sqrtf(dx * dx + dy * dy + dz * dz);
 
     mapObjDef->m_lightsArray.m_count = 0;
+    AsyncLoadOrigin loadOrigin(mapObjDef->m_sphere.c.x, mapObjDef->m_sphere.c.y);   // LEGION worldLoadSort
     mapObjDef->m_owner = CMapObj::Create(fileName);
 
     return mapObjDef;

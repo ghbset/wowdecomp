@@ -27,6 +27,11 @@ class CAsyncObject {
     /* 0025 */ int8_t m_char25;
     /* 0026 */ uint16_t m_padding;
     /* 0028 */ TSLink<CAsyncObject> m_link;
+    // Not stock (worldLoadSort): world x/y the load is for, so the disk readers can take the nearest one first.
+    float m_loadX;
+    float m_loadY;
+    uint32_t m_linkFrame;
+    bool m_hasLoadPos;
 
     int32_t IsPending();
 };

@@ -169,7 +169,7 @@ CGxTex* Copy(Dev* d, bool* transient) {
     bool& retry = transient ? *transient : dummy;
     retry = true;
 
-    if (!d->m_context) {
+    if (!d->m_context || !Dev::s_depthUsers) {     // LEGION SetDepthUser: no consumer this frame
         return nullptr;
     }
 
