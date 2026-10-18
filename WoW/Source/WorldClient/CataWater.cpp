@@ -11,12 +11,17 @@
 #include "Engine/Source/Gx/Gx.h"
 #include "Engine/Source/Os/TimeManager.h"
 #include "Engine/Source/Services/Texture.h"
+#include "Engine/Source/ShaderEffect/ShaderEffect.h"
 #include "Engine/Source/Tempest/C2iVector.h"
 #include "Engine/Source/Tempest/CMath.h"
 #include "WoW/Source/DB/Rec/LightRec.h"
 #include "WoW/Source/DB/Rec/LiquidTypeRec.h"
 #include "WoW/Source/DB/WowClientDB.h"
 #include "WoW/Source/LiquidSystem/Liquid.h"
+#include "WoW/Source/WorldClient/CChunkLiquid.h"
+#include "WoW/Source/WorldClient/CPortalView.h"
+#include "WoW/Source/WorldClient/LiquidWaveManager.h"
+#include "WoW/Source/WorldClient/DayNight.h"
 #include "WoW/Source/WorldClient/DayNight.h"
 #include "WoW/Source/WorldClient/DayNight__DNInfo.h"
 #include "WoW/Source/WorldClient/FrameTime.h"
@@ -62,11 +67,15 @@ constexpr int kFoamStage = 10;
 constexpr int kRippleStage = 11;
 constexpr int kSceneStage = 12;
 constexpr int kDepthStage = 13;
+constexpr int kReflStage = 14;
 
 CVar* s_style;
 CVar* s_ripples;
+CVar* s_reflMode;
+CVar* s_reflScale;
 CGxShader* s_vs;
 CGxShader* s_psAbove;
+CGxShader* s_psAboveP;     // PLANAR: Cata p = 1
 CGxShader* s_psBelow;
 CGxShader* s_depthCopy;     // VFogDepthCopy: the raw scene depth into R32F
 CGxShader* s_psTint;        // CataWaterTint: FFXUnderWaterLow
@@ -74,6 +83,7 @@ CTexture* s_normalTex;
 CTexture* s_foamTex;
 CGxTex* s_scene;
 CGxTex* s_depth;
+CGxTex* s_refl;             // the planar reflection, mirrored left to right
 bool s_callbackAdded;
 bool s_failed;              // a shader is missing: stay off until the device is restored
 
@@ -90,9 +100,124 @@ struct Pass {
 };
 Pass s_pass;
 
+// ---- planar reflection (piece D) ---------------------------------------------------------------------------------
+// Which water height the reflection mirrors through, from one frame's water draws: wxl-water src/PlanePick.hpp.
+namespace planepick {
+constexpr float kBucket = 2.0f;     // the shader holds the reflection to +/- 2 yd of the plane
+constexpr float kHold = 1.5f;       // another body must look this much bigger to take over
+struct Cand {
+    float h, weight, hw;
+    uint32_t n;
+    float Height() const { return weight > 0.0f ? hw / weight : h; }
+};
+constexpr int kCands = 8;
+Cand s_cands[kCands];
+
+// One draw's liquid sphere seen from the camera, weighted r^2 / d^2 (a proxy for its screen area, capped at 1 inside it).
+void Add(const CAaSphere& sphere, const C3Vector& cam) {
+    const float dx = sphere.c.x - cam.x, dy = sphere.c.y - cam.y, dz = sphere.c.z - cam.z;
+    const float r2 = sphere.r * sphere.r;
+    const float w = r2 / std::max(dx * dx + dy * dy + dz * dz, std::max(r2, 1.0e-4f));
+    Cand* slot = nullptr;
+    for (int i = 0; i < kCands && !slot; i++) {
+        if (s_cands[i].n && std::fabs(s_cands[i].Height() - sphere.c.z) < kBucket) slot = &s_cands[i];
+    }
+    for (int i = 0; i < kCands && !slot; i++) {
+        if (!s_cands[i].n) { slot = &s_cands[i]; *slot = Cand{ sphere.c.z, 0.0f, 0.0f, 0 }; }
+    }
+    if (!slot) return;
+    slot->n++;
+    slot->weight += w;
+    slot->hw += w * sphere.c.z;
+}
+
+// The heaviest body (bodies within a bucket merged); the current plane holds unless another is kHold times heavier.
+bool Pick(bool curValid, float curH, float& h) {
+    for (bool merged = true; merged;) {
+        merged = false;
+        for (int i = 0; i < kCands; i++) {
+            for (int j = i + 1; j < kCands; j++) {
+                Cand& a = s_cands[i];
+                Cand& b = s_cands[j];
+                if (a.n && b.n && std::fabs(a.Height() - b.Height()) < kBucket) {
+                    a.n += b.n; a.weight += b.weight; a.hw += b.hw; b.n = 0;
+                    merged = true;
+                }
+            }
+        }
+    }
+    const Cand* best = nullptr;
+    const Cand* cur = nullptr;
+    for (const Cand& c : s_cands) {
+        if (!c.n) continue;
+        if (!best || c.weight > best->weight) best = &c;
+        if (curValid && std::fabs(c.Height() - curH) < kBucket) cur = &c;
+    }
+    if (cur && best != cur && best->weight < cur->weight * kHold) best = cur;
+    if (best) h = best->Height();
+    for (Cand& c : s_cands) c.n = 0;
+    return best != nullptr;
+}
+}  // namespace planepick
+
+struct Reflection {
+    bool planeValid;        // picked from last frame's water draws
+    float planeH;           // world z
+    bool drawn;             // this frame's target holds the plane's reflection
+    bool reflecting;        // inside RenderReflection
+    float h;                // the drawn plane, world z
+};
+Reflection s_reflection;
+
+// Oblique near plane (Lengyel; wxl-water Water.cpp BuildOblique): the native projection (D3D form, z in [0, w], row
+// vectors: what every backend draws with) with its z column replaced so z = 0 on `plane` (in the space the view takes)
+// and < 0 on its negative side; x, y and w kept, the far plane through the old far corner.
+bool BuildOblique(const C44Matrix& P, const C44Matrix& V, const float plane[4], C44Matrix& out, float& s) {
+    const C44Matrix invV = V.Inverse();
+    const C44Matrix invP = P.Inverse();
+    const float* iv = &invV.a0;
+    const float* ip = &invP.a0;
+    float cu[4] = {}, cp[4] = {}, q[4] = {};
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++) cu[i] += iv[i * 4 + j] * plane[j];
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++) cp[i] += ip[i * 4 + j] * cu[j];
+    const float k[4] = { static_cast<float>((cp[0] > 0.0f) - (cp[0] < 0.0f)), static_cast<float>((cp[1] > 0.0f) - (cp[1] < 0.0f)), 1.0f, 1.0f };
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++) q[i] += k[j] * ip[j * 4 + i];
+    const float dot = cu[0] * q[0] + cu[1] * q[1] + cu[2] * q[2] + cu[3] * q[3];
+    if (!(dot > 1.0e-6f) || !std::isfinite(dot)) return false;
+    s = 1.0f / dot;
+    out = P;
+    float* o = &out.a0;
+    for (int i = 0; i < 4; i++) o[i * 4 + 2] = s * cu[i];
+    return true;
+}
+
+// wxl-water's worked example (water-stage5-design.md 3.2): n 0.2, f 500, 45 deg, 16:9, a level camera 10 yd above the
+// water (its V with the D3D z flip folded in). Off on a mismatch.
+bool ObliqueSelfTest() {
+    const C44Matrix P(1.357995f, 0, 0, 0, 0, 2.414214f, 0, 0, 0, 0, 1.00040016f, 1, 0, 0, -0.20008003f, 0);
+    const C44Matrix V(0, 0, 1, 0, 1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 0, 1);
+    const float plane[4] = { 0.0f, 0.0f, 1.0f, -10.0f };
+    C44Matrix out;
+    float s = 0.0f;
+    if (!BuildOblique(P, V, plane, out, s)) return false;
+    auto ndc = [&](float z) {
+        const C3Vector clipZ = C3Vector(30.0f, 0.0f, z) * V;
+        const float cz = clipZ.x * out.a2 + clipZ.y * out.b2 + clipZ.z * out.c2 + out.d2;
+        const float cw = clipZ.x * out.a3 + clipZ.y * out.b3 + clipZ.z * out.c3 + out.d3;
+        return cz / cw;
+    };
+    return std::fabs(s - 2.53670f) < 1.0e-3f && std::fabs(ndc(10.0f)) < 1.0e-4f
+        && std::fabs(ndc(11.0f) - 0.084557f) < 1.0e-3f && std::fabs(ndc(9.0f) + 0.084557f) < 1.0e-3f;
+}
+
 void DropTargets() {
     VolumetricFog::DestroyTex(s_scene);
     VolumetricFog::DestroyTex(s_depth);
+    VolumetricFog::DestroyTex(s_refl);
+    s_reflection.drawn = false;
 }
 
 void __fastcall OnDeviceRestored() {
@@ -100,6 +225,7 @@ void __fastcall OnDeviceRestored() {
     VolumetricFog::DropInvalidShaders(&s_vs, 1);
     VolumetricFog::DropInvalidShaders(&s_psAbove, 1);
     VolumetricFog::DropInvalidShaders(&s_psBelow, 1);
+    VolumetricFog::DropInvalidShaders(&s_psAboveP, 1);
     VolumetricFog::DropInvalidShaders(&s_depthCopy, 1);
     VolumetricFog::DropInvalidShaders(&s_psTint, 1);
     VolumetricFog::RippleRelease();
@@ -122,6 +248,7 @@ bool EnsureShaders() {
         g_theGxDevicePtr->ShaderCreate(&s_vs, GxSh_Vertex, "Shaders\\Vertex", "CataWater", 1);
     }
     return s_vs && s_vs->Valid() && VolumetricFog::Shader(s_psAbove, "CataWaterAbove") && VolumetricFog::Shader(s_psBelow, "CataWaterBelow")
+        && VolumetricFog::Shader(s_psAboveP, "CataWaterAboveP")
         && VolumetricFog::Shader(s_depthCopy, "VFogDepthCopy");
 }
 
@@ -257,6 +384,8 @@ bool RipplesWanted() {
 void RegisterCVars() {
     s_style = CVar::Register("waterStyle", "Water look: 0 = modern (the volumetric fog's water, vfogWater), 1 = Cataclysm (its water surface, with or without the fog)", 1, "0", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_ripples = CVar::Register("waterCataRipples", "Cataclysm water (waterStyle 1): ripples and wakes where units move through or jump into water (0 = off)", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    s_reflMode = CVar::Register("waterCataReflection", "Cataclysm water (waterStyle 1) planar reflection, as Cata's reflectionMode: 0 = off (screen-space only), 1 = sky, 2 = + terrain, 3 = + buildings (WMOs)", 1, "3", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    s_reflScale = CVar::Register("waterCataReflScale", "Cataclysm water planar reflection target size against the world viewport (0.25 - 1)", 1, "0.6", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
 }
 
 bool Arm(Liquid::CInstance** instances, uint32_t count) {
@@ -280,6 +409,13 @@ bool Arm(Liquid::CInstance** instances, uint32_t count) {
         s_failed = true;
         return false;
     }
+    // The reflection plane for the next frame: terrain water only (a WMO liquid's sphere is its group's, not its level).
+    for (uint32_t i = 0; i < count; i++) {
+        if (instances[i]->m_settings && instances[i]->m_waveManager == static_cast<Liquid::IWaveManager*>(CChunkLiquid::s_waveManager) && ParamsOf(instances[i]->m_settings)) {
+            planepick::Add(instances[i]->m_bounds, CWorldScene::s_activeWorldView);
+        }
+    }
+    s_reflection.planeValid = planepick::Pick(s_reflection.drawn, s_reflection.h, s_reflection.planeH);
     s_pass.vp = VolumetricFog::LiveWorldViewport();
     const VolumetricFog::WorldViewport& vp = s_pass.vp;
     // The copies read the back buffer: no Cata water when the world draws into a target.
@@ -382,10 +518,17 @@ bool Bind(Liquid::CMaterialSettings* settings, bool specular, const C3Vector& ca
     Bind(kFoamStage, foam);
     Bind(kSceneStage, s_scene);
     Bind(kDepthStage, s_depth);
+    const bool planar = s_reflection.drawn && !s_pass.below;
+    if (planar) {
+        // c31: the drawn plane's height against the camera, 1 / its tolerance (2 yd on, fading out to 4 yd).
+        const float rc31[4] = { s_reflection.h - cameraPos.z, 0.5f, 0.0f, 0.0f };
+        device->ShaderConstantsSet(GxSh_Pixel, 31, rc31, 1);
+        Bind(kReflStage, s_refl);
+    }
     // The back buffer's alpha is the glow mask: RGB only (the material's RsPop puts it back).
     GxRsSet(GxRs_ColorWrite, 7);
     device->RsSet(GxRs_VertexShader, s_vs);
-    device->RsSet(GxRs_PixelShader, s_pass.below ? s_psBelow : s_psAbove);
+    device->RsSet(GxRs_PixelShader, s_pass.below ? s_psBelow : planar ? s_psAboveP : s_psAbove);
     return true;
 }
 
@@ -434,6 +577,102 @@ void OnWorldDone() {
     VolumetricFog::EndPasses(s_saved, vp);
 }
 
+// Cata's p = 1 reflection (W1 section 4): the sky, then the terrain and the WMO groups this frame's culling found for
+// the main view, re-drawn from the camera mirrored through the water plane into a waterCataReflScale target. The
+// mirror is a reflection R (z -> 2h - z) before the view; the projection's x is negated as well, so the winding comes
+// out as the main view's and no cull state changes (the shader reads the target mirrored left to right, as wxl-water).
+// The terrain and WMOs get an oblique near plane on the water, so nothing under it shows; the sky does not need it.
+// Only the stock chunk / WMO / sky draws run here: none of the vfog, sun shadow, AO, leaves, grass, tree sway or
+// occlusion hooks (WorldFrame's OnOpaqueDone / OnSolidDone / OnLiquidDone / OnWorldDone, the M2 scene, the liquid
+// pass, OcclusionCull::IssueQueries) is reached, so none of them sees the mirrored camera.
+void RenderReflection() {
+    s_reflection.drawn = false;
+    CGxDevice* device = g_theGxDevicePtr;
+    const int32_t mode = s_reflMode ? s_reflMode->m_intValue : 0;
+    const bool planeValid = s_reflection.planeValid;
+    s_reflection.planeValid = false;    // this frame's water pass picks the next one
+    if (!s_style || s_style->m_intValue != 1 || mode <= 0 || !planeValid || !device || s_failed
+        || CWorldScene::s_viewerMapObjDef || CWorldScene::s_unk_ADF570.m_maxViewDepth < 0.0f) {
+        return;     // off, no water plane last frame, or indoors
+    }
+    const float hz = s_reflection.planeH - CWorldScene::s_activeWorldView.z;  // the plane in the view's input space
+    static const bool s_obliqueOk = ObliqueSelfTest();
+    if (hz > -0.1f || !s_obliqueOk || !s_psAboveP || !s_psAboveP->Valid()) {
+        return;     // camera at or under the plane
+    }
+    const VolumetricFog::WorldViewport vp = VolumetricFog::LiveWorldViewport();
+    const float scale = std::min(std::max(s_reflScale ? s_reflScale->m_floatValue : 0.6f, 0.25f), 1.0f);
+    const uint32_t w = static_cast<uint32_t>(std::max(vp.w * scale, 1.0f));
+    const uint32_t h = static_cast<uint32_t>(std::max(vp.h * scale, 1.0f));
+    if (vp.target || vp.w < kMinSize || vp.h < kMinSize || !Target(s_refl, w, h, GxTex_Argb8888, GxTex_Linear, "CataWaterReflection")) {
+        return;
+    }
+
+    CGxTex* savedColor = nullptr;
+    CGxTex* savedDepth = nullptr;
+    device->DeviceGetRenderTarget(GxBuffers_Color, savedColor);
+    device->DeviceGetRenderTarget(GxBuffers_Depth, savedDepth);
+    C44Matrix savedView;
+    GxXformView(savedView);
+    const C44Matrix savedProj = device->m_projection;
+    const C44Matrix savedNative = device->m_projNative;
+    device->RsPush();
+    device->XformPush(GxXform_World);
+
+    // A colour target alone: every backend pairs it with a depth buffer of its size.
+    GxRenderTargetSet(GxBuffers_Depth, nullptr, 0);
+    GxRenderTargetSet(GxBuffers_Color, s_refl, 0);
+    GxXformSetViewport(0.0f, 1.0f, 0.0f, 1.0f, vp.minZ, vp.maxZ);
+    GxSceneClear(GxBufferBit_Color | GxBufferBit_Depth, DayNight::GetInfo()->m_fog.m_color);
+
+    C44Matrix mirror;
+    mirror.c2 = -1.0f;
+    mirror.d2 = 2.0f * hz;
+    const C44Matrix view = mirror * savedView;
+    C44Matrix proj = savedProj;
+    proj.a0 = -proj.a0;
+    proj.b0 = -proj.b0;
+    proj.c0 = -proj.c0;
+    proj.d0 = -proj.d0;
+    GxXformSetView(view);
+    GxXformSetProjection(proj);
+    CShaderEffect::UpdateProjMatrix();
+    s_reflection.reflecting = true;
+    DayNight::RenderSky(&CWorldScene::s_unk_ADF570);
+
+    const float plane[4] = { 0.0f, 0.0f, 1.0f, -hz };
+    C44Matrix oblique;
+    float s = 0.0f;
+    if (mode >= 2 && BuildOblique(device->m_projNative, view, plane, oblique, s)) {
+        GxSceneClear(GxBufferBit_Depth, DayNight::GetInfo()->m_fog.m_color);
+        device->m_projNative = oblique;
+        device->m_xforms[GxXform_Projection].m_dirty = 1;
+        CShaderEffect::UpdateProjMatrix();
+        CWorldScene::RenderChunks();
+        if (mode >= 3) {
+            CWorldScene::RenderMapObjDefGroups();
+        }
+    }
+    s_reflection.reflecting = false;
+
+    GxRenderTargetSet(GxBuffers_Color, savedColor, 0);
+    GxRenderTargetSet(GxBuffers_Depth, savedDepth, 0);
+    GxXformSetViewport(vp.minX, vp.maxX, vp.minY, vp.maxY, vp.minZ, vp.maxZ);
+    GxXformSetView(savedView);
+    GxXformSetProjection(savedProj);
+    device->m_projNative = savedNative;
+    device->m_xforms[GxXform_Projection].m_dirty = 1;
+    CShaderEffect::UpdateProjMatrix();
+    GxXformPop(GxXform_World);
+    device->RsPop();
+    s_reflection.drawn = true;
+    s_reflection.h = s_reflection.planeH;
+}
+
+bool Reflecting() {
+    return s_reflection.reflecting;
+}
+
 bool DrawsRipples() {
     return RipplesWanted();
 }
@@ -442,7 +681,7 @@ void Shutdown() {
     CGxDevice* device = g_theGxDevicePtr;
     if (device) {
         DropTargets();
-        for (CGxShader** slot : { &s_vs, &s_psAbove, &s_psBelow, &s_depthCopy, &s_psTint }) {
+        for (CGxShader** slot : { &s_vs, &s_psAbove, &s_psBelow, &s_psAboveP, &s_depthCopy, &s_psTint }) {
             if (*slot) {
                 device->ShaderDestroy(*slot);
                 *slot = nullptr;
@@ -455,6 +694,7 @@ void Shutdown() {
     s_callbackAdded = false;
     s_failed = false;
     s_pass = {};
+    s_reflection = {};
 }
 
 }  // namespace CataWater

@@ -25,6 +25,10 @@ bool Bind(Liquid::CMaterialSettings* settings, bool specular, const C3Vector& ca
 // CGWorldFrame::OnWorldRender, after the world (vfog's OnWorldDone), before the chat bubbles: Cata's underwater
 // screen tint with the camera in water.
 void OnWorldDone();
+// CWorldScene::Render, after the culling, before the terrain: the planar reflection (Cata p = 1, waterCataReflection)
+// of last frame's chosen water plane, drawn into its own target from the camera mirrored through it.
+void RenderReflection();
+bool Reflecting();              // inside RenderReflection: the chunk and WMO draws keep their sort-table lists
 bool DrawsRipples();            // waterStyle 1 with waterCataRipples: the client's splash sprites give way
 void Shutdown();
 

@@ -10,7 +10,9 @@ sampler2D sFoam   : register(s10);   // XTextures\foam\waterchop7bw.blp (Cata s7
 sampler2D sScene  : register(s12);   // the world viewport before the water (Cata s0 / s3)
 sampler2D sDepth  : register(s13);   // the raw scene depth before the water, R32F, whole window
 sampler2D sRipple : register(s11);   // vfog's ripple height field: r = height, g = previous step (Cata s4)
-// Free for piece D: s14 planar reflection.
+#ifdef PLANAR
+sampler2D sRefl   : register(s14);   // the planar reflection (Cata p = 1, s1), mirrored left to right
+#endif
 
 float4 gFogColor : register(c4);     // stock
 row_major float4x4 gVP : register(c16);   // camera-relative world -> clip (the reflection lookup)
@@ -25,6 +27,7 @@ float4 gDiffuse  : register(c27);    // sun diffuse colour
 float4 gSpecular : register(c28);    // sun specular colour
 float4 gRipWin   : register(c29);    // ripple window origin - camera (xy), 1 / window size (zw)
 float4 gRipTex   : register(c30);    // (1/N, 1/N, step fraction, P15 ripple strength; 0 = off)
+float4 gRefl     : register(c31);    // PLANAR: x = the mirrored plane's height - camera z, y = 1 / its tolerance
 
 // Cata ProcWaterAbove ripple slope (W1 8.2, wxl-water RippleSlope, one level): height interpolated between the last two
 // steps, finite differences at a lookup bent by the normal map, nothing outside the window.
@@ -98,7 +101,7 @@ float4 main(float4 col : COLOR0, float4 coarse : TEXCOORD0, float4 fine : TEXCOO
 
     // 2 reflection, Cata p = 2 (W1 8.4): one tap 128 yd along the grazing ray (normal flattened to 0.3) in the
     // frame copy, faded at steep rays and at the screen edge, the fog colour where it misses.
-    // piece D: the planar reflection (p = 1) replaces `fallback` with its target where it covers this water.
+    // With PLANAR the planar reflection (p = 1) replaces it on the mirrored plane.
     float3 fallback = gFogColor.rgb;
     float3 Rr = reflect(V, normalize(Nw * float3(0.3, 0.3, 1.0)));
     float4 pc = float4(world + 128.0 * Rr, 1.0);
@@ -107,6 +110,16 @@ float4 main(float4 col : COLOR0, float4 coarse : TEXCOORD0, float4 fine : TEXCOO
     float2 ndc = pc.xy / max(pc.w, 0.05);
     ws *= saturate(1.0 - ndc.x * ndc.x) * saturate(1.0 - ndc.y * ndc.y);
     float3 refl = lerp(fallback, tex2D(sScene, ScreenUv(ndc, 1.0)).rgb, ws);
+#ifdef PLANAR
+    // The target was drawn from the camera mirrored through the plane with the same lens, so a point's mirror image
+    // lands on its own screen position: read it there, flipped in x (that view is mirrored left to right too) and bent
+    // by the surface normal (wxl-water kPixel). Water off the plane (another lake, a waterfall) keeps the screen-space
+    // reflection, faded from 2 yd off the plane to 4 yd.
+    float  tr   = saturate((dot(V, Nw) + 1.0) * 0.45 + 0.1);
+    float2 bend = Nw.xy * 0.06 * saturate(tr + 0.25);
+    float3 reflTex = tex2D(sRefl, saturate(float2(1.0 - suv.x - bend.x, suv.y + bend.y))).rgb;
+    refl = lerp(refl, reflTex, saturate(2.0 - abs(world.z - gRefl.x) * gRefl.y));
+#endif
     refl = lerp(refl, tint, 0.6);
 
     // 3 refraction, refusing offsets that land on something in front of the water
