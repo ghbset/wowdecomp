@@ -13,6 +13,8 @@ namespace TerrainSunShadow {
 
 void RegisterCVars();
 bool Enabled();
+bool MaskWanted();          // shadowMask on (and gfxTerrainShadow): the land's shadow over the world
+float MaskSoftYards();      // shadowSoft: the mask's penumbra in yards under the lit height
 
 // Rebuilds the texture when the light turned or the camera moved far enough. False (and no texture) with the CVar
 // off, no WDL on the map, or the light under the horizon. row = (u0, v0, k, 1/soft) for uv = row.xy - row.z * world.yx.
