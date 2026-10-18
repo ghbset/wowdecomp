@@ -137,6 +137,7 @@ bool s_active = false;
 bool s_wasActive = false;
 bool s_opaqueValid = false;
 bool s_maskPending = false;      // shadowMask: OnOpaqueDone captured this frame's inputs for OnSolidDone
+bool s_ssaoPending = false;      // SSAO: the same, for its pass in OnSolidDone
 bool s_armed = false;          // the composite is on the frame: later batches take the fitted fog
 GradeFrame s_grade = {};
 uint32_t s_frame = 0;
@@ -533,6 +534,14 @@ struct PostCVars {
     CVar* daltonize;    // daltonize 0 = show the deficiency, 1 = correct for it
 } s_postCVars = {};
 
+// LEGION SSAO (docs/LEGION_PORT.md): Legion 7.3.5 names, ranges and SSAODistance default.
+struct SsaoCVars {
+    CVar* mode;         // SSAO 0 off, 1 half res, 2 full res (Legion's 3 = HBAO not ported)
+    CVar* distance;     // SSAODistance yd, faded over its second half
+    CVar* blur;         // SSAOBlur 0 off, 1 box (Legion gauss), 2 depth-weighted (Legion bilateral)
+    CVar* strength;     // SSAOStrength 0..2 (not in Legion)
+} s_ssaoCVars = {};
+
 struct PostFrame {
     bool pending;
     int aa;
@@ -648,6 +657,10 @@ void RegisterCVars() {
     s_postCVars.aa = reg("ffxAntiAliasingMode", "Anti-aliasing of the 3D view after it is drawn (not names or the UI): 0 = off, 1 = FXAA low, 2 = FXAA high", "0");
     s_postCVars.simulator = reg("colorblindSimulator", "Type of color blindness for the 3D view: 0 = off, 1 = protanopia, 2 = deuteranopia, 3 = tritanopia (daltonize 1 corrects for it)", "0");
     s_postCVars.weakness = reg("colorblindWeaknessFactor", "Strength of the color blindness simulation or correction, 0..1", "0.5");
+    s_ssaoCVars.mode = reg("SSAO", "Ambient occlusion (contact shadows in corners and under props) on the 3D view: 0 = off, 1 = half resolution, 2 = full resolution", "0");
+    s_ssaoCVars.distance = reg("SSAODistance", "Ambient occlusion distance in yards; it fades out over the second half", "100.0");
+    s_ssaoCVars.blur = reg("SSAOBlur", "Ambient occlusion blur: 0 = off (noisy), 1 = box, 2 = depth-weighted (keeps edges, default)", "2");
+    s_ssaoCVars.strength = reg("SSAOStrength", "Ambient occlusion strength, 0..2", "1");
     s_postCVars.daltonize = reg("daltonize", "Color blindness: 0 = simulate the type colorblindSimulator names, 1 = correct the 3D view's colours for it", "0");
 
     g_vfogM2BatchFog = &BatchFog;
@@ -753,9 +766,12 @@ void OnViewerLiquid() {
 void OnOpaqueDone() {
     // shadowMask needs the same frame inputs with the fog off (its DNInfo half is read here then: no push-out to undo).
     s_maskPending = false;
+    s_ssaoPending = false;
     const bool mask = TerrainSunShadow::MaskWanted() && RendererReady();
+    const bool ssao = CVarInt(s_ssaoCVars.mode, 0) > 0 && RendererReady();
     CGxDevice::SetDepthUser(CGxDevice::DepthUser_ShadowMask, mask);   // LEGION SetDepthUser: read in OnSolidDone
-    if (!s_active && !mask) {
+    CGxDevice::SetDepthUser(CGxDevice::DepthUser_Ssao, ssao);
+    if (!s_active && !mask && !ssao) {
         return;
     }
     if (!s_active) {
@@ -805,12 +821,18 @@ void OnOpaqueDone() {
     s_opaqueValid = in.viewport[1] > in.viewport[0] && in.viewport[3] > in.viewport[2] && IsPerspective(in.glProjection) &&
                     Finite(in.cameraRelativeView, 16) && Finite(in.camPos, 3) && std::isfinite(in.fogStart) && std::isfinite(in.fogEnd);
     s_maskPending = mask && s_opaqueValid;
+    s_ssaoPending = ssao && s_opaqueValid;
 }
 
 void OnSolidDone() {
     if (s_maskPending) {
         s_maskPending = false;
         RenderShadowMask(s_in, TerrainSunShadow::MaskSoftYards(), !s_pushed);
+    }
+    if (s_ssaoPending) {
+        s_ssaoPending = false;
+        RenderSsao(s_in, std::clamp(CVarInt(s_ssaoCVars.mode, 0), 1, 2), std::clamp(CVarInt(s_ssaoCVars.blur, 2), 0, 2),
+                   CVarFloat(s_ssaoCVars.distance, 100.0f), std::clamp(CVarFloat(s_ssaoCVars.strength, 1.0f), 0.0f, 2.0f), !s_pushed);
     }
 }
 

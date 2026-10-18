@@ -132,6 +132,12 @@ local PAGES = {
 	    { { "0", "Off" }, { "1", "Protanopia (red)" }, { "2", "Deuteranopia (green)" }, { "3", "Tritanopia (blue)" } } },
 	  { "daltonize", "check", "Correct colours", "On shifts colours so they are easier to tell apart with that colour blindness. Off shows how the world looks with it." },
 	  { "colorblindWeaknessFactor", "slider", "Strength", "How strong the colour blindness view or correction is.", 0, 1, 0.05 },
+	  { "SSAO", "drop", "Ambient occlusion", "Soft contact shadows in corners, creases and under objects.",
+	    { { "0", "Off" }, { "1", "Low (half resolution)" }, { "2", "High (full resolution)" } } },
+	  { "SSAOBlur", "drop", "Ambient occlusion blur", "Smooths the occlusion. Edge-aware keeps it off the background behind objects.",
+	    { { "0", "Off" }, { "1", "Box" }, { "2", "Edge-aware" } } },
+	  { "SSAODistance", "slider", "Ambient occlusion distance", "How far away (yards) the occlusion reaches before it fades out.", 25, 400, 25 },
+	  { "SSAOStrength", "slider", "Ambient occlusion strength", "How dark the occlusion is.", 0, 2, 0.1 },
 	},
 }
 

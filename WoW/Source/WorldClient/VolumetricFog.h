@@ -201,6 +201,8 @@ void InvalidateHistory();
 bool CompositeOverSceneCopy();              // last RenderFog blended over a scene copy (coa LinearOverSceneCopy)
 // shadowMask: the land's sun shadow over the opaque world (multiply). False = nothing drawn.
 bool RenderShadowMask(const FrameInputs& in, float softYards, bool stockFogInColour);
+// SSAO: ambient occlusion over the opaque world (multiply); mode 1 half res, 2 full; blur 0-2. False = nothing drawn.
+bool RenderSsao(const FrameInputs& in, int mode, int blur, float distance, float strength, bool stockFogInColour);
 void RenderGodRays();                       // OnWorldDone: the rays the last RenderFog masked, over the finished world
 void RendererShutdown();
 
