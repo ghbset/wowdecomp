@@ -15,6 +15,7 @@
 #include "WoW/Source/Ui/WorldFrame.h"
 #include "WoW/Source/WorldClient/CPortalView.h"
 #include "WoW/Source/WorldClient/CWorldOcclusion.h"
+#include "WoW/Source/WorldClient/CataWater.h"
 #include "WoW/Source/WorldClient/DayNight.h"
 #include "WoW/Source/WorldClient/DayNight__DNInfo.h"
 #include "WoW/Source/WorldClient/DetailDoodad.h"
@@ -202,6 +203,7 @@ void CWorldScene::Render(const C3Vector& cameraPos, float time) {
     CShadowQuery::Update();
     CShaderEffect::UpdateProjMatrix();
     CWorldScene::ApplyFogState();
+    CataWater::RenderReflection();   // CATAREFL: not in 12340 (Cata p = 1 planar reflection, before the lists are consumed)
     CWorldScene::RenderChunks();
     CWorldScene::RenderMapObjDefGroups();
     // OCCLUSION: depth now holds terrain and WMO groups; test this frame's candidates against it.

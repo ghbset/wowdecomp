@@ -303,3 +303,52 @@ part of Cata's under-water look, and costs one copy + one quad only while submer
 used as is on vfog's map; vfog's own shader negates its slope into N), the ripple height scale (vfog's footprints vs
 Cata's perturbTex splats: P15 1..2.5 here vs vfog's 3 x 0.5), the fog-rate exponent when the game's fog mode is not
 the rewriting one (then the exponent is 2), and whether the world viewport is still current where the tint draws.
+
+### Cata water piece D: planar reflection (2026-10-18)
+
+**What.** Cata's p = 1 reflection (W1 section 4, wxl-water `caustics` 17cf9af): with `waterStyle` 1 the water mirrors
+the sky, the terrain and the WMO groups through the chosen water plane. Native: no bucket snapshots, the stock draws are
+re-run. `CataWater::RenderReflection` is called in `CWorldScene::Render` after the culling and `ApplyFogState`, before
+`RenderChunks`: it draws into `CataWaterReflection` (Argb8888, world viewport x `waterCataReflScale`; every backend
+pairs a colour target with a scratch depth of its size), viewport 0..1, cleared to the fog colour, with
+view = R x view (R: z -> 2h - z, in the camera-relative space the view takes) and the GL-form projection's x column
+negated, so the mirrored view keeps the main view's winding and no cull state is touched (the shader reads the target
+flipped in x, as wxl-water). Order: `DayNight::RenderSky` (plain mirrored projection), depth clear, then the native
+projection (`m_projNative`, D3D form) gets an oblique near plane on the water (Lengyel, wxl-water `BuildOblique` minus
+its z flip) and `RenderChunks` (mode >= 2) and `RenderMapObjDefGroups` (mode >= 3) run. The oblique is written into
+`m_projNative` directly, because every backend's `XformSetProjection` rebuilds z from c2 / d2 alone; `CShaderEffect::
+UpdateProjMatrix` is re-run after each change. wxl-water's oblique self-test runs once on first use (off on a mismatch).
+While `CataWater::Reflecting()`, `RenderChunksSinglePass / Solid / ZoneDebug` and `RenderMapObjDefGroups` leave the
+sort-table lists (and the groups' portal frustums) in place for the main view.
+
+**Plane.** wxl-water `PlanePick.hpp` ported into CataWater.cpp: each terrain-water instance of the Cata pass (WMO
+liquids are skipped: their sphere is the group's, not the water level) adds its sphere weighted r^2 / d^2 into 2 yd
+height buckets; the heaviest body wins, the current one holds unless another is 1.5x heavier. Picked in `Arm` (frame N),
+used by `RenderReflection` (frame N+1). Skipped: no plane, camera less than 0.1 yd above it (or under water), camera
+inside a WMO or no exterior in view.
+
+**Shader.** `CataWaterAboveP` = CataWaterPs with `PLANAR`: s14 = the target, c31 = (plane z - camera z, 0.5); the
+lookup is wxl-water's (1 - u - bend.x, v + bend.y), bend = N.xy x 0.06 x saturate(tr + 0.25), and it replaces the SSR /
+fog-colour reflection where the water is within 2 yd of the plane, fading out to 4 yd. Other water keeps the SSR.
+
+**Pass hooks.** The reflection only runs the stock chunk / WMO / sky draws. The vfog fog, sun shadows (shadowMask),
+AO, depth-user copies (`OnOpaqueDone / OnSolidDone / OnLiquidDone / OnWorldDone`, Cata `Arm`), the falling leaves
+(`RenderLiquidPass`), tree sway and grass wind (M2 scene / detail doodads, not drawn), and the occlusion queries
+(`OcclusionCull::IssueQueries`, after `RenderMapObjDefGroups` in `Render`) are not reached, so none sees the mirrored
+camera. No doodads, M2s, particles or detail doodads (Cata's reflectionMode draws none of them either).
+
+**CVars.** `waterCataReflection` (default **3** = sky + terrain + WMO, Cata's max reflectionMode: it only costs while
+`waterStyle` 1 is chosen, which is off by default, and the mirror is what makes that style look like Cata; 0 = SSR only,
+1 = sky, 2 = + terrain), `waterCataReflScale` (default 0.6, wxl-water's, clamped 0.25-1). Advanced > Water
+"Cataclysm reflections" (dropdown) and "Reflection resolution" (slider).
+
+**Files.** `WorldClient/CataWater.{h,cpp}`, `WorldClient/CWorldSceneRender.cpp` (the call), `WorldClient/World.cpp`
+(list-keeping guards), `ShaderSrc/CataWaterPs.hlsl` (`PLANAR`), `build_shaders.py` (`CataWaterAboveP`), new
+`Shaders/Pixel/ps_3_0` + `ps_4_0/CataWaterAboveP.bls`, `VideoOptionsAdvanced.lua`.
+
+**Unverified / limits.** Nothing ran in game. The reflection reuses the main view's culled set: terrain chunks and WMO
+groups culled or occluded for the main view (tall things above the top of the screen) are missing from it, and the WMO
+groups' portal frustums are the main view's. The far horizon (`RenderHorizon`, its own projection) is not drawn, so
+distant land past the far clip mirrors as sky. Under vfog (`StockFogReplaced`) the mirrored terrain may come out
+unfogged. The oblique far plane is tilted, so terrain near the far clip can be cut in the mirror. RT orientation is
+assumed to match the colour copy's on all three backends (the vfog/portrait RTs do). Cost unmeasured (Cata: 1.5-2.7 ms).
