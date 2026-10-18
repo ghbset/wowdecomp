@@ -648,6 +648,266 @@ void InvalidateHistory() {
     s_history.valid = false;
 }
 
+namespace {
+
+// One RenderFog frame: what the setup acquired and computed, read by the passes (audit O3). Every resource (targets,
+// shaders, the depth, the fade depth) is acquired by the setup before any pass draws.
+struct FogFrame {
+    const FrameInputs& in;
+    const Config& cfg;
+    double seconds;
+    CGxDevice* device;
+    WorldViewport vp;
+    CGxTex* prevTarget;
+    float vpX, vpY, vpW, vpH;
+    float vpMinX, vpMaxX, vpMinY, vpMaxY;
+    uint32_t scale, lowW, lowH;
+    float viewToWorld[16];
+    float worldToView[16];
+    bool noisy;
+    CGxTex* authoredNoise;
+    CGxTex* densityNoise;
+    FogParams fog;
+    uint32_t lightCount;
+    bool lit;
+    CGxShader* unlitMarch;
+    CGxShader* litMarch;
+    CGxShader* composite;
+    CGxShader* splitComposite;
+    bool temporal;
+    CGxTex* depth;
+    CGxTex* fadeDepth;
+    const float* proj;
+    float toLightInView[3];
+    float viewport[6];
+    bool historyValid;
+    C44Matrix reprojection;
+    float lights[4 * kMaxLocalLights][4];
+    float variation[4];
+    LayerNoiseRegisters noiseRegisters[kSceneLayers];
+    float celestialLight[4];
+    float march[4];
+    float localControl[4];
+    float sunPx[2];
+    float rayStrength;
+    uint32_t rayW, rayH;
+    bool rays;
+    CGxTex* copy;       // CompositePass: the scene copy (linear blend, rays, fade), or nullptr
+};
+
+void MarchPass(const FogFrame& f) {
+    // ---- march (coa :1369-1430) ----------------------------------------------------------------------
+    SetPs(9, f.celestialLight, 1);
+    SetPs(11, f.march, 1);
+    SetPs(kLayerRegister, &f.fog.layers[0].start, 6 * kFogLayers);
+    SetPs(kLayerNoiseRegister, &f.noiseRegisters[0].octaveOffsetAndInverseTile[0][0], 4 * kSceneLayers);
+    SetPs(kLocalControlRegister, f.localControl, 1);
+    SetPs(kVariationRegister, f.variation, 1);
+    SetPs(kLocalLightRegister, &f.lights[0][0], 4 * kMaxLocalLights);
+    Bind(0, f.depth);
+    Bind(9, f.densityNoise);
+    Bind(10, f.authoredNoise);
+
+    // wxl-vfog ec1c66b: the lit march only over the texels a light can reach, the unlit one over the rest.
+    TexelRect litTexels = LocalLightTexels(f.lights, f.lightCount, f.proj, f.vpW, f.vpH, f.scale, f.lowW, f.lowH);
+    bool litAnywhere = f.lit && litTexels.right > litTexels.left && litTexels.bottom > litTexels.top;
+    bool litEverywhere = litAnywhere && litTexels.left == 0 && litTexels.top == 0
+        && litTexels.right == static_cast<int32_t>(f.lowW) && litTexels.bottom == static_cast<int32_t>(f.lowH);
+    if (litAnywhere && !litEverywhere) {
+        // Each texel marched once: the unlit march as up to four bands around the lit rect, then the lit one in it.
+        // With a target bound, Gx scissor y runs top-down (CGxDeviceD3d::IStateSyncScissorRect).
+        GxRenderTargetSet(GxBuffers_Color, s_targets.march, 0);
+        GxRsSet(GxRs_ScissorTest, 1);
+        auto drawRect = [&](CGxShader* shader, int32_t left, int32_t top, int32_t right, int32_t bottom) {
+            if (right <= left || bottom <= top) {
+                return;
+            }
+            CRect scissor;
+            scissor.minX = static_cast<float>(left) / f.lowW;
+            scissor.maxX = static_cast<float>(right) / f.lowW;
+            scissor.minY = static_cast<float>(top) / f.lowH;
+            scissor.maxY = static_cast<float>(bottom) / f.lowH;
+            f.device->SetScissor(scissor);
+            f.device->RsSet(GxRs_PixelShader, shader);
+            DrawQuad(f.lowW, f.lowH);
+        };
+        const int32_t w = static_cast<int32_t>(f.lowW), h = static_cast<int32_t>(f.lowH);
+        const TexelRect& r = litTexels;
+        drawRect(f.unlitMarch, 0, 0, w, r.top);
+        drawRect(f.unlitMarch, 0, r.bottom, w, h);
+        drawRect(f.unlitMarch, 0, r.top, r.left, r.bottom);
+        drawRect(f.unlitMarch, r.right, r.top, w, r.bottom);
+        drawRect(f.litMarch, r.left, r.top, r.right, r.bottom);
+        GxRsSet(GxRs_ScissorTest, 0);
+    } else {
+        DrawToTarget(s_targets.march, litEverywhere ? f.litMarch : f.unlitMarch);
+    }
+
+    Bind(9, nullptr);
+    Bind(10, nullptr);
+}
+
+// Returns the fog the composite reads: the march, or with vfogTemporal the filtered history.
+CGxTex* TemporalPass(const FogFrame& f) {
+    // ---- temporal + history depth (coa FilterWithHistory :980-1004) ---------------------------------
+    bool adaptive = f.lit || s_history.localLightCount > 0 || f.cfg.noiseAmount > 0.0f || f.noisy;
+    CGxTex* fogResult = s_targets.march;
+    if (f.temporal) {
+        int read = s_history.index;
+        int write = read ^ 1;
+        float temporalConstants[4] = { f.cfg.temporal, f.historyValid ? 1.0f : 0.0f, adaptive ? 1.0f : 0.0f, 0.0f };
+        SetPs(9, reinterpret_cast<const float*>(&f.reprojection), 4);     // c9-c12
+        SetPs(13, temporalConstants, 1);
+        Bind(0, s_targets.march);
+        Bind(1, s_targets.history[read]);
+        Bind(2, f.depth);
+        Bind(3, s_targets.historyDepth[read]);
+        DrawToTarget(s_targets.history[write], s_shaders.temporal);
+
+        Bind(1, nullptr);
+        Bind(2, nullptr);
+        Bind(3, nullptr);
+        Bind(0, f.depth);
+        DrawToTarget(s_targets.historyDepth[write], s_shaders.historyDepth);
+        s_history.index = write;
+        fogResult = s_targets.history[write];
+    }
+
+    return fogResult;
+}
+
+void CompositePass(FogFrame& f, CGxTex* fogResult) {
+    // ---- composite onto the scene target (coa :1450-1499), premultiplied as straight alpha ----------
+    GxRenderTargetSet(GxBuffers_Color, f.prevTarget, 0);
+    ScissorToWorld(f.vp);
+
+    // coa's default for ColorSpace=1: blend in linear light over a copy of the scene, drawn opaque; the
+    // fixed-function alpha blend is the fallback when the copy fails (or the world is not on the back buffer).
+    // The god ray mask reads the same copy (coa CopySceneForGodRays :1440, taken whenever rays draw).
+    f.copy = (f.fog.linear || f.rays || f.fadeDepth) && !f.prevTarget ? CopySceneBeforeFog(static_cast<uint32_t>(f.vpX), static_cast<uint32_t>(f.vpY), static_cast<uint32_t>(f.vpW), static_cast<uint32_t>(f.vpH)) : nullptr;
+    CGxTex* sceneCopy = f.fog.linear ? f.copy : nullptr;
+    s_overSceneCopy = sceneCopy != nullptr;
+    GxRsSet(GxRs_BlendingMode, sceneCopy ? GxBlend_Opaque : GxBlend_Alpha);
+    const Blend blend = sceneCopy ? Blend_LinearOverSceneCopy : f.fog.linear ? Blend_LinearFixedFunction : Blend_GammaFixedFunction;
+    const float glow = sceneCopy && f.cfg.glowCompensation ? f.in.clientGlowAmount : 0.0f;
+
+    float exposure = f.fog.authored ? f.cfg.classicExposure : f.cfg.exposure;
+    float compositeConstants[3][4] = {
+        { exposure, 0.0f, static_cast<float>(f.cfg.debugView), static_cast<float>(blend) },
+        { f.fog.rayColor[0], f.fog.rayColor[1], f.fog.rayColor[2], 0.0f },    // w = 0: no dither
+        { f.sunPx[0], f.sunPx[1], f.cfg.sunMarker && f.toLightInView[2] > 0.05f ? 1.0f : 0.0f, glow },                               // coa m_drawnGlowCompensation
+    };
+    const FogParams compositeFog = f.lit ? WithMeanNoise(f.fog) : f.fog;
+    SetPs(9, f.celestialLight, 1);
+    SetPs(11, f.march, 1);
+    SetPs(kLayerRegister, &compositeFog.layers[0].start, 6 * kFogLayers);
+    SetPs(kCompositeRegister, &compositeConstants[0][0], 3);
+    Bind(0, f.depth);
+    Bind(1, fogResult);
+    Bind(2, nullptr);
+    Bind(3, sceneCopy);
+    Bind(4, s_targets.march);
+    f.device->RsSet(GxRs_PixelShader, f.composite);
+    // VFogComposite reads TEXCOORD0 as uv across the world viewport (vf_common FullPixelFromUv: c0.xy + uv * c0.zw).
+    if (f.splitComposite) {
+        DrawCompositeBySampleDepth(f.composite, f.splitComposite, sceneCopy != nullptr, f.fadeDepth != nullptr, f.vp);   // MSAA: INTZ is a copy, the MS depth stays bound
+    } else {
+        f.device->DeviceSceneDepthBound(false);   // D3D9: s0 is the INTZ depth-stencil the back buffer uses
+        DrawQuad(static_cast<uint32_t>(f.vpW), static_cast<uint32_t>(f.vpH), f.vpMinX, f.vpMaxX, f.vpMinY, f.vpMaxY);
+        f.device->DeviceSceneDepthBound(true);
+    }
+
+    if (f.fadeDepth && f.copy) {
+        // wxl-vfog Renderer::DrawOverMarked: out = lerp(frame fogged behind, the unfogged copy fogged at the model's
+        // own depth, alpha), the alpha in eight steps from the stencil's top three bits (step 0 is left as is).
+        // The depth-stencil stays bound for the test; s0 is the R32F copy, so nothing samples it.
+        // MSAA with the split: its near side (c80 = 0, nothing clipped) fogs a marked sample at the nearest depth of
+        // its 3x3, i.e. the model's own where sample 0 is the background behind its edge (else a halo of background fog).
+        compositeConstants[0][3] = static_cast<float>(f.fog.linear ? Blend_LinearOverSceneCopy : Blend_GammaOverSceneCopy);
+        SetPs(kCompositeRegister, &compositeConstants[0][0], 1);
+        if (f.splitComposite) {
+            const float nearSide[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+            SetPs(kSampleSideRegister, nearSide, 1);
+            f.device->RsSet(GxRs_PixelShader, f.splitComposite);
+        }
+        Bind(0, f.fadeDepth);
+        Bind(3, f.copy);
+        GxRsSet(GxRs_BlendingMode, GxBlend_ConstantAlpha);
+        for (int32_t step = 1; step <= 7; step++) {
+            const float weight = step == 7 ? 1.0f : (2 * step + 1) / 16.0f + 0.5f / 255.0f;
+            SetStencil(GxStencilCmp_Equal, step << 5, kFadeBits, 0, GxStencilOp_Keep);
+            GxRsSet(Unk84, weight);     // BLENDFACTOR (GxBlend_ConstantAlpha)
+            DrawQuad(static_cast<uint32_t>(f.vpW), static_cast<uint32_t>(f.vpH), f.vpMinX, f.vpMaxX, f.vpMinY, f.vpMaxY);
+        }
+        GxRsSet(GxRs_StencilTest, 0);
+        Bind(0, f.depth);
+    }
+}
+
+void GodRayPass(const FogFrame& f) {
+    // ---- god ray mask + radial blur (coa DrawGodRayMask :1200-1232) ----------------------------------
+    // coa draws these at the end of the world in its early mode (RenderGodRaysAfterWorld), from the scene copy it
+    // took here: the same inputs, so drawing them now gives the same rays. RenderGodRays composites them.
+    if (f.rays && f.copy) {
+        GxRsSet(GxRs_ScissorTest, 0);
+        GxRsSet(GxRs_ColorWrite, 15);
+        GxRsSet(GxRs_BlendingMode, GxBlend_Opaque);
+        const float mask[2][4] = {
+            { f.toLightInView[0], f.toLightInView[1], f.toLightInView[2], kRayFalloff },
+            { 0.0f, kRayThreshold, 1.0f / f.rayW, 1.0f / f.rayH },
+        };
+        SetPs(9, &mask[0][0], 2);
+        for (int stage = 1; stage <= 4; stage++) {
+            Bind(stage, nullptr);
+        }
+        Bind(0, f.depth);
+        Bind(1, f.copy);
+        f.device->DeviceSceneDepthBound(false);
+        DrawToTarget(s_targets.rays[1], s_shaders.rayMask);
+        f.device->DeviceSceneDepthBound(true);
+        Bind(1, nullptr);
+
+        float norm = 0.0f;
+        for (int k = 0; k < kRayTaps; k++) {
+            norm += std::pow(kRayDecay, static_cast<float>(k));
+        }
+        float step = kRayStep;
+        for (int pass = 0; pass < 2; pass++) {
+            const float blur[2][4] = {
+                { (f.sunPx[0] - f.vpX) / f.vpW, (f.sunPx[1] - f.vpY) / f.vpH, step, 1.0f / norm },
+                { static_cast<float>(f.rayW), static_cast<float>(f.rayH), 1.0f / f.rayW, 1.0f / f.rayH },
+            };
+            SetPs(9, &blur[0][0], 2);
+            Bind(0, s_targets.rays[pass == 0 ? 1 : 0]);
+            DrawToTarget(s_targets.rays[pass == 0 ? 0 : 1], s_shaders.rayBlur);
+            step /= kRayTaps;
+        }
+        GxRenderTargetSet(GxBuffers_Color, f.prevTarget, 0);
+
+        s_godRays.pending = true;
+        s_godRays.strength = f.rayStrength;
+        std::memcpy(s_godRays.colour, f.fog.rayColor, sizeof(s_godRays.colour));
+        s_godRays.glow = f.cfg.glowCompensation ? f.in.clientGlowAmount : 0.0f;
+    }
+}
+
+void StoreHistory(const FogFrame& f) {
+    // coa :1510-1522
+    std::memcpy(s_history.worldToView, f.worldToView, sizeof(f.worldToView));
+    std::memcpy(s_history.proj, f.proj, sizeof(s_history.proj));
+    std::memcpy(s_history.camPos, f.in.camPos, sizeof(s_history.camPos));
+    std::memcpy(s_history.viewport, f.viewport, sizeof(f.viewport));
+    s_history.scale = f.scale;
+    s_history.config = f.cfg;
+    s_history.mapId = f.in.mapId;
+    s_history.lightSlot = f.in.screenEffectSlot;
+    s_history.localLightCount = static_cast<int>(f.lightCount);
+    s_history.seconds = f.seconds;
+    s_history.valid = f.temporal;
+}
+
+}  // namespace
+
 bool RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg, uint32_t frame, double seconds) {
     CGxDevice* device = g_theGxDevicePtr;
     if (!device || s_depthUnsupported || s_shaderMissing) {
@@ -845,6 +1105,46 @@ bool RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg,
         && Shader(s_shaders.rayBlur, "VFogRayBlur") && Shader(s_shaders.rayComposite, "VFogRayComposite")
         && EnsureRayTargets(rayW, rayH);
 
+    FogFrame f { in, cfg };
+    f.seconds = seconds;
+    f.device = device;
+    f.vp = vp;
+    f.prevTarget = prevTarget;
+    f.vpX = vpX; f.vpY = vpY; f.vpW = vpW; f.vpH = vpH;
+    f.vpMinX = vpMinX; f.vpMaxX = vpMaxX; f.vpMinY = vpMinY; f.vpMaxY = vpMaxY;
+    f.scale = scale; f.lowW = lowW; f.lowH = lowH;
+    std::memcpy(f.viewToWorld, viewToWorld, sizeof(viewToWorld));
+    std::memcpy(f.worldToView, worldToView, sizeof(worldToView));
+    f.noisy = noisy;
+    f.authoredNoise = authoredNoise;
+    f.densityNoise = densityNoise;
+    f.fog = fog;
+    f.lightCount = lightCount;
+    f.lit = lit;
+    f.unlitMarch = unlitMarch;
+    f.litMarch = litMarch;
+    f.composite = composite;
+    f.splitComposite = splitComposite;
+    f.temporal = temporal;
+    f.depth = depth;
+    f.fadeDepth = fadeDepth;
+    f.proj = proj;
+    std::memcpy(f.toLightInView, toLightInView, sizeof(toLightInView));
+    std::memcpy(f.viewport, viewport, sizeof(viewport));
+    f.historyValid = historyValid;
+    f.reprojection = reprojection;
+    std::memcpy(f.lights, lights, sizeof(lights));
+    std::memcpy(f.variation, variation, sizeof(variation));
+    std::memcpy(f.noiseRegisters, noiseRegisters, sizeof(noiseRegisters));
+    std::memcpy(f.celestialLight, celestialLight, sizeof(celestialLight));
+    std::memcpy(f.march, march, sizeof(march));
+    std::memcpy(f.localControl, localControl, sizeof(localControl));
+    std::memcpy(f.sunPx, sunPx, sizeof(sunPx));
+    f.rayStrength = rayStrength;
+    f.rayW = rayW; f.rayH = rayH;
+    f.rays = rays;
+    f.copy = nullptr;
+
     // ---- state: everything below is undone at the end --------------------------------------------
     static SavedPassState s_saved;     // 2 KB of constants, off the stack
     BeginPasses(s_saved);
@@ -858,206 +1158,14 @@ bool RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg,
     const float dither[4] = { ditherStrength, static_cast<float>(frame % 1024u), floatStores ? 0.0f : ditherStrength, 0.0f };
     SetPs(kDitherRegister, dither, 1);
 
-    // ---- march (coa :1369-1430) ----------------------------------------------------------------------
-    SetPs(9, celestialLight, 1);
-    SetPs(11, march, 1);
-    SetPs(kLayerRegister, &fog.layers[0].start, 6 * kFogLayers);
-    SetPs(kLayerNoiseRegister, &noiseRegisters[0].octaveOffsetAndInverseTile[0][0], 4 * kSceneLayers);
-    SetPs(kLocalControlRegister, localControl, 1);
-    SetPs(kVariationRegister, variation, 1);
-    SetPs(kLocalLightRegister, &lights[0][0], 4 * kMaxLocalLights);
-    Bind(0, depth);
-    Bind(9, densityNoise);
-    Bind(10, authoredNoise);
-
-    // wxl-vfog ec1c66b: the lit march only over the texels a light can reach, the unlit one over the rest.
-    TexelRect litTexels = LocalLightTexels(lights, lightCount, proj, vpW, vpH, scale, lowW, lowH);
-    bool litAnywhere = lit && litTexels.right > litTexels.left && litTexels.bottom > litTexels.top;
-    bool litEverywhere = litAnywhere && litTexels.left == 0 && litTexels.top == 0
-        && litTexels.right == static_cast<int32_t>(lowW) && litTexels.bottom == static_cast<int32_t>(lowH);
-    if (litAnywhere && !litEverywhere) {
-        // Each texel marched once: the unlit march as up to four bands around the lit rect, then the lit one in it.
-        // With a target bound, Gx scissor y runs top-down (CGxDeviceD3d::IStateSyncScissorRect).
-        GxRenderTargetSet(GxBuffers_Color, s_targets.march, 0);
-        GxRsSet(GxRs_ScissorTest, 1);
-        auto drawRect = [&](CGxShader* shader, int32_t left, int32_t top, int32_t right, int32_t bottom) {
-            if (right <= left || bottom <= top) {
-                return;
-            }
-            CRect scissor;
-            scissor.minX = static_cast<float>(left) / lowW;
-            scissor.maxX = static_cast<float>(right) / lowW;
-            scissor.minY = static_cast<float>(top) / lowH;
-            scissor.maxY = static_cast<float>(bottom) / lowH;
-            device->SetScissor(scissor);
-            device->RsSet(GxRs_PixelShader, shader);
-            DrawQuad(lowW, lowH);
-        };
-        const int32_t w = static_cast<int32_t>(lowW), h = static_cast<int32_t>(lowH);
-        const TexelRect& r = litTexels;
-        drawRect(unlitMarch, 0, 0, w, r.top);
-        drawRect(unlitMarch, 0, r.bottom, w, h);
-        drawRect(unlitMarch, 0, r.top, r.left, r.bottom);
-        drawRect(unlitMarch, r.right, r.top, w, r.bottom);
-        drawRect(litMarch, r.left, r.top, r.right, r.bottom);
-        GxRsSet(GxRs_ScissorTest, 0);
-    } else {
-        DrawToTarget(s_targets.march, litEverywhere ? litMarch : unlitMarch);
-    }
-
-    Bind(9, nullptr);
-    Bind(10, nullptr);
-
-    // ---- temporal + history depth (coa FilterWithHistory :980-1004) ---------------------------------
-    bool adaptive = lit || s_history.localLightCount > 0 || cfg.noiseAmount > 0.0f || noisy;
-    CGxTex* fogResult = s_targets.march;
-    if (temporal) {
-        int read = s_history.index;
-        int write = read ^ 1;
-        float temporalConstants[4] = { cfg.temporal, historyValid ? 1.0f : 0.0f, adaptive ? 1.0f : 0.0f, 0.0f };
-        SetPs(9, reinterpret_cast<const float*>(&reprojection), 4);     // c9-c12
-        SetPs(13, temporalConstants, 1);
-        Bind(0, s_targets.march);
-        Bind(1, s_targets.history[read]);
-        Bind(2, depth);
-        Bind(3, s_targets.historyDepth[read]);
-        DrawToTarget(s_targets.history[write], s_shaders.temporal);
-
-        Bind(1, nullptr);
-        Bind(2, nullptr);
-        Bind(3, nullptr);
-        Bind(0, depth);
-        DrawToTarget(s_targets.historyDepth[write], s_shaders.historyDepth);
-        s_history.index = write;
-        fogResult = s_targets.history[write];
-    }
-
-    // ---- composite onto the scene target (coa :1450-1499), premultiplied as straight alpha ----------
-    GxRenderTargetSet(GxBuffers_Color, prevTarget, 0);
-    ScissorToWorld(vp);
-
-    // coa's default for ColorSpace=1: blend in linear light over a copy of the scene, drawn opaque; the
-    // fixed-function alpha blend is the fallback when the copy fails (or the world is not on the back buffer).
-    // The god ray mask reads the same copy (coa CopySceneForGodRays :1440, taken whenever rays draw).
-    CGxTex* copy = (fog.linear || rays || fadeDepth) && !prevTarget ? CopySceneBeforeFog(static_cast<uint32_t>(vpX), static_cast<uint32_t>(vpY), static_cast<uint32_t>(vpW), static_cast<uint32_t>(vpH)) : nullptr;
-    CGxTex* sceneCopy = fog.linear ? copy : nullptr;
-    s_overSceneCopy = sceneCopy != nullptr;
-    GxRsSet(GxRs_BlendingMode, sceneCopy ? GxBlend_Opaque : GxBlend_Alpha);
-    const Blend blend = sceneCopy ? Blend_LinearOverSceneCopy : fog.linear ? Blend_LinearFixedFunction : Blend_GammaFixedFunction;
-    const float glow = sceneCopy && cfg.glowCompensation ? in.clientGlowAmount : 0.0f;
-
-    float exposure = fog.authored ? cfg.classicExposure : cfg.exposure;
-    float compositeConstants[3][4] = {
-        { exposure, 0.0f, static_cast<float>(cfg.debugView), static_cast<float>(blend) },
-        { fog.rayColor[0], fog.rayColor[1], fog.rayColor[2], 0.0f },    // w = 0: no dither
-        { sunPx[0], sunPx[1], cfg.sunMarker && toLightInView[2] > 0.05f ? 1.0f : 0.0f, glow },                               // coa m_drawnGlowCompensation
-    };
-    const FogParams compositeFog = lit ? WithMeanNoise(fog) : fog;
-    SetPs(9, celestialLight, 1);
-    SetPs(11, march, 1);
-    SetPs(kLayerRegister, &compositeFog.layers[0].start, 6 * kFogLayers);
-    SetPs(kCompositeRegister, &compositeConstants[0][0], 3);
-    Bind(0, depth);
-    Bind(1, fogResult);
-    Bind(2, nullptr);
-    Bind(3, sceneCopy);
-    Bind(4, s_targets.march);
-    device->RsSet(GxRs_PixelShader, composite);
-    // VFogComposite reads TEXCOORD0 as uv across the world viewport (vf_common FullPixelFromUv: c0.xy + uv * c0.zw).
-    if (splitComposite) {
-        DrawCompositeBySampleDepth(composite, splitComposite, sceneCopy != nullptr, fadeDepth != nullptr, vp);   // MSAA: INTZ is a copy, the MS depth stays bound
-    } else {
-        device->DeviceSceneDepthBound(false);   // D3D9: s0 is the INTZ depth-stencil the back buffer uses
-        DrawQuad(static_cast<uint32_t>(vpW), static_cast<uint32_t>(vpH), vpMinX, vpMaxX, vpMinY, vpMaxY);
-        device->DeviceSceneDepthBound(true);
-    }
-
-    if (fadeDepth && copy) {
-        // wxl-vfog Renderer::DrawOverMarked: out = lerp(frame fogged behind, the unfogged copy fogged at the model's
-        // own depth, alpha), the alpha in eight steps from the stencil's top three bits (step 0 is left as is).
-        // The depth-stencil stays bound for the test; s0 is the R32F copy, so nothing samples it.
-        // MSAA with the split: its near side (c80 = 0, nothing clipped) fogs a marked sample at the nearest depth of
-        // its 3x3, i.e. the model's own where sample 0 is the background behind its edge (else a halo of background fog).
-        compositeConstants[0][3] = static_cast<float>(fog.linear ? Blend_LinearOverSceneCopy : Blend_GammaOverSceneCopy);
-        SetPs(kCompositeRegister, &compositeConstants[0][0], 1);
-        if (splitComposite) {
-            const float nearSide[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-            SetPs(kSampleSideRegister, nearSide, 1);
-            device->RsSet(GxRs_PixelShader, splitComposite);
-        }
-        Bind(0, fadeDepth);
-        Bind(3, copy);
-        GxRsSet(GxRs_BlendingMode, GxBlend_ConstantAlpha);
-        for (int32_t step = 1; step <= 7; step++) {
-            const float weight = step == 7 ? 1.0f : (2 * step + 1) / 16.0f + 0.5f / 255.0f;
-            SetStencil(GxStencilCmp_Equal, step << 5, kFadeBits, 0, GxStencilOp_Keep);
-            GxRsSet(Unk84, weight);     // BLENDFACTOR (GxBlend_ConstantAlpha)
-            DrawQuad(static_cast<uint32_t>(vpW), static_cast<uint32_t>(vpH), vpMinX, vpMaxX, vpMinY, vpMaxY);
-        }
-        GxRsSet(GxRs_StencilTest, 0);
-        Bind(0, depth);
-    }
-
-    // ---- god ray mask + radial blur (coa DrawGodRayMask :1200-1232) ----------------------------------
-    // coa draws these at the end of the world in its early mode (RenderGodRaysAfterWorld), from the scene copy it
-    // took here: the same inputs, so drawing them now gives the same rays. RenderGodRays composites them.
-    if (rays && copy) {
-        GxRsSet(GxRs_ScissorTest, 0);
-        GxRsSet(GxRs_ColorWrite, 15);
-        GxRsSet(GxRs_BlendingMode, GxBlend_Opaque);
-        const float mask[2][4] = {
-            { toLightInView[0], toLightInView[1], toLightInView[2], kRayFalloff },
-            { 0.0f, kRayThreshold, 1.0f / rayW, 1.0f / rayH },
-        };
-        SetPs(9, &mask[0][0], 2);
-        for (int stage = 1; stage <= 4; stage++) {
-            Bind(stage, nullptr);
-        }
-        Bind(0, depth);
-        Bind(1, copy);
-        device->DeviceSceneDepthBound(false);
-        DrawToTarget(s_targets.rays[1], s_shaders.rayMask);
-        device->DeviceSceneDepthBound(true);
-        Bind(1, nullptr);
-
-        float norm = 0.0f;
-        for (int k = 0; k < kRayTaps; k++) {
-            norm += std::pow(kRayDecay, static_cast<float>(k));
-        }
-        float step = kRayStep;
-        for (int pass = 0; pass < 2; pass++) {
-            const float blur[2][4] = {
-                { (sunPx[0] - vpX) / vpW, (sunPx[1] - vpY) / vpH, step, 1.0f / norm },
-                { static_cast<float>(rayW), static_cast<float>(rayH), 1.0f / rayW, 1.0f / rayH },
-            };
-            SetPs(9, &blur[0][0], 2);
-            Bind(0, s_targets.rays[pass == 0 ? 1 : 0]);
-            DrawToTarget(s_targets.rays[pass == 0 ? 0 : 1], s_shaders.rayBlur);
-            step /= kRayTaps;
-        }
-        GxRenderTargetSet(GxBuffers_Color, prevTarget, 0);
-
-        s_godRays.pending = true;
-        s_godRays.strength = rayStrength;
-        std::memcpy(s_godRays.colour, fog.rayColor, sizeof(s_godRays.colour));
-        s_godRays.glow = cfg.glowCompensation ? in.clientGlowAmount : 0.0f;
-    }
+    MarchPass(f);
+    CGxTex* fogResult = TemporalPass(f);
+    CompositePass(f, fogResult);
+    GodRayPass(f);
 
     // ---- restore ------------------------------------------------------------------------------------
     EndPasses(s_saved, vp);
-
-    // coa :1510-1522
-    std::memcpy(s_history.worldToView, worldToView, sizeof(worldToView));
-    std::memcpy(s_history.proj, proj, sizeof(s_history.proj));
-    std::memcpy(s_history.camPos, in.camPos, sizeof(s_history.camPos));
-    std::memcpy(s_history.viewport, viewport, sizeof(viewport));
-    s_history.scale = scale;
-    s_history.config = cfg;
-    s_history.mapId = in.mapId;
-    s_history.lightSlot = in.screenEffectSlot;
-    s_history.localLightCount = static_cast<int>(lightCount);
-    s_history.seconds = seconds;
-    s_history.valid = temporal;
+    StoreHistory(f);
     return true;
 }
 
