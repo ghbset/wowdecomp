@@ -1,4 +1,5 @@
 #include "World.h"
+#include "WoW/Source/WorldClient/TreeLeaves.h"   // TREELEAVES
 #include <cstdlib>
 #include <new>
 #include <algorithm>
@@ -1937,6 +1938,7 @@ void CWorldScene::UpdateViewerLiquid() {
 // VERIFY: a0789a2d auto
 // OFFSET: 0x00790A80
 void CWorldScene::RenderLiquidPass() {
+    TreeLeaves::Draw();   // TREELEAVES: not in 12340 (wxl-treewind hooked this entry: after the solid models, before the water and the fog composite)
     CWorldScene::ApplyFogState();
 
     if ((CWorld::enables & Enable_Water) && CWorldScene::s_liquidRenderer) {
@@ -2308,8 +2310,10 @@ void CWorldScene::AddToDistanceBucket(CChunkLiquid* liquid, const C3Vector& pos)
         float scaled = distance * 0.03f;
         bucket = CMath::fint_(scaled - 0.5f);
 
-        if (bucket >= 64) {
-            return;
+        // BACKLOG F2: stock dropped liquid past bucket 63 (2133 yd); clamp so far water draws out to farclip
+        // (wxl-renderdistance LiquidCap).
+        if (bucket > 63) {
+            bucket = 63;
         }
     }
 

@@ -10,12 +10,20 @@
 #include "WoW/Common/AaBsp.h"
 #include "WoW/Source/UIUtil/PortraitButton.h"
 #include "WoW/Source/WorldClient/Map.h"
+#include "WoW/Source/WorldClient/MapObjGroup.h"
+#include "WoW/Source/LoadingScreen.h"
+#include "WoW/Source/Magic/MagicClient/Spell_C.h"
+#include "WoW/Source/WorldClient/MapRenderChunk.h"
 #include "WoW/Source/WorldClient/Types.h"
 #include "WoW/Source/WorldClient/World.h"
 #include "WoW/Source/WorldClient/OcclusionCull.h"
 #include "WoW/Source/WorldClient/VolumetricFog.h"
+#include "WoW/Source/LiquidSystem/Liquid.h"
 #include "Engine/Source/ConsoleBase/ConsoleVar.h"
 #include "Engine/Source/Model2/M2Scene.h"
+#include "Engine/Source/Model2/M2TreeSway.h"
+#include "WoW/Source/WorldClient/TreeLeaves.h"
+#include "WoW/Source/WorldClient/DetailDoodad.h"
 #include "Engine/Source/ConsoleBase/IConsole.h"
 #include "Engine/Source/Storm/H/storm.h"
 #include "WoW/Source/ConsoleDevice/ConsoleDevice.h"
@@ -688,6 +696,74 @@ void CWorldParam::Initialize() {
         g_asyncTexUploadLimit = limit < 0 ? 0 : limit;
         return true;
     }, CATEGORY_GRAPHICS, false, nullptr, false);
+    // BACKLOG: not in 12340. Rebuild building normals that disagree with their flat faces (wxl-light Normals.cpp);
+    // applies as each WMO group loads, so a change needs a relog or zone reload.
+    CVar::Register("wmoNormalRepair", "Repair building normals at load (relog to apply)", 1, "1", [](CVar*, const char*, const char* value, void*) -> bool {
+        CMapObjGroup::s_repairNormals = SStrToInt(value) != 0;
+        return true;
+    }, CATEGORY_GRAPHICS, false, nullptr, false);
+    // TREESWAY: not in 12340 (wxl-treewind). Placed living trees and bushes tilt in a gust field (M2TreeSway).
+    CVar::Register("treeSway", "Trees and bushes sway in the wind", 1, "1", [](CVar*, const char*, const char* value, void*) -> bool {
+        M2TreeSway::s_enabled = SStrToInt(value) != 0;
+        return true;
+    }, CATEGORY_GRAPHICS, false, nullptr, false);
+    CVar::Register("treeSwayStrength", "Tree sway amount (0..3, 1 = wxl-treewind)", 1, "1", [](CVar*, const char*, const char* value, void*) -> bool {
+        float v = SStrToFloat(value);
+        M2TreeSway::s_strength = v < 0.0f ? 0.0f : (v > 3.0f ? 3.0f : v);
+        return true;
+    }, CATEGORY_GRAPHICS, false, nullptr, false);
+    // TREELEAVES: not in 12340 (wxl-treewind Leaves.cpp). The nearest swaying trees shed leaves (needs treeSway).
+    CVar::Register("treeLeaves", "Swaying trees shed falling leaves", 1, "1", [](CVar*, const char*, const char* value, void*) -> bool {
+        TreeLeaves::s_enabled = SStrToInt(value) != 0;
+        return true;
+    }, CATEGORY_GRAPHICS, false, nullptr, false);
+    CVar::Register("treeLeavesDensity", "Falling leaf slots per tree (1..48, 18 = wxl-treewind)", 1, "18", [](CVar*, const char*, const char* value, void*) -> bool {
+        float v = SStrToFloat(value);
+        TreeLeaves::s_perTree = v < 1.0f ? 1.0f : (v > 48.0f ? 48.0f : v);
+        return true;
+    }, CATEGORY_GRAPHICS, false, nullptr, false);
+
+    // GRASSWIND: not in 12340 (wxl-grasswind). Grass sways in the wind and parts around the player; our
+    // DetailDoodad.bls in custom.MPQ reads the constants (0 = zero motion, the stock blade positions).
+    CVar::Register("grassWind", "Grass sways in the wind", 1, "1", [](CVar*, const char*, const char* value, void*) -> bool {
+        CDetailDoodad::s_grassWind = SStrToInt(value) != 0;
+        return true;
+    }, CATEGORY_GRAPHICS, false, nullptr, false);
+    CVar::Register("grassWindStrength", "How far grass sways in the wind (1 = default)", 1, "1.0", [](CVar*, const char*, const char* value, void*) -> bool {
+        float v = SStrToFloat(value);
+        CDetailDoodad::s_grassWindStrength = v < 0.0f ? 0.0f : (v > 4.0f ? 4.0f : v);
+        return true;
+    }, CATEGORY_GRAPHICS, false, nullptr, false);
+    CVar::Register("grassParting", "Grass parts around the player", 1, "1", [](CVar*, const char*, const char* value, void*) -> bool {
+        CDetailDoodad::s_grassParting = SStrToInt(value) != 0;
+        return true;
+    }, CATEGORY_GRAPHICS, false, nullptr, false);
+    // BACKLOG #10: not in 12340. Cata 4.3.4 ProcMagma lava and slime (MaterialMagma.cpp); 0 = the stock flipbook.
+    CVar::Register("liquidProcMagma", "Cataclysm procedural lava and slime", 1, "1", [](CVar*, const char*, const char* value, void*) -> bool {
+        Liquid::s_procMagma = SStrToInt(value) != 0;
+        return true;
+    }, CATEGORY_GRAPHICS, false, nullptr, false);
+
+    // BACKLOG F3: terrain VB/IB pool budget in MB (0 = stock farclip^2 sizing). Rebuilds the pools on change.
+    CVar::Register("terrainPoolMaxMB", "Terrain vertex/index pool budget in MB (0 = uncapped)", 1, CMapRenderChunk::s_poolMaxMB ? "128" : "0", [](CVar*, const char*, const char* value, void*) -> bool {
+        int32_t mb = SStrToInt(value);
+        CMapRenderChunk::s_poolMaxMB = mb > 0 ? static_cast<uint32_t>(mb) : 0;
+        CMapRenderChunk::SetDirty();
+        return true;
+    }, CATEGORY_GRAPHICS, false, nullptr, false);
+
+    // BACKLOG F4: spell queue window in ms (ClientExtensions [SpellQueue] window); 0 = stock "not ready" during the GCD.
+    CVar::Register("spellQueueWindow", "Cast this many ms before a cooldown ends; the server queues it (0 = off)", 1, "150", [](CVar*, const char*, const char* value, void*) -> bool {
+        s_spellQueueWindow = SStrToInt(value);
+        return true;
+    }, CATEGORY_GAME, false, nullptr, false);
+
+    // BACKLOG F5 (wxl-loading): no sleeping while a loading screen is up, and random loading screens per map.
+    CVar::Register("fastLoad", "Do not sleep while a loading screen is up (loads faster, one core busy)", 1, "1", [](CVar*, const char*, const char* value, void*) -> bool {
+        s_fastLoad = SStrToInt(value) != 0;
+        return true;
+    }, CATEGORY_GAME, false, nullptr, false);
+    CVar::Register("loadingScreens", "Random loading screens: <mapID>:<LoadingScreens id>,<id>;<mapID>:...", 1, "", nullptr, CATEGORY_GAME, false, nullptr, false);
 
     AddConsoleDeviceDefaultCallback(CWorldParam::SetDefaults);
 

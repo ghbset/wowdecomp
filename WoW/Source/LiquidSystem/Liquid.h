@@ -334,6 +334,7 @@ namespace Liquid {
     extern int32_t s_specularEnabled;
     extern IDatabase<LiquidMaterialRec>* s_liquidMaterialDB;
     extern IDatabase<LiquidTypeRec>* s_liquidTypeDB;
+    extern int32_t s_procMagma;   // BACKLOG #10: CVar liquidProcMagma, not in 12340
     extern char s_shaderPath[256];
     extern int32_t s_shadersEnabled;
     extern int32_t s_useCameraRelativeCoords;
