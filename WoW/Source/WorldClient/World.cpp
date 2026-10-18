@@ -2282,8 +2282,10 @@ void CWorldScene::AddToDistanceBucket(CChunkLiquid* liquid, const C3Vector& pos)
         float scaled = distance * 0.03f;
         bucket = CMath::fint_(scaled - 0.5f);
 
-        if (bucket >= 64) {
-            return;
+        // BACKLOG F2: stock dropped liquid past bucket 63 (2133 yd); clamp so far water draws out to farclip
+        // (wxl-renderdistance LiquidCap).
+        if (bucket > 63) {
+            bucket = 63;
         }
     }
 

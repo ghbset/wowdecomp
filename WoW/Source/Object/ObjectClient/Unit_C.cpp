@@ -15881,7 +15881,7 @@ bool CGUnit_C::CheckAndReportSpellInhibitFlags(PendingSpellCast* cast, const Spe
     } else {
         bool player = this->m_obj->m_guid == ClntObjMgrGetActivePlayer();
 
-        if (Spell_C_GetSpellCooldown(spell->m_id, !player, nullptr, nullptr, nullptr)) {
+        if (Spell_C_GetSpellCooldownQueued(spell->m_id, !player)) {   // BACKLOG F4: spell queue window
             Spell_C_SpellFailed(cast, spell, 67, -1, -1, false);
             return false;
         }

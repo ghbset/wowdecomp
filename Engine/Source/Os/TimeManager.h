@@ -32,5 +32,7 @@ int64_t OsGetAsyncClocksPerSecond();
 void OsTimeManagerCreate(OsTimeManager::TimingMethod method);
 void OsTimeManagerDestroy();
 void OsSleep(uint32_t milliseconds);
+// BACKLOG F5: set by the loading screen while CVar fastLoad is on; OsSleep then returns at once (60 s cap).
+void OsSetFastSleep(bool on);
 
 #endif

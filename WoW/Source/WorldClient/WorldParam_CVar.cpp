@@ -10,6 +10,9 @@
 #include "WoW/Source/UIUtil/PortraitButton.h"
 #include "WoW/Source/WorldClient/Map.h"
 #include "WoW/Source/WorldClient/MapObjGroup.h"
+#include "WoW/Source/LoadingScreen.h"
+#include "WoW/Source/Magic/MagicClient/Spell_C.h"
+#include "WoW/Source/WorldClient/MapRenderChunk.h"
 #include "WoW/Source/WorldClient/Types.h"
 #include "WoW/Source/WorldClient/World.h"
 #include "WoW/Source/WorldClient/OcclusionCull.h"
@@ -716,6 +719,27 @@ void CWorldParam::Initialize() {
         Liquid::s_procMagma = SStrToInt(value) != 0;
         return true;
     }, CATEGORY_GRAPHICS, false, nullptr, false);
+
+    // BACKLOG F3: terrain VB/IB pool budget in MB (0 = stock farclip^2 sizing). Rebuilds the pools on change.
+    CVar::Register("terrainPoolMaxMB", "Terrain vertex/index pool budget in MB (0 = uncapped)", 1, CMapRenderChunk::s_poolMaxMB ? "128" : "0", [](CVar*, const char*, const char* value, void*) -> bool {
+        int32_t mb = SStrToInt(value);
+        CMapRenderChunk::s_poolMaxMB = mb > 0 ? static_cast<uint32_t>(mb) : 0;
+        CMapRenderChunk::SetDirty();
+        return true;
+    }, CATEGORY_GRAPHICS, false, nullptr, false);
+
+    // BACKLOG F4: spell queue window in ms (ClientExtensions [SpellQueue] window); 0 = stock "not ready" during the GCD.
+    CVar::Register("spellQueueWindow", "Cast this many ms before a cooldown ends; the server queues it (0 = off)", 1, "150", [](CVar*, const char*, const char* value, void*) -> bool {
+        s_spellQueueWindow = SStrToInt(value);
+        return true;
+    }, CATEGORY_GAME, false, nullptr, false);
+
+    // BACKLOG F5 (wxl-loading): no sleeping while a loading screen is up, and random loading screens per map.
+    CVar::Register("fastLoad", "Do not sleep while a loading screen is up (loads faster, one core busy)", 1, "1", [](CVar*, const char*, const char* value, void*) -> bool {
+        s_fastLoad = SStrToInt(value) != 0;
+        return true;
+    }, CATEGORY_GAME, false, nullptr, false);
+    CVar::Register("loadingScreens", "Random loading screens: <mapID>:<LoadingScreens id>,<id>;<mapID>:...", 1, "", nullptr, CATEGORY_GAME, false, nullptr, false);
 
     AddConsoleDeviceDefaultCallback(CWorldParam::SetDefaults);
 
