@@ -855,3 +855,26 @@ on screen.
 
 Shaders: VFogMarch* / VFogComposite* / VFogCompositeSplit* rebuilt (ps_3_0, ps_4_0), SPIR-V regenerated (spirv-val
 clean), custom.MPQ rebuilt with shadow-s1's SM4 pack.
+
+## 2026-10-19: vfog36, only the arc's sun and moon in the sky (fix-oldsun)
+
+Published as `2026.10.19-vfog36`.
+
+The user: "we made a sun and moon arc change. When we do this we need to hide the old sun and moon." Audit of every
+sky body under `gfxSunArc 1`:
+
+- **Sun and moon discs** (`DNPlanet::Render`, DayNightRender.cpp) billboard at `m_position`, which `SetPlanets`
+  writes from the arc tables: already on the arc.
+- **Sun and moon glare** (`DNGlare::Update`/`Render`, its `GetPointOcclusion`) use `g_sunGlare/g_moonGlare.m_position`,
+  copied from the discs in `SetPlanets`: on the arc. `World.cpp`'s screen glow reads the sun glare: on the arc.
+- **Cloud lighting** (`DNClouds::SetupBumpMap`), **vfog** (`ReadLightDirection`: in-scatter, shafts, sun marker,
+  water glint, caustics) and the shadows read the discs or `g_lightBody`: on the arc.
+- **The second moon** (`m_moon2`, `Textures\moon02.blp`) was the one body left on the stock path: `SetPlanets` still
+  evaluates `s_moon2Theta/Phi` (35..100 degrees up, bearing 135..165, a 1.7 day cycle), which wxl-light never
+  rewrote either. Its colour is never set except the storm alpha, so stock draws it as a dark disc in rain and snow.
+  `RenderSky` now skips it under `gfxSunArc` (normal sky and the water reflection, which calls `RenderSky` too).
+- **Skybox M2s** (LightSkybox.dbc): none in Azeroth's LightParams; Outland and Northrend zone skyboxes are zone art,
+  and stock already drops the planets (weight > 0.99) and fades the glares by the skybox weight. Unchanged.
+- **Sky dome highlight** (`DNSky::SetColors`): keyed to the camera's facing and the hour, not a body. Unchanged.
+
+`gfxSunArc 0` is stock exactly. No shaders; custom.MPQ unchanged from vfog35.

@@ -1861,7 +1861,12 @@ void DayNight::RenderSky(CPortalView* view) {
         DayNight::g_stars.Render();
         DayNight::g_planets.m_sun.Render();
         DayNight::g_planets.m_moon.Render();
-        DayNight::g_planets.m_moon2.Render();
+        // Not stock (gfxSunArc): the second moon keeps the stock tables (SetPlanets' s_moon2Theta/Phi, 135-165 degrees),
+        // so it is the old path's moon left in the sky; only the arc's sun and moon are drawn. (Its colour is never
+        // set but for the storm alpha, so stock shows it as a dark disc in rain and snow.)
+        if (!DayNight::SunArc()) {
+            DayNight::g_planets.m_moon2.Render();
+        }
         DayNight::g_sky.Render();
         DayNight::g_clouds.Render();
     }
