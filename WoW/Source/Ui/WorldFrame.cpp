@@ -1796,8 +1796,8 @@ void CGWorldFrame::OnWorldRender() {
     g_theGxDevicePtr->RsPop();
     SmartScreenRectClearGrid(1);
     CGChatBubbleFrame::OnWorldRender(this);
+    VolumetricFog::OnWorldDone();   // VFOG: not in 12340; before the restore so it sees the world viewport
     GxXformSetViewport(minX, maxX, minY, maxY, minZ, maxZ);
-    VolumetricFog::OnWorldDone();   // VFOG: not in 12340
     FFX::Finish();
     CVehiclePassenger_C::PostRenderUpdateAll();
 }
