@@ -54,3 +54,44 @@ Ported from wxl-treewind `src/TreeWind.cpp` (branch `leaves`, the shipped build)
 - **Unverified:** not run in game; the look (direction, amount) is untested. The draw paths read the
   tilt through `m_matrixF4` / `m_boneMatrices` (checked in M2Scene / CM2SceneRender), the same products the
   plugin's placement edit fed.
+
+## Falling leaves (2026-10-18)
+
+Ported from wxl-treewind `src/Leaves.cpp` (branch `leaves`, the shipped build; user: "looks pretty good"), on top
+of Tree sway.
+
+- **What:** each of the 32 nearest swaying trees (within 70 + 20 yards, taller than 3 yards) owns up to 48 leaf
+  slots. A leaf starts in the crown, falls to the base at 1.3 yd/s, flutters, spins, turns edge-on now and then
+  and drifts downwind; a tree sheds more while its gust is up. There is no per-leaf state: TreeLeavesVS works out
+  each leaf from (tree constants, slot randoms, time) and an idle slot collapses outside the clip volume. One
+  non-indexed draw of a static 9216-vertex buffer per frame, 4 vertex constants per tree (c10..c137).
+- **Colour:** the plugin's name guess (palms/mushrooms/cacti shed nothing, conifers and snowy trees a few, autumn,
+  red, yellow and night elf violet tints), then the average opaque texel of the tree's leaf texture (the one named
+  leaf/branch/needle/..., else the most colourful, bark/trunk penalised). The plugin locked the D3D9 texture; here
+  the same small mip (levels - 3) is read from the BLP file with `CBLPFile` on the main thread, once per tree, so
+  it works on every backend. Lit by ambient + 0.7 x diffuse (`g_dnInfo.m_bands`).
+- **Fog / order:** drawn at the entry of `CWorldScene::RenderLiquidPass` (0x00790A80, the plugin's hook), in both
+  the above-water and in-water orders, opaque with depth writes and a `clip` at alpha 0.5 (the plugin's ALPHAREF
+  128 test), colour write rgb only. So the water and the vfog early composite (`OnLiquidDone`, which copies the
+  depth afterwards) treat a leaf as a solid model, exactly as the plugin did with wxl-vfog. The vertex shader
+  also applies the stock fog from `g_dnInfo.m_fog` as the plugin did; with vfog on that fog is pushed out of
+  range, so vfog alone fogs them. Not drawn in any reflection pass (the decomp water reflections are SSR: no
+  scene re-render).
+- **Feed:** `M2TreeSway::World` calls `TreeLeaves::NoteTree` for `Tree`-kind models with the unswayed transform,
+  the sway seed, `kTreeWind` gust/speed and the primary wind direction (the plugin's call after the tilt in
+  ApplySway). It runs on the animate workers, so the 32-row table is behind a mutex; the texture names are copied
+  when a tree takes a row. A tree keeps shedding for 60 s after it was last animated, then fades over 1.5 s.
+- **CVars:** `treeLeaves` (1; one draw of ~3k triangles, mostly collapsed, and a 32-row table, the plugin ships
+  on; needs `treeSway`) and `treeLeavesDensity` (18, 1..48: the plugin's PerTree). The plugin's other .ini keys
+  are constants. Advanced > World Effects: "Falling leaves", "Falling leaf amount".
+- **Shaders:** `Tools/CustomMpq/ShaderSrc/TreeLeavesVS.hlsl` (vs_3_0 / vs_4_0) and `TreeLeavesPS.hlsl` (ps_3_0 /
+  ps_4_0), built by `build_shaders.py TreeLeavesVS TreeLeavesPS` into `Tools/CustomMpq/Shaders/Vertex/vs_3_0`,
+  `Vertex/vs_4_0`, `Pixel/ps_3_0`, `Pixel/ps_4_0`. The plugin's three float4 vertex inputs are repacked into the
+  stock GxVBF_PNCT2 format (position, normal, colour, two texcoords), so no new vertex format on any backend.
+  The z remap the plugin needed for the engine's OpenGL-form projection is gone: the VS uses
+  `GxXformViewProjNativeTranspose` (camera-relative view x native projection), so positions go in camera relative.
+- **Files:** `WoW/Source/WorldClient/TreeLeaves.h/.cpp` (new), `Engine/Source/Model2/M2TreeSway.cpp`,
+  `WoW/Source/WorldClient/World.cpp` (1 call), `WorldParam_CVar.cpp`, `VideoOptionsAdvanced.lua`,
+  `Tools/CustomMpq/ShaderSrc/build_shaders.py` + the two .hlsl.
+- **Unverified:** not run in game on any backend. The native projection path (Sand's) and the camera-relative
+  view are read from the code, not seen on screen; the leaf colour read from BLP files is untested.

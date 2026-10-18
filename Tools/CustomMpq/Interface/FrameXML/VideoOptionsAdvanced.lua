@@ -83,6 +83,8 @@ local PAGES = {
 	  { "wmoNormalRepair", "check", "Repair building lighting", "Fixes dark wedges across flat floors and docks under a low sun. Buildings already loaded keep their old lighting until you relog or travel far away." },
 	  { "treeSway", "check", "Trees sway in the wind", "Living trees and bushes lean gently in passing gusts. Their shadows move with them." },
 	  { "treeSwayStrength", "slider", "Tree sway amount", "How far trees and bushes lean in the wind.", 0, 3, 0.05 },
+	  { "treeLeaves", "check", "Falling leaves", "Leaves drift down from the swaying trees nearest you, more when the wind gusts." },
+	  { "treeLeavesDensity", "slider", "Falling leaf amount", "How many leaves each tree can shed at once.", 1, 48, 1 },
 	  { "weatherSteadyRate", "check", "Steady weather", "Rain, snow and sand fall just as thickly at any frame rate." },
 	  { "selectionCircleStyle", "drop", "Target circle", "The look of the circle under your target.",
 	    { { "0", "Stock" }, { "1", "Arrow" }, { "2", "Arrow, no fill" }, { "3", "Ring" }, { "4", "Ring, no fill" } } },

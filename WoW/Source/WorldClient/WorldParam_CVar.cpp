@@ -17,6 +17,7 @@
 #include "Engine/Source/ConsoleBase/ConsoleVar.h"
 #include "Engine/Source/Model2/M2Scene.h"
 #include "Engine/Source/Model2/M2TreeSway.h"
+#include "WoW/Source/WorldClient/TreeLeaves.h"
 #include "Engine/Source/ConsoleBase/IConsole.h"
 #include "Engine/Source/Storm/H/storm.h"
 #include "WoW/Source/ConsoleDevice/ConsoleDevice.h"
@@ -680,6 +681,16 @@ void CWorldParam::Initialize() {
     CVar::Register("treeSwayStrength", "Tree sway amount (0..3, 1 = wxl-treewind)", 1, "1", [](CVar*, const char*, const char* value, void*) -> bool {
         float v = SStrToFloat(value);
         M2TreeSway::s_strength = v < 0.0f ? 0.0f : (v > 3.0f ? 3.0f : v);
+        return true;
+    }, CATEGORY_GRAPHICS, false, nullptr, false);
+    // TREELEAVES: not in 12340 (wxl-treewind Leaves.cpp). The nearest swaying trees shed leaves (needs treeSway).
+    CVar::Register("treeLeaves", "Swaying trees shed falling leaves", 1, "1", [](CVar*, const char*, const char* value, void*) -> bool {
+        TreeLeaves::s_enabled = SStrToInt(value) != 0;
+        return true;
+    }, CATEGORY_GRAPHICS, false, nullptr, false);
+    CVar::Register("treeLeavesDensity", "Falling leaf slots per tree (1..48, 18 = wxl-treewind)", 1, "18", [](CVar*, const char*, const char* value, void*) -> bool {
+        float v = SStrToFloat(value);
+        TreeLeaves::s_perTree = v < 1.0f ? 1.0f : (v > 48.0f ? 48.0f : v);
         return true;
     }, CATEGORY_GRAPHICS, false, nullptr, false);
 

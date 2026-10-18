@@ -5,6 +5,7 @@
 #include "Engine/Source/Model2/M2Shared.h"
 #include "Engine/Source/Model2/M2Data.h"
 #include "Engine/Source/Tempest/C44Matrix.h"
+#include "WoW/Source/WorldClient/TreeLeaves.h"
 
 namespace M2TreeSway {
 
@@ -70,7 +71,11 @@ C44Matrix World(const CM2Model* model) {
 
     float* m = reinterpret_cast<float*>(&world);
     float t = static_cast<float>(model->m_scene->m_time % 3600000u) * 0.001f;
-    State s = Evaluate(kind == Bush ? kBushWind : kTreeWind, m[12], m[13], t, s_strength);
+    const Wind& wind = kind == Bush ? kBushWind : kTreeWind;
+    State s = Evaluate(wind, m[12], m[13], t, s_strength);
+    // TREELEAVES: the trees that sway also shed (wxl-treewind ApplySway -> leaves::NoteTree): the unswayed base and this tree's wind.
+    if (kind == Tree)
+        TreeLeaves::NoteTree(model, m, s.seed, wind.gust, s.d1x, s.d1y, wind.speed, model->m_scene->m_time);
     float rot[9];
     TiltMatrix(s.tx, s.ty, rot);
 

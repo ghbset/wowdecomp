@@ -1,4 +1,5 @@
 #include "World.h"
+#include "WoW/Source/WorldClient/TreeLeaves.h"   // TREELEAVES
 #include <cstdlib>
 #include <new>
 #include <algorithm>
@@ -1936,6 +1937,7 @@ void CWorldScene::UpdateViewerLiquid() {
 // VERIFY: a0789a2d auto
 // OFFSET: 0x00790A80
 void CWorldScene::RenderLiquidPass() {
+    TreeLeaves::Draw();   // TREELEAVES: not in 12340 (wxl-treewind hooked this entry: after the solid models, before the water and the fog composite)
     CWorldScene::ApplyFogState();
 
     if ((CWorld::enables & Enable_Water) && CWorldScene::s_liquidRenderer) {
