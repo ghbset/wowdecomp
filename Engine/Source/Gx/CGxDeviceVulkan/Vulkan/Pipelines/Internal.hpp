@@ -140,6 +140,7 @@ namespace gxvk::vk::pipelines::detail
         uint32_t     layoutIndex;     ///< the set-0 layout (sampler-slot set)
         uint32_t     stencil;         ///< Draw::stencil (0: off)
         uint32_t     stencilMasks;    ///< Draw::stencilMasks, 0 when off
+        uint32_t     alphaToCoverage; ///< 0 / 1 (gxAlphaToCoverage, MSAA passes only)
     };
 
     struct Entry

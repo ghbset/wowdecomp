@@ -124,6 +124,9 @@ namespace gxvk::vk::pipelines
         uint32_t cull       = 0;
         uint32_t colourMask = 0xF;
         bool     wireframe  = false;
+        /// gxAlphaToCoverage: an alpha-tested opaque / alpha-key draw into the MSAA scene. The
+        /// shaders see it as a negative alpha reference and sharpen their alpha around it.
+        bool     alphaToCoverage = false;
 
         /// DECOMP: GxRs_Stencil*, 0 when the test is off: bit 0 on, the EGxStencilCmp at bit 1, the
         /// EGxStencilOp fail/zfail/pass at bits 5/9/13 (each 4 bits); masks = read | write << 8 | ref << 16.

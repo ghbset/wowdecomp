@@ -236,6 +236,7 @@ CGxDeviceD3d11::CGxDeviceD3d11() {
     this->m_backBufferSrv = nullptr;
     this->m_fanIndexBufferSize = 0;
     this->m_curRtv = nullptr;
+    this->m_curRtvSamples = 1;
     this->m_curDsv = nullptr;
     this->m_savedDsv = nullptr;
     memset(this->m_curVertexBuf, 0, sizeof(this->m_curVertexBuf));
@@ -1184,6 +1185,7 @@ void CGxDeviceD3d11::IReleaseBackBuffer() {
     }
 
     this->m_curRtv = nullptr;
+    this->m_curRtvSamples = 1;
     this->m_curDsv = nullptr;
     this->m_savedDsv = nullptr;
     SafeRelease(this->m_backBufferRtv);
@@ -1276,6 +1278,16 @@ void CGxDeviceD3d11::IBindRenderTargets() {
 
     this->m_curRtv = rtv;
     this->m_curDsv = dsv;
+    this->m_curRtvSamples = 1;
+
+    if (rtv) {
+        ID3D11Resource* r = nullptr;
+        rtv->GetResource(&r);
+        D3D11_TEXTURE2D_DESC rd;
+        static_cast<ID3D11Texture2D*>(r)->GetDesc(&rd);
+        r->Release();
+        this->m_curRtvSamples = rd.SampleDesc.Count;
+    }
 
     this->m_d3dContext->OMSetRenderTargets(rtv ? 1 : 0, rtv ? &rtv : nullptr, dsv);
 }
@@ -2997,6 +3009,17 @@ void CGxDeviceD3d11::IStateSync() {
 
     if (this->m_stateDirty & Dirty_Raster) {
         this->m_d3dContext->RSSetState(static_cast<ID3D11RasterizerState*>(this->IStateGet(State_Raster, &this->m_rsDesc, sizeof(this->m_rsDesc))));
+    }
+
+    // gxAlphaToCoverage: alpha-tested opaque / alpha-key draws into an MSAA target. Plain A2C: the SM4 pack's
+    // alpha test (discard below the reference) stays, alpha above it is not sharpened (the Vulkan path sharpens).
+    static CVar* a2cVar = CVar::Register("gxAlphaToCoverage", "Vulkan/D3D11: 1 smooths alpha-tested cut-outs (leaves, grass, fences) with alpha-to-coverage under MSAA (gxMultisample > 1)", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    const BOOL a2c = this->m_curRtvSamples > 1 && a2cVar && a2cVar->m_intValue != 0 && this->m_appRenderStates[GxRs_AlphaRef].m_value.m_data.i[0] > 0
+        && static_cast<uint32_t>(this->m_appRenderStates[GxRs_BlendingMode].m_value.m_data.i[0]) <= GxBlend_AlphaKey;
+
+    if (this->m_blendDesc.AlphaToCoverageEnable != a2c) {
+        this->m_blendDesc.AlphaToCoverageEnable = a2c;
+        this->m_stateDirty |= Dirty_Blend;
     }
 
     if (this->m_stateDirty & Dirty_Blend) {

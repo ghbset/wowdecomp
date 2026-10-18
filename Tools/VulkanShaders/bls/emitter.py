@@ -727,11 +727,17 @@ class Emitter(object):
                         P('    %s = %s;' % (sem, nm))
         else:
             P('    // The alpha test (GxRs_AlphaRef) is not in the bytecode: GREATEREQUAL against')
-            P('    // misc.x = alphaRef / 255, off when 0.')
-            P('    if (regs.misc.x > 0.0 && oC0.a < regs.misc.x) discard;')
+            P('    // misc.x = alphaRef / 255, off when 0; negative: gxAlphaToCoverage (alpha sharpened')
+            P('    // to a one-pixel ramp around -misc.x for the coverage mask).')
+            P(A2C_TEST.format(v='oC0'))
         P('}')
         return '\n'.join(L) + '\n'
 
+
+# The alpha test of every translated pixel module (misc.x = alphaRef / 255; < 0 = alpha-to-coverage).
+A2C_TEST = ('    if (regs.misc.x < 0.0) {{ {v}.a = clamp(({v}.a + regs.misc.x) / max(fwidth({v}.a), 1e-4) + 0.5, 0.0, 1.0); '
+            'if ({v}.a <= 0.0) discard; }}\n'
+            '    else if (regs.misc.x > 0.0 && {v}.a < regs.misc.x) discard;')
 
 RULES = {
     0: Emitter.r_nop, 1: Emitter.r_mov, 2: Emitter.r_add, 3: Emitter.r_sub, 4: Emitter.r_mad,
@@ -855,7 +861,7 @@ def companion_module(em, rec):
     P('    }')
     P('')
     P('    // The alpha test, the same discard as every translated pixel module.')
-    P('    if (regs.misc.x > 0.0 && cur.a < regs.misc.x) discard;')
+    P(A2C_TEST.format(v='cur'))
     if fixed_fog:
         P('')
         P('    // The fixed-function fog blend, on rgb only, with the vertex shader\'s oFog as the factor')

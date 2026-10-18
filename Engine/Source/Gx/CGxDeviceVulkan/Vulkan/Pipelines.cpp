@@ -245,6 +245,7 @@ namespace gxvk::vk::pipelines
         k.layoutIndex    = layoutIndex;
         k.stencil        = draw.stencil;
         k.stencilMasks   = draw.stencil ? draw.stencilMasks : 0u;
+        k.alphaToCoverage = (draw.alphaToCoverage && k.samples > 1) ? 1u : 0u;
 
         const Entry* entry = Lookup(k);
         if (!entry || entry->pipeline == VK_NULL_HANDLE)
