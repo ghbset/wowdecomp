@@ -74,6 +74,8 @@ SHADERS = {
     # Falling leaves (wxl-treewind Leaves.cpp, docs/BACKLOG_PORT.md): a vertex shader over a static PNCT2 buffer + its pixel shader
     'TreeLeavesVS': ('vs_3_0', 0, 0, 0, 0, 'TreeLeavesVS', {}),
     'TreeLeavesPS': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0), 0, 'TreeLeavesPS', {}),
+    # Cata ProcMagma lava/slime over the stock vsLiquidMagma (backlog #10, liquidProcMagma)
+    'LiquidProcMagma': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 1, 2, 3), 0, 'LiquidProcMagma', {}),
 }
 # VFogWater{1,2,3}: coa ps_vw_shade_low/mid/high (SSR_STEPS 0/16/32, cmake/WaterShaders.cmake)
 for _v, _ssr in ((1, 0), (2, 16), (3, 32)):

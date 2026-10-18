@@ -14,6 +14,7 @@
 #include "WoW/Source/WorldClient/World.h"
 #include "WoW/Source/WorldClient/OcclusionCull.h"
 #include "WoW/Source/WorldClient/VolumetricFog.h"
+#include "WoW/Source/LiquidSystem/Liquid.h"
 #include "Engine/Source/ConsoleBase/ConsoleVar.h"
 #include "Engine/Source/Model2/M2Scene.h"
 #include "Engine/Source/Model2/M2TreeSway.h"
@@ -708,6 +709,11 @@ void CWorldParam::Initialize() {
     }, CATEGORY_GRAPHICS, false, nullptr, false);
     CVar::Register("grassParting", "Grass parts around the player", 1, "1", [](CVar*, const char*, const char* value, void*) -> bool {
         CDetailDoodad::s_grassParting = SStrToInt(value) != 0;
+        return true;
+    }, CATEGORY_GRAPHICS, false, nullptr, false);
+    // BACKLOG #10: not in 12340. Cata 4.3.4 ProcMagma lava and slime (MaterialMagma.cpp); 0 = the stock flipbook.
+    CVar::Register("liquidProcMagma", "Cataclysm procedural lava and slime", 1, "1", [](CVar*, const char*, const char* value, void*) -> bool {
+        Liquid::s_procMagma = SStrToInt(value) != 0;
         return true;
     }, CATEGORY_GRAPHICS, false, nullptr, false);
 
