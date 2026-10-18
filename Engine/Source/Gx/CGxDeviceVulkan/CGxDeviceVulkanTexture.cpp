@@ -62,6 +62,7 @@ namespace {
         uint64_t       prePass      = 0;     ///< serial of the last frame a pre-pass fill named it in
         bool           genMips      = false; ///< a generated chain: level 0 uploaded, the rest derived
         uint32_t       start        = 0;     ///< the engine mip level that is image level 0
+        uint32_t       mipCount     = 0;     ///< ITexWHDStartEnd's mip count when the image was made
         uint32_t       dataFormat   = 0;     ///< EGxTexFormat the callback delivers (the storage format for a render target)
         bool           decode       = false; ///< the callback's texels are decoded to RGBA8 before the upload
         bool           renderTarget = false;
@@ -100,6 +101,7 @@ namespace {
         uint64_t recreated;       ///< records dropped by ITexForceRecreation
         uint64_t renamed;         ///< refills of an image this frame already sampled: a fresh copy filled ahead of the frame
         uint64_t deferred;        ///< inline refills left pending while an occlusion query pinned the pass
+        uint64_t reformatted;     ///< records remade for a recycled CGxTex whose data format or mip range changed
     };
     Stats g_stats;
 
@@ -379,6 +381,27 @@ void CGxDeviceVulkan::ITexMarkAsUpdated(CGxTex* texId) {
         return;
     }
 
+    // A record made for another texture: Services/Texture.cpp's CGxTex recycle cache
+    // (TextureAllocGxTex/TextureFreeGxTex) hands a freed CGxTex to a new texture of the same size,
+    // m_format and filter, swapping in m_dataFormat, flags and callback without m_needsCreation.
+    // D3D converts m_dataFormat -> m_format at every upload; this image IS the data format (and its
+    // mip range was fixed at create), so the refill would be refused (row bytes past the callback's
+    // pitch: the image stays born grey -- a glyph page's letters become coloured blocks) or decoded
+    // as the wrong format. Remade instead. Only after load/unload churn fills the recycle cache.
+    if (!texId->m_needsCreation && texId->m_apiSpecificData) {
+        const TexRec& r = *RecOf(texId);
+        uint32_t width;
+        uint32_t height;
+        uint32_t baseMip;
+        uint32_t mipCount;
+        this->ITexWHDStartEnd(texId, width, height, baseMip, mipCount);
+
+        if (r.dataFormat != static_cast<uint32_t>(r.renderTarget ? texId->m_format : texId->m_dataFormat) || r.start != baseMip || r.mipCount != mipCount) {
+            texId->m_needsCreation = 1;
+            g_stats.reformatted++;
+        }
+    }
+
     if (texId->m_needsCreation || !texId->m_apiSpecificData) {
         this->ITexCreate(texId);
     }
@@ -431,6 +454,7 @@ void CGxDeviceVulkan::ITexCreate(CGxTex* texId) {
 
     r->renderTarget = texId->m_flags.m_renderTarget != 0;
     r->start = baseMip;
+    r->mipCount = mipCount;
     r->dataFormat = r->renderTarget ? texId->m_format : texId->m_dataFormat;
 
     const bool cube = texId->m_target == GxTex_CubeMap;
@@ -828,7 +852,7 @@ void CGxDeviceVulkan::IReleaseTextures() {
 
     texture::Stats t;
     texture::GetStats(t);
-    Write(Debug, "vulkan: textures: %llu record(s), %llu image(s) (%llu without one), %llu render target(s), %llu cube(s), %llu decoded, %llu with a generated chain (%llu refused); %llu upload(s): %llu region(s) ahead of the frame, %llu inline, %llu batch(es), %llu chain(s), %llu KiB staged, %llu refused; %llu re-entered, %llu recreated, %llu renamed, %llu deferred; images made %llu / destroyed %llu, peak %u, %llu MiB asked",
+    Write(Debug, "vulkan: textures: %llu record(s), %llu image(s) (%llu without one), %llu render target(s), %llu cube(s), %llu decoded, %llu with a generated chain (%llu refused); %llu upload(s): %llu region(s) ahead of the frame, %llu inline, %llu batch(es), %llu chain(s), %llu KiB staged, %llu refused; %llu re-entered, %llu recreated, %llu renamed, %llu deferred, %llu reformatted; images made %llu / destroyed %llu, peak %u, %llu MiB asked",
           static_cast<unsigned long long>(g_stats.records), static_cast<unsigned long long>(g_stats.images),
           static_cast<unsigned long long>(g_stats.noImage), static_cast<unsigned long long>(g_stats.renderTargets),
           static_cast<unsigned long long>(g_stats.cubes), static_cast<unsigned long long>(g_stats.decoded),
@@ -838,6 +862,7 @@ void CGxDeviceVulkan::IReleaseTextures() {
           static_cast<unsigned long long>(g_stats.chains), static_cast<unsigned long long>(g_stats.bytes / 1024),
           static_cast<unsigned long long>(g_stats.refused), static_cast<unsigned long long>(g_stats.reentered),
           static_cast<unsigned long long>(g_stats.recreated), static_cast<unsigned long long>(g_stats.renamed),
-          static_cast<unsigned long long>(g_stats.deferred), static_cast<unsigned long long>(t.created),
+          static_cast<unsigned long long>(g_stats.deferred), static_cast<unsigned long long>(g_stats.reformatted),
+          static_cast<unsigned long long>(t.created),
           static_cast<unsigned long long>(t.destroyed), t.livePeak, static_cast<unsigned long long>(t.bytes >> 20));
 }
