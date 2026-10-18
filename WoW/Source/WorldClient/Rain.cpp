@@ -371,13 +371,8 @@ void Rain::UpdatePackets() {
         return;
     }
 
-    float tick = 0.016666999f;
-
-    if (FrameTime::s_tickTimeSec < 0.016666999f) {
-        tick = FrameTime::s_tickTimeSec;
-    }
-
-    float count = tick * this->m_particlesPerFrame;
+    static float s_spawnCarry;
+    float count = WeatherSpawnCount(this->m_particlesPerFrame, s_spawnCarry);
 
     if (count <= 1.0f) {
         return;

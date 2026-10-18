@@ -17,12 +17,38 @@
 #include "WoW/Source/WorldClient/DayNight.h"
 #include "WoW/Source/WorldClient/DayNight__DNInfo.h"
 #include "Engine/Source/Os/Time.h"
+#include "WoW/Source/WorldClient/FrameTime.h"
 
 // STATIC: 0x00ADF1F8
 float s_weatherDensity = 0.66f;
 
 // STATIC: 0x00CD8528
 uint8_t s_weatherTypeForced;
+
+static CVar* s_weatherSteadyRate;
+
+float WeatherSpawnCount(float rate, float& carry) {
+    float tick = FrameTime::s_tickTimeSec;
+
+    if (!s_weatherSteadyRate || !s_weatherSteadyRate->m_intValue) {
+        // Stock: the budget caps at 1/60 s and the remainder is dropped, so below 60 fps the
+        // weather thins (half at 30 fps) and a fraction is lost every frame.
+        carry = 0.0f;
+        return (tick < 0.016666999f ? tick : 0.016666999f) * rate;
+    }
+
+    // ponytail: 0.25 s cap so a hitch does not dump a burst; the rest of a longer stall is dropped.
+    carry += (tick < 0.25f ? tick : 0.25f) * rate;
+    float whole = floorf(carry);
+
+    if (whole < 1.0f) {
+        return 0.0f;
+    }
+
+    carry -= whole;
+    // UpdatePacket spawns lrintf(count - 0.5): +0.25 makes that exactly `whole`.
+    return whole + 0.25f;
+}
 
 // VERIFY: 63454e2e manual
 // OFFSET: 0x00783B30
@@ -467,6 +493,7 @@ Weather::Weather() {
 
     CVar::Register("weatherDensity", nullptr, 0, "2", CVarHandler_weatherDensity, CATEGORY_DEFAULT, false, nullptr, false);
     s_useShaders = CVar::Register("useWeatherShaders", nullptr, 0, "1", nullptr, CATEGORY_DEFAULT, false, nullptr, false);
+    s_weatherSteadyRate = CVar::Register("weatherSteadyRate", "Rain, snow and sand spawn at the same rate at any frame rate (0 = stock: thinner below 60 fps)", 0, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
 
     uint32_t forcedType = 0;
 
