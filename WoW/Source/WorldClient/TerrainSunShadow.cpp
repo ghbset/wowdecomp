@@ -26,6 +26,8 @@ constexpr float kMarchYards = 8000.0f;      // the CPU test's reach
 constexpr float kTopOfWorld = 4000.0f;      // no land above this
 
 CVar* s_cvar;
+CVar* s_maskCvar;       // shadowMask (Legion survey 2.7)
+CVar* s_softCvar;       // shadowSoft
 CGxTex* s_tex;
 float s_lit[kSize * kSize];
 uint32_t s_texels[kSize * kSize];
@@ -120,6 +122,18 @@ void Build(const float L[3]) {
 
 void RegisterCVars() {
     s_cvar = CVar::Register("gfxTerrainShadow", "The land (near terrain and the far WDL horizon) blocks the sun for the volumetric fog's sun shafts and glow and for the sun glare: 1 = on (default), 0 = off", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    s_maskCvar = CVar::Register("shadowMask", "Mountains (near terrain and the far WDL horizon) cast the sun's shadow onto the world: terrain, buildings and models (needs gfxTerrainShadow): 1 = on (default), 0 = off", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    s_softCvar = CVar::Register("shadowSoft", "Softness of the mountains' shadow edge (shadowMask), 0 = hard .. 4 = very soft, default 1", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+}
+
+bool MaskWanted() {
+    return (!s_maskCvar || s_maskCvar->m_intValue != 0) && Enabled();
+}
+
+float MaskSoftYards() {
+    // shadowSoft 0..4: the land's penumbra, yards under the lit height to full dark (kSoftYards each); 0 = 2 yd.
+    const float soft = s_softCvar ? s_softCvar->m_floatValue : 1.0f;
+    return std::max(kSoftYards * std::clamp(soft, 0.0f, 4.0f), 2.0f);
 }
 
 bool Enabled() {

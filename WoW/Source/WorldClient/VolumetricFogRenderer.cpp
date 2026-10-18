@@ -38,7 +38,10 @@ constexpr uint32_t kDitherRegister = 79;            // vf_common cDither (x on, 
 constexpr uint32_t kGradeRegister = 10;             // VFogGrade c10 strength, c11-c18 curve
 constexpr uint32_t kLocalLightRegister = 100;
 constexpr uint32_t kShadowRegister = 56;           // vf_shadow.hlsli c56-c61 band rows, c62 control, c63 terrain
+constexpr uint32_t kShadowMaskRegister = 10;      // VFogShadowMask c10-c13 (light, ambient + bias, diffuse, stock fog)
+constexpr float kShadowMaskSurfaceBias = 4.0f;     // yd: the ADT surface between WDL vertices may sit this far under them
 constexpr int kShadowStage = 5;                     // vf_shadow.hlsli s5 band 1, s6 band 2, s7 terrain
+constexpr int kMarchDepthStage = 8;                 // vf_composite.hlsli sMarchDepth: the depth the low-res fog was marched at
 constexpr uint32_t kSavedPixelRegisters = kLocalLightRegister + 4 * kMaxLocalLights;    // c0-c131
 static_assert(kSavedPixelRegisters == kPassSavedPixelRegisters, "SavedPassState holds the whole register range");
 constexpr float kDensityNoiseSize = 32.0f;          // coa noise_volume.h kDensityNoiseSize
@@ -70,6 +73,7 @@ struct Shaders {
     CGxShader* rayComposite;
     CGxShader* grade;
     CGxShader* depthCopy;               // VFogDepthCopy: the scene depth into an R32F target (fading cross-fade)
+    CGxShader* shadowMask;              // VFogShadowMask: the land's sun shadow over the opaque world (shadowMask)
 };
 
 struct Targets {
@@ -709,13 +713,15 @@ struct FogFrame {
 // CShadowQuery::Update refreshes every world frame), so vf_shadow.hlsli reads them as the receivers do. Off
 // (control 0) without the bands (extShadowQuality <= 2) and on D3D11 with R32F maps (hwPCF 0): its SM4 marches
 // sample s5/s6 with SampleCmp, which needs the comparison sampler only depth maps get.
-void ShadowConstants(const Config& cfg, const float viewToWorld[16], FogFrame& f) {
-    std::memset(f.shadow, 0, sizeof(f.shadow));
-    f.shadowMaps[0] = f.shadowMaps[1] = nullptr;
+// Also the shadow mask's (RenderShadowMask): the outputs are passed in, not a FogFrame.
+void ShadowConstants(bool shadowedSun, float canopy, const FrameInputs& in, const float viewToWorld[16], float (&shadow)[8][4],
+                     CGxTex* (&shadowMaps)[2], CGxTex*& terrainShadow) {
+    std::memset(shadow, 0, sizeof(shadow));
+    shadowMaps[0] = shadowMaps[1] = nullptr;
     // gfxTerrainShadow: the land (ADT and WDL) blocks the sun past the cascades, which terrain does not cast into.
-    TerrainSunShadow::Update(f.in.toLight, f.in.camPos, f.terrainShadow, f.shadow[7]);
+    TerrainSunShadow::Update(in.toLight, in.camPos, terrainShadow, shadow[7]);
     ShadowView view;
-    if (!cfg.shadowedSun || !CShadowCache::GetPublished(view) || (!view.pcf && f.device->DeviceApi() == GxApi_D3d11)) {
+    if (!shadowedSun || !CShadowCache::GetPublished(view) || (!view.pcf && g_theGxDevicePtr->DeviceApi() == GxApi_D3d11)) {
         return;
     }
 
@@ -730,15 +736,15 @@ void ShadowConstants(const Config& cfg, const float viewToWorld[16], FogFrame& f
             const C4Vector& row = view.rows[band + 1][k];
             const float col[4] = { row.x, row.y, row.z, row.w };
             for (int i = 0; i < 4; i++) {
-                f.shadow[band * 3 + k][i] = a[i * 4] * col[0] + a[i * 4 + 1] * col[1] + a[i * 4 + 2] * col[2] + a[i * 4 + 3] * col[3];
+                shadow[band * 3 + k][i] = a[i * 4] * col[0] + a[i * 4 + 1] * col[1] + a[i * 4 + 2] * col[2] + a[i * 4 + 3] * col[3];
             }
         }
-        f.shadowMaps[band] = view.map[band + 1];
+        shadowMaps[band] = view.map[band + 1];
     }
-    f.shadow[6][0] = 1.0f;
-    f.shadow[6][1] = static_cast<float>(view.pcf);
-    f.shadow[6][2] = cfg.canopy;
-    f.shadow[6][3] = static_cast<float>(view.size);
+    shadow[6][0] = 1.0f;
+    shadow[6][1] = static_cast<float>(view.pcf);
+    shadow[6][2] = canopy;
+    shadow[6][3] = static_cast<float>(view.size);
 }
 
 void BindShadows(const FogFrame& f, bool on) {
@@ -866,6 +872,7 @@ void CompositePass(FogFrame& f, CGxTex* fogResult) {
     Bind(2, nullptr);
     Bind(3, sceneCopy);
     Bind(4, s_targets.march);
+    Bind(kMarchDepthStage, f.depth);   // the upsample's tap depths; stays the behind depth for the fade over-pass
     // The full-res fallback march (vf_composite FogWithoutMatchingTap, at silhouettes no low-res tap matches) samples
     // the noise as the march does (coa leaves them bound). Unbound, Vulkan's white slot doubled the density there and
     // D3D's black one dropped it: a fog-coloured outline round objects in front of the fog.
@@ -886,6 +893,8 @@ void CompositePass(FogFrame& f, CGxTex* fogResult) {
         // wxl-vfog Renderer::DrawOverMarked: out = lerp(frame fogged behind, the unfogged copy fogged at the model's
         // own depth, alpha), the alpha in eight steps from the stencil's top three bits (step 0 is left as is).
         // The depth-stencil stays bound for the test; s0 is the R32F copy, so nothing samples it.
+        // s0 is the depth with the models, s8 (kMarchDepthStage) still the depth behind them that the fog was marched
+        // at: a model pixel matches no upsample tap and is fogged at its own depth, not handed the background's fog.
         // MSAA with the split: its near side (c80 = 0, nothing clipped) fogs a marked sample at the nearest depth of
         // its 3x3, i.e. the model's own where sample 0 is the background behind its edge (else a halo of background fog).
         compositeConstants[0][3] = static_cast<float>(f.fog.linear ? Blend_LinearOverSceneCopy : Blend_GammaOverSceneCopy);
@@ -909,6 +918,7 @@ void CompositePass(FogFrame& f, CGxTex* fogResult) {
     }
     Bind(9, nullptr);
     Bind(10, nullptr);
+    Bind(kMarchDepthStage, nullptr);
     BindShadows(f, false);
 }
 
@@ -1212,7 +1222,7 @@ bool RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg,
     f.rayW = rayW; f.rayH = rayH;
     f.rays = rays;
     f.copy = nullptr;
-    ShadowConstants(cfg, viewToWorld, f);
+    ShadowConstants(cfg.shadowedSun, cfg.canopy, in, viewToWorld, f.shadow, f.shadowMaps, f.terrainShadow);
     // c11.x, the march jitter (vf_integrate StepJitter): 1 animated (vfogTemporal), 0 none (coa), and 0.5 spatial only
     // when temporal is off but a sun shadow is tested: its compares at fixed mid-steps draw the shadow volumes as shells
     // round the camera scaled by each pixel's depth, a warped copy of the scene in the fog fixed to the screen.
@@ -1309,6 +1319,81 @@ bool RenderGrade(const float* curve32, float strength, int dither, uint32_t fram
     device->RsSet(GxRs_PixelShader, s_shaders.grade);
     DrawQuad(static_cast<uint32_t>(world.w), static_cast<uint32_t>(world.h), world.minX, world.maxX, world.minY, world.maxY);
     EndPasses(s_saved, live);
+    return true;
+}
+
+// shadowMask (Legion survey 2.7; docs/LEGION_PORT.md): the land's sun shadow (gfxTerrainShadow) over the opaque world,
+// one multiply pass from the scene depth, so every receiver (terrain, WMO, M2, the far WDL) darkens under a mountain
+// toward its ambient. The cascades are read only to leave what the stock receivers already darkened alone.
+// ponytail: after the receivers, not before them (no depth pre-pass): the receivers keep their own cascade sampling, so
+// the cascades are not softened here and a stock tree shadow is not widened; that needs a depth pre-pass or two-phase
+// opaque so the receivers can read the mask (SHADOW_PORT_PLAN S4a/S4b replaced by one mask read).
+bool RenderShadowMask(const FrameInputs& in, float softYards, bool stockFogInColour) {
+    CGxDevice* device = g_theGxDevicePtr;
+    if (!device || s_depthUnsupported || !Shader(s_shaders.shadowMask, "VFogShadowMask")) {
+        return false;
+    }
+    float viewToWorld[16];
+    float worldToView[16];
+    if (!WorldViewFromCameraRelative(in, viewToWorld, worldToView)) {
+        return false;
+    }
+    float shadow[8][4];
+    CGxTex* maps[2];
+    CGxTex* land = nullptr;
+    ShadowConstants(true, 0.0f, in, viewToWorld, shadow, maps, land);
+    if (!land) {
+        return false;     // gfxTerrainShadow 0, no WDL, or the light under the horizon: nothing to add
+    }
+    shadow[7][3] = 1.0f / std::max(softYards, 1.0f);
+
+    const WorldViewport vp = LiveWorldViewport();
+    bool transient = false;
+    CGxTex* depth = device->DeviceCopySceneDepth(&transient);
+    if (!depth || vp.w < 1.0f || vp.h < 1.0f || vp.x < 0.0f || vp.y < 0.0f || vp.x + vp.w > depth->m_width || vp.y + vp.h > depth->m_height) {
+        return false;
+    }
+
+    const float* proj = in.glProjection;
+    const float worldMinZ = in.viewport[4];
+    const float worldExtent = in.viewport[5] - in.viewport[4];
+    float common[9][4] = {
+        { vp.x, vp.y, vp.w, vp.h },
+        { 1.0f, 0.0f, 1.0f / depth->m_width, 1.0f / depth->m_height },
+        { proj[0], proj[5], proj[8], proj[9] },
+        { worldMinZ + worldExtent * (1.0f + proj[10]) * 0.5f, worldExtent * proj[14] * 0.5f, std::max(in.horizonBand[3], 1.0f), in.viewport[5] },
+        {}, {}, {}, {}, {},
+    };
+    std::memcpy(common[4], viewToWorld, sizeof(viewToWorld));
+    const auto channel = [](uint32_t argb, int shift) { return static_cast<float>((argb >> shift) & 0xFFu) / 255.0f; };
+    const float span = in.fogEnd - in.fogStart;
+    const float mask[4][4] = {
+        { in.toLight[0], in.toLight[1], in.toLight[2], 1.0f - in.interiorBlend },
+        { channel(in.ambientColor, 16), channel(in.ambientColor, 8), channel(in.ambientColor, 0), kShadowMaskSurfaceBias },
+        { channel(in.directColor, 16), channel(in.directColor, 8), channel(in.directColor, 0), 0.0f },
+        { in.fogStart, span > 1.0f ? 1.0f / span : 0.0f, stockFogInColour && span > 1.0f ? 1.0f : 0.0f, 0.0f },
+    };
+
+    static SavedPassState s_saved;
+    BeginPasses(s_saved);
+    GxRsSet(GxRs_BlendingMode, GxBlend_Mod);
+    GxRsSet(GxRs_ColorWrite, 7);
+    SetPs(0, &common[0][0], 9);
+    SetPs(kShadowMaskRegister, &mask[0][0], 4);
+    SetPs(kShadowRegister, &shadow[0][0], 8);
+    SetPs(kHorizonBandRegister, in.horizonBand, 1);
+    Bind(0, depth);
+    Bind(kShadowStage, maps[0]);
+    Bind(kShadowStage + 1, maps[1]);
+    Bind(kShadowStage + 2, land);
+    device->RsSet(GxRs_PixelShader, s_shaders.shadowMask);
+    device->DeviceSceneDepthBound(false);   // D3D9: s0 is the INTZ depth-stencil the back buffer uses
+    DrawQuad(static_cast<uint32_t>(vp.w), static_cast<uint32_t>(vp.h), vp.minX, vp.maxX, vp.minY, vp.maxY);
+    device->DeviceSceneDepthBound(true);
+    for (int stage = kShadowStage; stage < kShadowStage + 3; stage++) {
+        Bind(stage, nullptr);
+    }
+    EndPasses(s_saved, vp);
     return true;
 }
 
