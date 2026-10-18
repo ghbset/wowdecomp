@@ -9,6 +9,7 @@
 #include "WoW/Common/AaBsp.h"
 #include "WoW/Source/UIUtil/PortraitButton.h"
 #include "WoW/Source/WorldClient/Map.h"
+#include "WoW/Source/WorldClient/MapObjGroup.h"
 #include "WoW/Source/WorldClient/Types.h"
 #include "WoW/Source/WorldClient/World.h"
 #include "WoW/Source/WorldClient/OcclusionCull.h"
@@ -662,6 +663,12 @@ void CWorldParam::Initialize() {
     // BENILLA: not in 12340. Ground spell quads drape the terrain (CM2Scene IsGroundDecalBatch); 0 = stock flat planes.
     CVar::Register("groundDecals", "Ground spell effects follow the terrain", 1, "1", [](CVar*, const char*, const char* value, void*) -> bool {
         CM2Scene::s_groundDecals = SStrToInt(value) != 0;
+        return true;
+    }, CATEGORY_GRAPHICS, false, nullptr, false);
+    // BACKLOG: not in 12340. Rebuild building normals that disagree with their flat faces (wxl-light Normals.cpp);
+    // applies as each WMO group loads, so a change needs a relog or zone reload.
+    CVar::Register("wmoNormalRepair", "Repair building normals at load (relog to apply)", 1, "1", [](CVar*, const char*, const char* value, void*) -> bool {
+        CMapObjGroup::s_repairNormals = SStrToInt(value) != 0;
         return true;
     }, CATEGORY_GRAPHICS, false, nullptr, false);
 
