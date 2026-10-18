@@ -88,6 +88,8 @@ C3Vector DayNight::g_moonToward(0.0f, 0.0f, -1.0f);
 // shadows (CShadowQuery) and the fog's light (VolumetricFog) all come from one place: SetPlanets' g_sunToward /
 // g_moonToward and the body chosen here. 0 is the stock sky and light, exactly.
 static CVar* s_cvSunArc;
+static CVar* s_cvShadowFade;
+float DayNight::g_shadowFade = 1.0f;
 int32_t DayNight::g_lightBody;   // 0 the sun, 1 the moon: the body the light, the shadows and the fog come from
 
 bool DayNight::SunArc() {
@@ -2603,6 +2605,7 @@ void DayNight::LoadMap(int32_t mapId) {
     DayNight::s_lightFlags = 0;
     s_cvSkyCloudLOD = CVar::Register("SkyCloudLOD", nullptr, 0, "0", CWorldParam::CloudLODCallback, 1, false, nullptr, false);
     s_cvSunArc = CVar::Register("gfxSunArc", "Sun and moon cross the sky and the world's light comes from them (0 = stock)", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    s_cvShadowFade = CVar::Register("gfxShadowFade", "Shadows fade out as the sun or moon nears the horizon (0 = always full)", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     ConsoleCommandRegister("SkySunGlare", SkySunGlare, CATEGORY_GRAPHICS, "0, 1");
     DayNight::g_forceFullUpdate = 1;
 }
@@ -2840,6 +2843,17 @@ static float BodyWeight(float elevDeg) {
     return t * t * (3.0f - 2.0f * t);
 }
 
+// gfxShadowFade: the shadows' share, wxl-light Sun.cpp's g_shadowK curve (the light body's BodyWeight), less the other
+// body's weight and the swap margin, so it is 0 on the frame g_lightBody changes and the shadows change sides unseen.
+static float ShadowFade(float wLight, float wOther) {
+    if (!s_cvShadowFade || !s_cvShadowFade->m_intValue) {
+        return 1.0f;
+    }
+
+    const float f = (wLight - wOther - 0.02f) / 0.98f;
+    return f < 0.0f ? 0.0f : (f > 1.0f ? 1.0f : f);
+}
+
 // Not stock: picks DayNight::g_lightBody and, under gfxSunArc, makes the world's light that body's (wxl-light Sun.cpp
 // Handover). One light at a time: each body is worth BodyWeight of its height, the larger is the light (with a
 // margin, so they do not swap back and forth). The light comes from the body's own bearing, no lower than 10
@@ -2870,6 +2884,7 @@ static void PickLightBody() {
             body = 1;
         }
 
+        DayNight::g_shadowFade = ShadowFade(BodyWeight(elev[body]), BodyWeight(elev[1 - body]));
         return;
     }
 
@@ -2878,6 +2893,8 @@ static void PickLightBody() {
     if (w[1 - body] > w[body] + 0.02f) {
         body = 1 - body;
     }
+
+    DayNight::g_shadowFade = ShadowFade(w[body], w[1 - body]);
 
     const float k = w[body];
     const float el = (elev[body] > 10.0f ? elev[body] : 10.0f) * 0.017453292f;

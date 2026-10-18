@@ -1,3 +1,4 @@
+#include "WoW/Source/WorldClient/DayNight.h"
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -430,7 +431,11 @@ void CShadowCache::SetShadowMapGenericInterior(int32_t interior) {
         }
     }
 
-    GxShaderConstantsSet(GxSh_Pixel, 3, &cutoffPlane->x, 1);
+    // Not stock (gfxShadowFade): the M2/WMO receivers take lerp(shadow, lit, saturate(dot(pos, c3.xyz) + c3.w)), so
+    // the default plane's w is 1 - fade (exact). The interior/low-mode height plane keeps its own.
+    C4Vector faded = CShadowCache::s_cutoffPlaneDefault;
+    faded.w = 1.0f - DayNight::g_shadowFade;
+    GxShaderConstantsSet(GxSh_Pixel, 3, cutoffPlane == &CShadowCache::s_cutoffPlaneDefault ? &faded.x : &cutoffPlane->x, 1);
     g_theGxDevicePtr->RsSet(GxRs_Texture4, texture);
 }
 
@@ -473,7 +478,9 @@ void CShadowCache::SetShadowMapDetailDoodad() {
     }
 
     GxShaderConstantsSet(GxSh_Vertex, 23, &CShadowCache::s_shadowMatrices[0].x, 12);
-    GxShaderConstantsSet(GxSh_Pixel, 3, &CShadowCache::s_cutoffPlaneDefault.x, 1);
+    C4Vector faded = CShadowCache::s_cutoffPlaneDefault;   // gfxShadowFade, as SetShadowMapGenericInterior
+    faded.w = 1.0f - DayNight::g_shadowFade;
+    GxShaderConstantsSet(GxSh_Pixel, 3, &faded.x, 1);
     GxShaderConstantsSet(GxSh_Pixel, 4, &CShadowCache::s_sunDirViewSpace.x, 1);
     GxShaderConstantsSet(GxSh_Pixel, 5, &CShadowCache::s_pcfOffsets[0].x, 8);
     g_theGxDevicePtr->RsSet(GxRs_Texture4, TextureGetGxTex(CShadowCache::s_extDynShadow.m_textures[CShaderEffect::s_usePcfFiltering], 1, nullptr));

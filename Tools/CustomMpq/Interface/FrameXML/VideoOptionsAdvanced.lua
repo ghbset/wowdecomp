@@ -114,6 +114,7 @@ local PAGES = {
 	  { "gfxSunShadows", "check", "Shadows follow the sun", "Shadows fall from where the sun or moon is in the sky, long in the morning and evening and short at noon. Off uses the stock steep light." },
 	  { "gfxShadowSnap", "check", "Steady shadow edges", "Moves the shadow maps in whole pixels so shadow edges do not crawl or shimmer as you move." },
 	  { "gfxShadowAnchor", "check", "Steady shadows when jumping", "Keeps the shadow maps in place while you jump, so distant shadows do not shift or redraw." },
+	  { "gfxShadowFade", "check", "Shadows fade at dusk and dawn", "Shadows fade out as the sun or moon nears the horizon, so they never jump to the other side when the moon takes over." },
 	  { "gfxTerrainShadow", "check", "Mountains block the sun", "Hills and distant mountains block the sunlight in the fog and hide the sun's glare when the sun is behind them." },
 	  { "shadowMask", "check", "Mountain shadows on the world", "Hills and distant mountains cast the sun's shadow onto the ground, buildings and creatures. Needs \"Mountains block the sun\"." },
 	  { "shadowSoft", "slider", "Mountain shadow softness", "How soft the edge of a mountain's shadow is. 0 is hard.", 0, 4, 0.25 },

@@ -3,6 +3,7 @@
 // God rays: coa DrawGodRayMask / DrawGodRaysOverScene (renderer.cpp:1189-1260), always drawn after the world.
 // Not ported (doc section 1): the depth probe, logging.
 #include "WoW/Source/WorldClient/CataWater.h"
+#include "WoW/Source/WorldClient/DayNight.h"
 #include "WoW/Source/WorldClient/VolumetricFogModel.h"
 #include "WoW/Source/WorldClient/VolumetricFogWater.h"
 #include "WoW/Source/WorldClient/TerrainSunShadow.h"
@@ -1385,7 +1386,7 @@ bool RenderShadowMask(const FrameInputs& in, float softYards, bool stockFogInCol
     const auto channel = [](uint32_t argb, int shift) { return static_cast<float>((argb >> shift) & 0xFFu) / 255.0f; };
     const float span = in.fogEnd - in.fogStart;
     const float mask[4][4] = {
-        { in.toLight[0], in.toLight[1], in.toLight[2], 1.0f - in.interiorBlend },
+        { in.toLight[0], in.toLight[1], in.toLight[2], (1.0f - in.interiorBlend) * DayNight::g_shadowFade },   // gfxShadowFade
         { channel(in.ambientColor, 16), channel(in.ambientColor, 8), channel(in.ambientColor, 0), kShadowMaskSurfaceBias },
         { channel(in.directColor, 16), channel(in.directColor, 8), channel(in.directColor, 0), 0.0f },
         { in.fogStart, span > 1.0f ? 1.0f / span : 0.0f, stockFogInColour && span > 1.0f ? 1.0f : 0.0f, 0.0f },
