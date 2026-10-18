@@ -53,7 +53,12 @@ C3Vector CShadowCache::s_bandCentre;
 /// Not stock (gfxShadowSnap): moves a map centre to the nearest whole texel across the light, so the texel grid
 /// stays fixed on the world as the centre follows the player and shadow edges do not crawl. The axes are the ones
 /// CShadowQuery::MatrixCallback's look-at gives the map (looking along s_sunDir, `up` the band's m_dir); the
-/// centre's depth along the light is left as it is.
+/// centre's depth along the light is left as it is. The grid is anchored at a local reference (the player rounded
+/// to 256 yd, kept until they are 128 yd from it), not the world origin: a latch step rotates the axes, which slides
+/// an origin-anchored grid by |p| * angle (several texels 9000 yd out), but a local one by under 0.05 texel.
+static C3Vector s_snapRef;
+static int32_t s_haveSnapRef;
+
 static void SnapToTexels(C3Vector& p, float radius, const C3Vector& up) {
     if (!CShadowCache::s_texelSnap || !(radius > 0.0f) || !CShadowCache::s_shadowSize) {
         return;
@@ -66,8 +71,15 @@ static void SnapToTexels(C3Vector& p, float radius, const C3Vector& up) {
     const float texel = 2.0f * radius / CShadowCache::s_shadowSize;
     const C3Vector axes[2] = { C3Vector(view.a0, view.b0, view.c0), C3Vector(view.a1, view.b1, view.c1) };
 
+    float rx = p.x - s_snapRef.x, ry = p.y - s_snapRef.y, rz = p.z - s_snapRef.z;
+
+    if (!s_haveSnapRef || rx * rx + ry * ry + rz * rz > 128.0f * 128.0f) {
+        s_snapRef = C3Vector(std::floor(p.x / 256.0f + 0.5f) * 256.0f, std::floor(p.y / 256.0f + 0.5f) * 256.0f, std::floor(p.z / 256.0f + 0.5f) * 256.0f);
+        s_haveSnapRef = 1;
+    }
+
     for (const C3Vector& a : axes) {
-        float c = p.x * a.x + p.y * a.y + p.z * a.z;
+        float c = (p.x - s_snapRef.x) * a.x + (p.y - s_snapRef.y) * a.y + (p.z - s_snapRef.z) * a.z;
         float move = std::floor(c / texel + 0.5f) * texel - c;
         p.x += a.x * move;
         p.y += a.y * move;
@@ -125,6 +137,7 @@ float CShadowCache::s_shadowScale;
 // STATIC: 0x00D431D0
 C4Vector CShadowCache::s_pcfOffsets[8];
 C44Matrix CShadowCache::s_publishedView;
+int32_t CShadowCache::s_publishedRead;
 uint32_t CShadowCache::s_publishStamp;
 
 // STATIC: 0x00D43250
@@ -506,6 +519,10 @@ void CShadowCache::SetShadowMapDetailDoodad() {
 // OFFSET: 0x00874890
 void CShadowCache::GatherBands(CShadowCacheQueryData& data, const C3Vector& pos, CFrustum& frustum, int32_t useCullFrustum) {
     uint32_t frame = 0;
+    // Not stock: band 1 normally leaves out casters wholly inside band 0's box (stock receivers use band 0 there),
+    // but GetPublished's consumer (vfog's shafts) reads band 1 there, so while it read last frame band 1 keeps them.
+    const int32_t keepBand1 = CShadowCache::s_publishedRead;
+    CShadowCache::s_publishedRead = 0;
 
     if (CShadowCache::GetShadowMode() < SHADOW_VERY_HIGH) {
         C44Matrix identity;
@@ -569,7 +586,7 @@ void CShadowCache::GatherBands(CShadowCacheQueryData& data, const C3Vector& pos,
             CShadowCache::s_frustumCallback(data.m_frustums[i], data.m_matrices[i], band.m_dir, data, i);
             data.m_frustums[i].Extents(data.m_extents[i]);
 
-            if (i && data.m_active[i - 1]) {
+            if (i && data.m_active[i - 1] && !(i == 1 && keepBand1)) {
                 data.m_cullFrustums[i] = frustum;
                 data.m_useCullFrustum[i] = 1;
             } else {
@@ -653,7 +670,7 @@ void CShadowCache::GatherBands(CShadowCacheQueryData& data, const C3Vector& pos,
             CShadowCache::s_frustumCallback(data.m_frustums[i], data.m_matrices[i], band.m_dir, data, i);
             data.m_frustums[i].Extents(data.m_extents[i]);
 
-            data.m_useCullFrustum[i] = useCullFrustum;
+            data.m_useCullFrustum[i] = i == 1 && keepBand1 ? 0 : useCullFrustum;
 
             if (useCullFrustum) {
                 data.m_cullFrustums[i] = frustum;
@@ -1178,5 +1195,6 @@ int32_t CShadowCache::GetPublished(ShadowView& out) {
     out.size = CShadowCache::s_shadowSize;
     out.pcf = CShaderEffect::s_usePcfFiltering ? 1 : 0;
     out.stamp = CShadowCache::s_publishStamp;
+    CShadowCache::s_publishedRead = 1;
     return 1;
 }

@@ -89,6 +89,7 @@ class CShadowCache {
     static int32_t s_haveBandCentre;  // gfxShadowAnchor: the bands follow s_bandCentre instead of the viewer
     static C3Vector s_bandCentre;
     static C4Vector s_pcfOffsets[8];
+    static int32_t s_publishedRead;    // set by GetPublished, consumed by GatherBands (band 1 keeps band 0's casters)
     static C44Matrix s_publishedView;  // S3: PostUpdate's Gx view, for GetPublished
     static uint32_t s_publishStamp;
     static ShadowQueryCallback s_queryCallback;

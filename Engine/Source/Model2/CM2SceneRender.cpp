@@ -792,6 +792,11 @@ void CM2SceneRender::DrawBatchDoodad(M2Element* elements, uint32_t* indices) {
         instances = total;
     }
 
+    // Not stock: c31..c255 hold 75 bones; an over-sized skin (converted retail models) would write past them.
+    if (this->m_curSkinSection->m_boneCount * instances > 75) {
+        instances = std::max(1u, 75u / this->m_curSkinSection->m_boneCount);
+    }
+
     this->m_curShared->SetIndices();
 
     CGxBatch batch;

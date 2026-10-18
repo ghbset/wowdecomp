@@ -2960,6 +2960,11 @@ void CM2Model::RenderBatchShadowMap(int32_t untextured, M2Batch* batch, const CM
         instances = total;
     }
 
+    // Not stock: c31..c255 hold 75 bones; an over-sized skin (converted retail models) would write past them.
+    if (section->m_boneCount * instances > 75) {
+        instances = std::max(1u, 75u / section->m_boneCount);
+    }
+
     if (total > 1) {
         this->m_shared->SetIndices();
         this->m_shared->SetVertices(0);
@@ -3036,6 +3041,8 @@ void CM2Model::RenderModelBatchListShadowMap(int32_t untextured, const CModelBat
                 int32_t indexed = model->m_optGeo ? model->SetIndices() : shared->SetIndices();
 
                 if (!indexed || !shared->SetVertices(0)) {
+                    prevModel = nullptr;   // not stock: skip it (stock re-ran this entry and drew it with stale buffers)
+                    i += entry->m_count;
                     continue;
                 }
             }

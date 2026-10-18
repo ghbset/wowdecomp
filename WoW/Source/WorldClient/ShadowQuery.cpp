@@ -2,6 +2,7 @@
 #include "Engine/Source/ConsoleBase/ConsoleVar.h"
 #include "Engine/Source/ConsoleBase/Types.h"
 #include "Engine/Source/Storm/H/storm.h"
+#include <algorithm>
 #include <cmath>
 #include "Engine/Source/Model2/M2Light.h"
 #include "Engine/Source/ShaderEffect/ShadowCache.h"
@@ -40,6 +41,7 @@
 static CVar* s_cvSunShadows;
 static CVar* s_cvShadowSnap;
 static CVar* s_cvShadowAnchor;
+static CVar* s_cvShadowSlopeBias;
 
 // STATIC: 0x00D25300
 uint8_t CShadowQuery::s_stamp;
@@ -70,6 +72,7 @@ void CShadowQuery::Initialize() {
     s_cvSunShadows = CVar::Register("gfxSunShadows", "Shadows fall from the sun or moon in the sky (0 = stock steep light)", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvShadowSnap = CVar::Register("gfxShadowSnap", "Shadow maps move in whole texels so shadow edges do not crawl (0 = stock)", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvShadowAnchor = CVar::Register("gfxShadowAnchor", "Shadow cascades stay put while the player jumps (0 = stock)", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    s_cvShadowSlopeBias = CVar::Register("gfxShadowSlopeBias", "Extra shadow depth bias at a low sun, in band texels times cot(elevation) up to 3 (0 = stock)", 1, "1.5", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
 
     CShadowCache::Initialize();
 }
@@ -181,7 +184,7 @@ static bool SunShadowDir(C3Vector& out) {
     }
 
     uint32_t now = OsGetAsyncTimeMs();
-    bool step = !s_haveLatch || mode >= SHADOW_VERY_HIGH;
+    bool step = !s_haveLatch;   // (quality 5 latches too: a moving light slides the snapped texel grid every frame)
     bool jumped = false;
     const CShadowBand* bands = CShadowCache::s_extShadowBands;
 
@@ -192,7 +195,7 @@ static bool SunShadowDir(C3Vector& out) {
         float s = want.z * want.z / 0.25f;   // sin^2 against 30 degrees
         s = s < 0.1f ? 0.1f : (s > 1.0f ? 1.0f : s);
         float threshold = kLatchStep * s > kLatchFloor ? kLatchStep * s : kLatchFloor;
-        bool idle = bands[0].m_updateCount == 0 && bands[1].m_updateCount == 0;
+        bool idle = !cached || (bands[0].m_updateCount == 0 && bands[1].m_updateCount == 0);
         jumped = moved > kLatchJump;
         step = jumped || (moved > threshold && (idle || now - s_latchMs > kLatchWaitMs));
     }
@@ -349,6 +352,17 @@ void CShadowQuery::MatrixCallback(C3Vector& center, float radius, C44Matrix& mat
 
     float bias = CShaderEffect::s_usePcfFiltering ? 0.5f : 0.0f;
     float scale;
+
+    // Not stock (gfxShadowSlopeBias): the stock bias was tuned for a steep light. A sun-facing surface changes
+    // light depth by texel * cot(elevation) per texel and PCF looks ~1.5 texels away, so a low sun needs more in
+    // the wide bands. ponytail: constant slope term per band; a receiver normal offset is the proper fix.
+    if (band >= 0 && s_cvShadowSlopeBias && CShadowCache::s_textureSize[0] > 0.0f) {
+        const C3Vector& d = CShadowCache::s_sunDir;
+        float k = std::isfinite(s_cvShadowSlopeBias->m_floatValue) ? std::clamp(s_cvShadowSlopeBias->m_floatValue, 0.0f, 4.0f) : 0.0f;
+        float h = std::sqrt(d.x * d.x + d.y * d.y);
+        float cot = std::fabs(d.z) > 1e-4f ? std::min(h / std::fabs(d.z), 3.0f) : 3.0f;
+        bias += k * (2.0f * radius / CShadowCache::s_textureSize[0]) * cot;
+    }
 
     if (band == 0) {
         scale = 2.0f;

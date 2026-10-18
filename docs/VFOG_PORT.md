@@ -924,3 +924,25 @@ strength from 4 degrees up (S2). All in `PickLightBody` (DayNight.cpp); the shad
   `m_timeOfDay` while it is set. UI clock and `GetGameTime()` stay on server time.
 - S4 (mid colours / light0 not faded at the handover) not done.
 - Advanced page, Light & God Rays: all three. No shader changes; custom.MPQ rebuilt only for the Lua.
+
+## 2026-10-19: vfog38, shadow engine fixes (audit H1, M1, M2, L4, L5)
+
+- **H1, low-sun acne (gfxShadowSlopeBias, float, default 1.5, 0 = stock, range 0-4).** `CShadowQuery::MatrixCallback`
+  adds `k * texel_band * min(cot(elev), 3)` yd to each band's receiver depth bias (bands 0-2; the unit map keeps the
+  stock bias). `elev` comes from `CShadowCache::s_sunDir` (the true sun direction, not the capped shading one), texel
+  is `2r / s_textureSize`. At 12° and 2048 that is +0.7 / +2.8 yd for bands 1 / 2; contact shadows detach up to about
+  that much in band 2. Advanced > Shadows slider "Low sun shadow bias". C++ only; the proper fix is a receiver
+  normal offset (not done).
+- **M1, crawl at quality 5.** The sun latch now applies at quality 5 too (`step` no longer forced every frame; the
+  `idle` gate only applies to cached modes). `SnapToTexels` anchors its grid at a local reference (player rounded to
+  256 yd, re-anchored once they are 128 yd away) instead of the world origin, so a latch step slides the grid by
+  under 0.05 texel. A re-anchor costs one sub-texel shift.
+- **M2, band-0 shaft leak.** `GetPublished` sets `CShadowCache::s_publishedRead`; `GatherBands` consumes it, and while
+  a consumer (vfog's shafts) read the bands last frame, band 1 no longer excludes casters wholly inside band 0's box
+  (VH and cached paths). Costs more band-1 draws only while vfogShadowedSun is on. Band 2 still excludes band 1's,
+  and band 1's 2 yd minimum caster radius is unchanged.
+- **L4.** `RenderModelBatchListShadowMap` skips an entry whose buffers fail to bind (`i += m_count`, and `prevModel`
+  reset so the next entry retries) instead of drawing it with stale buffers.
+- **L5.** `RenderBatchShadowMap` and `CM2SceneRender::DrawBatchDoodad` cap instances so bones stay within c31..c255
+  (75 bones). Stock skins (<= 64 bones) never hit it.
+- No shader changes. custom.MPQ rebuilt only for the Lua page.
