@@ -4,6 +4,7 @@
 // Not ported (doc section 1): the depth probe, logging.
 #include "WoW/Source/WorldClient/VolumetricFogModel.h"
 #include "WoW/Source/WorldClient/VolumetricFogWater.h"
+#include "WoW/Source/WorldClient/TerrainSunShadow.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -36,8 +37,8 @@ constexpr uint32_t kSampleSideRegister = 80;        // VFogCompositeSplit c80 (c
 constexpr uint32_t kDitherRegister = 79;            // vf_common cDither (x on, y frame)
 constexpr uint32_t kGradeRegister = 10;             // VFogGrade c10 strength, c11-c18 curve
 constexpr uint32_t kLocalLightRegister = 100;
-constexpr uint32_t kShadowRegister = 56;           // vf_shadow.hlsli c56-c61 band rows, c62 control
-constexpr int kShadowStage = 5;                     // vf_shadow.hlsli s5 band 1, s6 band 2
+constexpr uint32_t kShadowRegister = 56;           // vf_shadow.hlsli c56-c61 band rows, c62 control, c63 terrain
+constexpr int kShadowStage = 5;                     // vf_shadow.hlsli s5 band 1, s6 band 2, s7 terrain
 constexpr uint32_t kSavedPixelRegisters = kLocalLightRegister + 4 * kMaxLocalLights;    // c0-c131
 static_assert(kSavedPixelRegisters == kPassSavedPixelRegisters, "SavedPassState holds the whole register range");
 constexpr float kDensityNoiseSize = 32.0f;          // coa noise_volume.h kDensityNoiseSize
@@ -197,6 +198,7 @@ void __fastcall OnDeviceRestored() {
     DestroyFadeDepth();
     DestroyTex(s_densityNoise);
     DestroyTex(s_authoredNoise);
+    TerrainSunShadow::Release();
     s_depthUnsupported = false;     // MSAA may have changed with the reset
 }
 
@@ -696,7 +698,9 @@ struct FogFrame {
     uint32_t rayW, rayH;
     bool rays;
     CGxTex* copy;       // CompositePass: the scene copy (linear blend, rays, fade), or nullptr
-    float shadow[7][4]; // vf_shadow.hlsli c56-c62 (control x = 0: sun unshadowed)
+    float shadow[8][4]; // vf_shadow.hlsli c56-c62 (control x = 0: sun unshadowed), c63 terrain (w = 0: off)
+    CGxTex* terrainShadow;  // s7, gfxTerrainShadow
+    bool sunShadowed;       // a cascade or the terrain shadow is tested (c62.x, c63.w)
     CGxTex* shadowMaps[2];
 };
 
@@ -708,6 +712,8 @@ struct FogFrame {
 void ShadowConstants(const Config& cfg, const float viewToWorld[16], FogFrame& f) {
     std::memset(f.shadow, 0, sizeof(f.shadow));
     f.shadowMaps[0] = f.shadowMaps[1] = nullptr;
+    // gfxTerrainShadow: the land (ADT and WDL) blocks the sun past the cascades, which terrain does not cast into.
+    TerrainSunShadow::Update(f.in.toLight, f.in.camPos, f.terrainShadow, f.shadow[7]);
     ShadowView view;
     if (!cfg.shadowedSun || !CShadowCache::GetPublished(view) || (!view.pcf && f.device->DeviceApi() == GxApi_D3d11)) {
         return;
@@ -737,10 +743,11 @@ void ShadowConstants(const Config& cfg, const float viewToWorld[16], FogFrame& f
 
 void BindShadows(const FogFrame& f, bool on) {
     if (on) {
-        SetPs(kShadowRegister, &f.shadow[0][0], 7);
+        SetPs(kShadowRegister, &f.shadow[0][0], 8);
     }
     Bind(kShadowStage, on ? f.shadowMaps[0] : nullptr);
     Bind(kShadowStage + 1, on ? f.shadowMaps[1] : nullptr);
+    Bind(kShadowStage + 2, on ? f.terrainShadow : nullptr);
 }
 
 void MarchPass(const FogFrame& f) {
@@ -800,9 +807,9 @@ void MarchPass(const FogFrame& f) {
 // Returns the fog the composite reads: the march, or with vfogTemporal the filtered history.
 CGxTex* TemporalPass(const FogFrame& f) {
     // ---- temporal + history depth (coa FilterWithHistory :980-1004) ---------------------------------
-    // The shadowed sun (shadow[6].x) counts as changing light: its shafts are in the air, not on the surface the history
+    // A shadowed sun (cascades or terrain) counts as changing light: its shafts are in the air, not on the surface the history
     // is reprojected by, so where the orbit camera's move shifts them the stale ones are rejected, not blended in (ghosts).
-    bool adaptive = f.lit || s_history.localLightCount > 0 || f.cfg.noiseAmount > 0.0f || f.noisy || f.shadow[6][0] > 0.0f;
+    bool adaptive = f.lit || s_history.localLightCount > 0 || f.cfg.noiseAmount > 0.0f || f.noisy || f.sunShadowed;
     CGxTex* fogResult = s_targets.march;
     if (f.temporal) {
         int read = s_history.index;
@@ -1144,9 +1151,7 @@ bool RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg,
     NoiseRegisters(fog, noiseRegisters);
 
     float celestialLight[4] = { toLightInView[0], toLightInView[1], toLightInView[2], fog.lightAboveHorizon };
-    // c11.x, the march jitter (vf_integrate StepJitter): animated with vfogTemporal; without it, spatial only when the
-    // shadowed sun may be on (its fixed mid-step compares draw shells of the scene in the fog), else none (coa).
-    float march[4] = { temporal ? 1.0f : cfg.shadowedSun ? 0.5f : 0.0f, fog.maxDistance, fog.horizonStart, fog.farClip };
+    float march[4] = { temporal ? 1.0f : 0.0f, fog.maxDistance, fog.horizonStart, fog.farClip };
     float localControl[4] = { static_cast<float>(lightCount), marchLightLimit, cfg.localLightPhase, 0.0f };
 
     // Sun position for c98 and the god rays (coa :1338-1347), and vfogSunMarker's dot (coa sunInFront).
@@ -1208,6 +1213,13 @@ bool RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg,
     f.rays = rays;
     f.copy = nullptr;
     ShadowConstants(cfg, viewToWorld, f);
+    // c11.x, the march jitter (vf_integrate StepJitter): 1 animated (vfogTemporal), 0 none (coa), and 0.5 spatial only
+    // when temporal is off but a sun shadow is tested: its compares at fixed mid-steps draw the shadow volumes as shells
+    // round the camera scaled by each pixel's depth, a warped copy of the scene in the fog fixed to the screen.
+    f.sunShadowed = f.shadow[6][0] > 0.0f || f.shadow[7][3] > 0.0f;
+    if (!temporal && f.sunShadowed) {
+        f.march[0] = 0.5f;
+    }
 
     // ---- state: everything below is undone at the end --------------------------------------------
     static SavedPassState s_saved;     // 2 KB of constants, off the stack
@@ -1310,6 +1322,7 @@ void RendererShutdown() {
     DestroyFadeDepth();
     DestroyTex(s_densityNoise);
     DestroyTex(s_authoredNoise);
+    TerrainSunShadow::Release();
 
     if (g_theGxDevicePtr) {
         CGxShader** all = &s_shaders.march[0][0][0];

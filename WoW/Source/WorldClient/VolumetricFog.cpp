@@ -1,5 +1,6 @@
 // VFOG WP7: frame driver, CVars and engine inputs (port of coa-vfog src/hooks.cpp, src/engine.cpp,
 // src/engine_lights.cpp onto the decomp's own symbols). Not in the 3.3.5a binary; docs/VFOG_PORT.md sections 1, 7, 8.
+#include "WoW/Source/WorldClient/TerrainSunShadow.h"
 #include "WoW/Source/WorldClient/VolumetricFog.h"
 #include <algorithm>
 #include <cmath>
@@ -295,7 +296,8 @@ void ReadDayNightInputs(FrameInputs& in) {
 // coa engine.cpp: the visible sun or moon sprite, relative to the sky centre (DNInfo::m_cameraPos).
 void ReadLightDirection(FrameInputs& in) {
     const DayNight::DNInfo& info = DayNight::g_dnInfo;
-    in.lightIsMoon = !(info.m_dayProgression >= kSunDayStart && info.m_dayProgression <= kSunDayEnd);
+    // gfxSunArc: the body the world's light and the shadows come from (DayNight::g_lightBody); else coa's hours.
+    in.lightIsMoon = DayNight::SunArc() ? DayNight::g_lightBody == 1 : !(info.m_dayProgression >= kSunDayStart && info.m_dayProgression <= kSunDayEnd);
     const C3Vector& body = in.lightIsMoon ? DayNight::g_planets.m_moon.m_position : DayNight::g_planets.m_sun.m_position;
     float d[3] = { body.x - info.m_cameraPos.x, body.y - info.m_cameraPos.y, body.z - info.m_cameraPos.z };
     const float len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
@@ -550,6 +552,7 @@ void RegisterCVars() {
     s_cvars.godRays = CVar::Register("vfogGodRays", "Volumetric fog god rays from the bright sky around the sun: 0 = off, 1 = on (default), up to 4 = strength", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.shadowedSun = CVar::Register("vfogShadowedSun", "Volumetric fog sun shafts through the scene: the fog's sunlight is shadowed by trees, buildings and terrain casters (needs shadows above low): 1 = on (default), 0 = off", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.canopy = CVar::Register("vfogCanopy", "Volumetric fog darkening of the haze glow in sun shadow (under trees, beside buildings) while vfogShadowedSun is on, 0..1 (default 0.5)", 1, "0.5", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    TerrainSunShadow::RegisterCVars();
 
     auto reg = [](const char* name, const char* help, const char* value) {
         return CVar::Register(name, help, 1, value, nullptr, CATEGORY_GRAPHICS, false, nullptr, false);

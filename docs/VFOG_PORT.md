@@ -739,6 +739,73 @@ casters: lit where the sun reaches, dark in shadow. The screen-space god rays (V
 custom.MPQ: 5121 files; the SPIR-V set regenerated (1633 records + 2 companions, spirv-val clean; only the 72 VFogMarch/
 VFogComposite* records changed), the SM4 pack from shadow-s1, our ps_3_0/ps_4_0 fog shaders rebuilt.
 
+## 2026-10-18: terrain sun occlusion (`fix-sunocc`)
+
+User report: sunlight seemed to come through mountains, near ADT and far WDL. Each sun-light effect was checked:
+
+| Effect | Verdict | Fix |
+|---|---|---|
+| Screen-space god rays (VFogRayMask/Blur/Composite) | Not a leak. The WDL horizon writes depth in its own band [0.998046875, 0.9990234375] (`RenderHorizon`, `GxXformSetViewport`), the Vulkan viewport keeps that min/max depth (`IPlaceD3d`), and the mask counts only d > c99.y as sky; ADT terrain is in the main band. The depth copy is taken after `RenderHorizon`. A mountain is never sky in the mask. | none |
+| S3 shadowed fog shafts (`vf_shadow.hlsli`) | **Leak.** Terrain does not cast into the engine cascades, and they end at 640 yd, so the fog's sun in-scatter (diffuse x phase, strongest toward the sun) lit the air in a mountain's shadow: a glow "through" the ridge at sunset. | `gfxTerrainShadow` heightfield, below |
+| vfog haze glow toward the sun (emissive, `vfogCanopy`) | **Leak**, the same term (`CanopyScale(sun)`). | the same visibility now feeds it |
+| Stock sun glare, hardware query path (`DNGlare::GetQueryOcclusion`, `occlusion` 1) | Works: the planet billboard is drawn at sky depth [0.999, 1] against the scene depth, so ADT and WDL both hide it; the Vulkan backend implements the queries (`CGxDeviceVulkanQuery.cpp`). | none |
+| Stock sun glare, point path (`GetPointOcclusion`, `occlusion` 0 or no queries) | **Leak** for the far land: `World::Intersect` only sees loaded ADTs. | a WDL ray march toward the sun first (`TerrainSunShadow::Visibility`) |
+| Water sun glint (VFogWater `SunVisibility()`) | Unshadowed (a per-frame scalar, no cascades or land). | not done, see below |
+
+**Heightfield** (`WoW/Source/WorldClient/TerrainSunShadow.cpp`, new): the map's WDL outer vertices (33.3 yd, every
+tile of the map, the same heights the horizon draws) in a 256 x 256 Gr1616F texture round the camera (+-4.2 km,
+texel centres on the vertices). Each texel holds the lowest world z the light reaches there, swept one texel line
+at a time from the light's side: `lit(p) = max(H(q), lit(q)) - drop`, q one step toward the light (the minor-axis
+offset is <= 1 texel, so q is in the line already done; one pass, ~65k texels x 4 height reads). Rebuilt when the
+light turns more than ~0.26 degrees, the camera drifts 16 texels (533 yd), or the WDL changes; otherwise untouched.
+WDL covers the near ADT land too (it is made from it), coarser: shadows are mountain scale, 16 yd soft.
+
+**Fog** (`vf_shadow.hlsli`): `SunVisibility = TerrainSunVisibility * CascadeSunVisibility` (the S3 body, renamed).
+c63 = (u0, v0, k, 1/soft), `uv = c63.xy - c63.z * world.yx`, s7 the texture (point outside it: lit). One tap per
+march step and in the composite's edge re-march. ps_3_0 temps: the noisy march (N) now takes the one-tap band-2
+cascade compare (`VF_SHADOW_TAPS` 1, was 2) to fit the land tap; the lit noisy march (L + N, only the texels a local
+light reaches) and the lit noisy composite have no land tap (`VF_TERRAIN` 0). It works with shadows off or low
+(the cascade part is then 1). `ShadowConstants` uploads c56-c63 and binds s5-s7.
+
+**CVar** `gfxTerrainShadow` (default 1), Video Options > Advanced > Shadows ("Mountains block the sun"). 0 = as
+vfog25.
+
+Not done (follow-up): the land's shadow on the world itself (terrain, WMO and M2 receivers). The receivers are stock
+shaders (SHADOW_PORT_PLAN S4a/S4b, not started); they would read the same texture (s7-like slot, c63-like row)
+as one more multiply on their shadow term. Water glint: multiply VFogWater's `SunVisibility()` per pixel the same way.
+
+## 2026-10-18: sun and moon alignment (`gfxSunArc`, branch `sunalign`)
+
+The user: "the sunlight doesn't align with the sun's position". Stock, the world light (`SetDirection`) keeps a
+45 degree bearing at 20..37 degrees up all day and all night, while the sun disc (`SetPlanets`) climbs to 85
+degrees at noon and sets; the shadows (gfxSunShadows) and the fog (`ReadLightDirection`) already follow the disc,
+so the shading disagreed with all three.
+
+- **What wxl-pack did** (wxl-light `Sun.cpp`, arc on by default): rewrote the engine's sun/moon key tables so the
+  discs cross the sky east-south-west (sun 62, moon 55 degrees at the top; the moon's horizon keys moved to
+  07:18/19:36 so it rises and sets within minutes of the sun), then after the day-night step set the world light
+  from the disc that is up (`Handover`: one body at a time by a smoothstep weight of its height, at least 10
+  degrees up, direct light faded into ambient near the horizon). Shadows and fog followed the same body.
+- **Here**: the same tables and handover, in source. `DayNight::SetPlanets` picks the arc tables;
+  `PickLightBody` (end of `DayNight::UpdateLighting`) chooses `DayNight::g_lightBody` and, under the arc, writes
+  `m_light1.m_dir` and the faded diffuse/ambient. The **one source of truth** is `g_sunToward` / `g_moonToward`
+  (SetPlanets) plus `g_lightBody`: the disc, sun glare and cloud lighting sit there, the world light is taken from
+  it, `CShadowQuery` (gfxSunShadows) reads `g_lightBody` instead of its own "sun while up" rule, and
+  `VolumetricFog::ReadLightDirection` (in-scatter, S3 shafts, screen-space god rays, water glint) takes
+  `lightIsMoon` from it instead of coa's fixed hours. So all of them change sides on the same frame.
+- **Differences from the removed N1** (e258860, reverted in 8bf6eed with no reason recorded): N1 measured the bodies
+  from disc minus camera (float noise at world coordinates), kept a second body choice in `CShadowQuery` that
+  could disagree with the light's, left the fog and clouds on their fixed hours, added `gfxDebugHour`, and changed
+  the shadow cache (`CShadowCache::s_bandRedraw` and a latch, since restored separately by shadow-s2). This
+  change touches only DayNight, the body pick in ShadowQuery and the fog's `lightIsMoon`; no shadow-cache code.
+- **Handover** (simulated over a day): sun to moon at about 20:15 and moon to sun at about 06:21, each once, with the
+  winning body's weight 0.07 / 0.03, so the direct light is almost gone when the side changes. Known gap, as
+  before: the shadows have no dusk/dawn fade (wxl-light faded them in its own receivers), so they swap sides once
+  at that moment.
+- **CVar** `gfxSunArc` (default 1, live): Video Options > Advanced > Light & God Rays, "Sun and moon cross the sky".
+  0 is the stock sky and light exactly (only the shadow body pick remains, with its old rule).
+
+custom.MPQ: 5121 files, only `Interface\FrameXML\VideoOptionsAdvanced.lua` differs from vfog26's (SPIR-V set from sunocc). No shaders.
 ## 2026-10-18: vfog28, temporal filter and the shadowed sun (fix-temporal)
 
 What the user saw on vfog25 (Vulkan, Wow64): with `vfogTemporal` on, turning the camera left a ghosted image of the
@@ -755,12 +822,12 @@ on screen.
 - Cause 1 (`vf_integrate.hlsli` `StepJitter`): with `vfogTemporal 0` the march has no jitter (coa's fixed mid-step
   sample). Since vfog25 every step also does an on/off shadow compare (`SunVisibility`), so at fixed fractions of each
   ray's length the shafts are sampled as shells round the camera, scaled by the pixel's depth: the shadow pattern
-  turned into a warped copy of the scene behind, fixed to the screen. Now, with temporal off and the shadowed sun on,
-  the step is dithered in space alone (IGN of the low-res texel, no frame term; c11.x = 0.5 selects it, 1 = animated, 0 = none); without `vfogShadowedSun` it stays 0.5.
+  turned into a warped copy of the scene behind, fixed to the screen. Now, with temporal off and a sun shadow tested (cascades
+  c62.x or `gfxTerrainShadow` c63.w), the step is dithered in space alone (IGN of the low-res texel, no frame term; c11.x = 0.5 selects it, 1 = animated, 0 = none); without either it stays 0.5.
 - Cause 2 (`VolumetricFogRenderer.cpp` `TemporalPass`): the shafts are in the air, but the history is reprojected by
   the surface depth, so when the orbit camera moves as it turns, the old shafts land in the wrong place. Their
   jittered four-tap compares make the 3x3 clamp range too wide to catch them, so they blended in as a ghost until the
-  camera stopped. The shadowed sun now counts as changing light (`adaptive`, `cTemporal.z`): the existing lighting
+  camera stopped. A shadowed sun (either) now counts as changing light (`adaptive`, `cTemporal.z`): the existing lighting
   reject (`LightingHistoryWeight`) drops history that differs from the current frame by more than 20-40 %.
 - `SameSettings` now also compares `shadowedSun` and `canopy`, so toggling them resets the history.
 
