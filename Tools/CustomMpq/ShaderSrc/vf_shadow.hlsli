@@ -11,18 +11,38 @@ float4 cShadowControl : register(c62);   // (on, hardware compare, canopy streng
 
 // VF_SHADOW_TAPS: 2 = the nearest of bands 1/2 with the filtered compare (default), 1 = one tap in band 2 only (the
 // hardware compare, or one point compare on R32F; the march jitter and the temporal filter smooth it), 0 = unshadowed.
-// ps_3_0's 32 temps: the lit noisy march (L + N) takes 1, the composites' full-res edge fallback 1, and the lit noisy
-// composite 0 (it is at the limit without, as its authored noise, VFogComposite.hlsl).
+// ps_3_0's 32 temps: the noisy marches (N, L + N) take 1 (N since gfxTerrainShadow's tap), the composites' full-res
+// edge fallback 1, and the lit noisy composite 0 (it is at the limit without, as its authored noise, VFogComposite.hlsl).
 #ifndef VF_SHADOW_TAPS
-#if LOCAL_LIGHTS && VF_NOISE
+#if VF_NOISE
 #define VF_SHADOW_TAPS 1
 #else
 #define VF_SHADOW_TAPS 2
 #endif
 #endif
+// VF_TERRAIN: the land's tap (gfxTerrainShadow), wherever a cascade tap is but the lit noisy march (L + N: over the
+// temps with it; it runs only on the texels a local light reaches, the N march does the rest).
+#ifndef VF_TERRAIN
+#define VF_TERRAIN (VF_SHADOW_TAPS > 0 && !(LOCAL_LIGHTS && VF_NOISE))
+#endif
 
 sampler2D sShadowNear : register(s5);
 sampler2D sShadowFar : register(s6);
+
+// gfxTerrainShadow (TerrainSunShadow.cpp): the land, near ADT and far WDL, which does not cast into the cascades. s7
+// holds the lowest world z the light reaches per WDL vertex (+-4.2 km round the camera); a point under it is dark,
+// over kSoftYards (1 / c63.w). c63 = (u0, v0, k, 1 / soft): uv = c63.xy - c63.z * world.yx; w = 0: off. Clamped.
+float4 cTerrainShadow : register(c63);
+sampler2D sTerrainShadow : register(s7);
+
+float TerrainSunVisibility(float3 viewPosition)
+{
+    [branch] if (cTerrainShadow.w <= 0)
+        return 1;
+    // The texture's border texels are "nothing blocks" (TerrainSunShadow.cpp), so the clamp lights points past it.
+    float3 world = mul(float4(viewPosition, 1), cViewToWorld).xyz;
+    return saturate(1 - (tex2Dlod(sTerrainShadow, float4(cTerrainShadow.xy - cTerrainShadow.z * world.yx, 0, 0)).x - world.z) * cTerrainShadow.w);
+}
 
 bool ShadowedSun()
 {
@@ -63,7 +83,7 @@ float3 ShadowCoord(int band, float3 viewPosition)
 }
 
 // edgeJitter (0..1) dithers the seam between the bands so it does not show as a line.
-float SunVisibility(float3 viewPosition, float edgeJitter)
+float CascadeSunVisibility(float3 viewPosition, float edgeJitter)
 {
     [branch] if (!ShadowedSun() || VF_SHADOW_TAPS == 0)
         return 1;
@@ -82,5 +102,20 @@ float SunVisibility(float3 viewPosition, float edgeJitter)
     [branch] if (edge >= 1)
         return 1;
     return lerp(1, ShadowCompare(sShadowFar, q), saturate((1 - edge) * 10));
+#endif
+}
+
+// The sun's visibility at a fog sample: the land's (VF_TERRAIN), then the cascades' (trees, buildings, models).
+float SunVisibility(float3 viewPosition, float edgeJitter)
+{
+#if VF_TERRAIN
+    float sun = TerrainSunVisibility(viewPosition);
+#if VF_SHADOW_TAPS > 0
+    [branch] if (sun > 0)
+        sun *= CascadeSunVisibility(viewPosition, edgeJitter);
+#endif
+    return sun;
+#else
+    return CascadeSunVisibility(viewPosition, edgeJitter);
 #endif
 }

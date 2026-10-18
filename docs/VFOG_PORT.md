@@ -739,6 +739,41 @@ casters: lit where the sun reaches, dark in shadow. The screen-space god rays (V
 custom.MPQ: 5121 files; the SPIR-V set regenerated (1633 records + 2 companions, spirv-val clean; only the 72 VFogMarch/
 VFogComposite* records changed), the SM4 pack from shadow-s1, our ps_3_0/ps_4_0 fog shaders rebuilt.
 
+## 2026-10-18: terrain sun occlusion (`fix-sunocc`)
+
+User report: sunlight seemed to come through mountains, near ADT and far WDL. Each sun-light effect was checked:
+
+| Effect | Verdict | Fix |
+|---|---|---|
+| Screen-space god rays (VFogRayMask/Blur/Composite) | Not a leak. The WDL horizon writes depth in its own band [0.998046875, 0.9990234375] (`RenderHorizon`, `GxXformSetViewport`), the Vulkan viewport keeps that min/max depth (`IPlaceD3d`), and the mask counts only d > c99.y as sky; ADT terrain is in the main band. The depth copy is taken after `RenderHorizon`. A mountain is never sky in the mask. | none |
+| S3 shadowed fog shafts (`vf_shadow.hlsli`) | **Leak.** Terrain does not cast into the engine cascades, and they end at 640 yd, so the fog's sun in-scatter (diffuse x phase, strongest toward the sun) lit the air in a mountain's shadow: a glow "through" the ridge at sunset. | `gfxTerrainShadow` heightfield, below |
+| vfog haze glow toward the sun (emissive, `vfogCanopy`) | **Leak**, the same term (`CanopyScale(sun)`). | the same visibility now feeds it |
+| Stock sun glare, hardware query path (`DNGlare::GetQueryOcclusion`, `occlusion` 1) | Works: the planet billboard is drawn at sky depth [0.999, 1] against the scene depth, so ADT and WDL both hide it; the Vulkan backend implements the queries (`CGxDeviceVulkanQuery.cpp`). | none |
+| Stock sun glare, point path (`GetPointOcclusion`, `occlusion` 0 or no queries) | **Leak** for the far land: `World::Intersect` only sees loaded ADTs. | a WDL ray march toward the sun first (`TerrainSunShadow::Visibility`) |
+| Water sun glint (VFogWater `SunVisibility()`) | Unshadowed (a per-frame scalar, no cascades or land). | not done, see below |
+
+**Heightfield** (`WoW/Source/WorldClient/TerrainSunShadow.cpp`, new): the map's WDL outer vertices (33.3 yd, every
+tile of the map, the same heights the horizon draws) in a 256 x 256 Gr1616F texture round the camera (+-4.2 km,
+texel centres on the vertices). Each texel holds the lowest world z the light reaches there, swept one texel line
+at a time from the light's side: `lit(p) = max(H(q), lit(q)) - drop`, q one step toward the light (the minor-axis
+offset is <= 1 texel, so q is in the line already done; one pass, ~65k texels x 4 height reads). Rebuilt when the
+light turns more than ~0.26 degrees, the camera drifts 16 texels (533 yd), or the WDL changes; otherwise untouched.
+WDL covers the near ADT land too (it is made from it), coarser: shadows are mountain scale, 16 yd soft.
+
+**Fog** (`vf_shadow.hlsli`): `SunVisibility = TerrainSunVisibility * CascadeSunVisibility` (the S3 body, renamed).
+c63 = (u0, v0, k, 1/soft), `uv = c63.xy - c63.z * world.yx`, s7 the texture (point outside it: lit). One tap per
+march step and in the composite's edge re-march. ps_3_0 temps: the noisy march (N) now takes the one-tap band-2
+cascade compare (`VF_SHADOW_TAPS` 1, was 2) to fit the land tap; the lit noisy march (L + N, only the texels a local
+light reaches) and the lit noisy composite have no land tap (`VF_TERRAIN` 0). It works with shadows off or low
+(the cascade part is then 1). `ShadowConstants` uploads c56-c63 and binds s5-s7.
+
+**CVar** `gfxTerrainShadow` (default 1), Video Options > Advanced > Shadows ("Mountains block the sun"). 0 = as
+vfog25.
+
+Not done (follow-up): the land's shadow on the world itself (terrain, WMO and M2 receivers). The receivers are stock
+shaders (SHADOW_PORT_PLAN S4a/S4b, not started); they would read the same texture (s7-like slot, c63-like row)
+as one more multiply on their shadow term. Water glint: multiply VFogWater's `SunVisibility()` per pixel the same way.
+
 ## 2026-10-18: sun and moon alignment (`gfxSunArc`, branch `sunalign`)
 
 The user: "the sunlight doesn't align with the sun's position". Stock, the world light (`SetDirection`) keeps a
@@ -770,4 +805,4 @@ so the shading disagreed with all three.
 - **CVar** `gfxSunArc` (default 1, live): Video Options > Advanced > Light & God Rays, "Sun and moon cross the sky".
   0 is the stock sky and light exactly (only the shadow body pick remains, with its old rule).
 
-custom.MPQ: 5121 files, only `Interface\FrameXML\VideoOptionsAdvanced.lua` differs from vfog25's. No shaders.
+custom.MPQ: 5121 files, only `Interface\FrameXML\VideoOptionsAdvanced.lua` differs from vfog26's (SPIR-V set from sunocc). No shaders.
