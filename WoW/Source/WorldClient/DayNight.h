@@ -350,6 +350,7 @@ extern C3Vector g_sunToward;    // not stock: unit, toward the sun disc (SetPlan
 extern C3Vector g_moonToward;   // not stock: unit, toward the moon disc
 extern int32_t g_lightBody;      // not stock: 0 the sun, 1 the moon is the light (shadows, fog follow it)
 bool SunArc();                  // not stock: gfxSunArc
+float DebugHour();              // not stock: debugHour, 0..24 or -1 (the game clock)
 extern float g_shadowFade;       // not stock: gfxShadowFade, 0..1 how much of the sun/moon shadow is shown (PickLightBody)
 extern DNSunGlare g_sunGlare;
 extern DNMoonGlare g_moonGlare;

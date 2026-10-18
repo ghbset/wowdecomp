@@ -1405,6 +1405,22 @@ void CWorldScene::ApplyFogState() {
 void DayNight::Update(int32_t reset, const C3Vector* cameraPos) {
     float glare = 0.0f;
     DNInfo* info = DayNight::GetInfo();
+
+    // Not stock: debugHour overrides the clock both feeders (WorldFrame, the minute callback) just wrote; a new hour
+    // resets the fog accumulators as a time jump would.
+    static float s_lastDebugHour = -1.0f;
+    const float debugHour = DayNight::DebugHour();
+
+    if (debugHour >= 0.0f) {
+        info->m_dayProgression = debugHour / 24.0f;
+        info->m_timeOfDay = static_cast<int32_t>(debugHour * 60.0f);
+    }
+
+    if (debugHour != s_lastDebugHour) {
+        s_lastDebugHour = debugHour;
+        reset = 1;
+    }
+
     int32_t fogMode = static_cast<uint32_t>(g_theGxDevicePtr->Caps().m_shaderTargets[0]) > 1;
 
     if (s_mapId < 530) {

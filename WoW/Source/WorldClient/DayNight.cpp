@@ -89,12 +89,20 @@ C3Vector DayNight::g_moonToward(0.0f, 0.0f, -1.0f);
 // shadows (CShadowQuery) and the fog's light (VolumetricFog) all come from one place: SetPlanets' g_sunToward /
 // g_moonToward and the body chosen here. 0 is the stock sky and light, exactly.
 static CVar* s_cvSunArc;
+static CVar* s_cvSunArcMatch;       // not stock: gfxSunArcMatch (PickLightBody)
+static CVar* s_cvSunArcDawnRamp;    // not stock: gfxSunArcDawnRamp (PickLightBody)
+static CVar* s_cvDebugHour;         // not stock: debugHour (DayNight::DebugHour)
 static CVar* s_cvShadowFade;
 float DayNight::g_shadowFade = 1.0f;
 int32_t DayNight::g_lightBody;   // 0 the sun, 1 the moon: the body the light, the shadows and the fog come from
 
 bool DayNight::SunArc() {
     return s_cvSunArc && s_cvSunArc->m_intValue;
+}
+
+// Not stock: debugHour, the hour (0-24) the sky, light and skyboxes are drawn for, or -1 for the game clock.
+float DayNight::DebugHour() {
+    return s_cvDebugHour && s_cvDebugHour->m_floatValue >= 0.0f ? fmodf(s_cvDebugHour->m_floatValue, 24.0f) : -1.0f;
 }
 
 // STATIC: 0x00D38EA8
@@ -1879,7 +1887,7 @@ void DayNight::RenderSky(CPortalView* view) {
         s_skyScene->AdvanceTime(elapsed);
         s_skySceneTimeMs += elapsed;
 
-        int32_t minutes = g_clientGameTime.GetHourAndMinutes();
+        int32_t minutes = DayNight::DebugHour() >= 0.0f ? static_cast<int32_t>(info.m_timeOfDay) : g_clientGameTime.GetHourAndMinutes();   // not stock: debugHour
 
         for (int32_t i = 0; i < 3; i++) {
             DayNight::SyncSkyAnimWithTime(info.m_blendSkybox[i], minutes);
@@ -2606,6 +2614,9 @@ void DayNight::LoadMap(int32_t mapId) {
     DayNight::s_lightFlags = 0;
     s_cvSkyCloudLOD = CVar::Register("SkyCloudLOD", nullptr, 0, "0", CWorldParam::CloudLODCallback, 1, false, nullptr, false);
     s_cvSunArc = CVar::Register("gfxSunArc", "Sun and moon cross the sky and the world's light comes from them (0 = stock)", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    s_cvSunArcMatch = CVar::Register("gfxSunArcMatch", "Under gfxSunArc, light the ground no steeper than the stock light for the hour (0 = full arc height, 1 = stock)", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    s_cvSunArcDawnRamp = CVar::Register("gfxSunArcDawnRamp", "Under gfxSunArc, degrees of sun/moon height over which its direct light fades in at dawn and out at dusk (4 = old ramp)", 1, "15", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    s_cvDebugHour = CVar::Register("debugHour", "Draw the sky, light, sun, moon, shadows and skyboxes for this hour (0-24); -1 = the game clock", 0, "-1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvShadowFade = CVar::Register("gfxShadowFade", "Shadows fade out as the sun or moon nears the horizon (0 = always full)", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     ConsoleCommandRegister("SkySunGlare", SkySunGlare, CATEGORY_GRAPHICS, "0, 1");
     DayNight::g_forceFullUpdate = 1;
@@ -2838,8 +2849,8 @@ void DayNight::SetColors() {
 }
 
 /// How much of its light a body gives by its own height: all of it from 4 degrees up, none a degree under.
-static float BodyWeight(float elevDeg) {
-    float t = (elevDeg + 1.0f) / 5.0f;
+static float BodyWeight(float elevDeg, float topDeg = 4.0f) {
+    float t = (elevDeg + 1.0f) / (topDeg + 1.0f);
     t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
     return t * t * (3.0f - 2.0f * t);
 }
@@ -2899,8 +2910,22 @@ static void PickLightBody() {
     DayNight::g_shadowFade = ShadowFade(w[body], w[1 - body]);
     CShadowCache::SetShadowFade(DayNight::g_shadowFade);
 
-    const float k = w[body];
-    const float el = (elev[body] > 10.0f ? elev[body] : 10.0f) * 0.017453292f;
+    // gfxSunArcDawnRamp (not wxl-light): the direct light comes in over -1..ramp degrees instead of -1..4, so the dawn and
+    // dusk colours do not hit sun-facing walls at full strength from 4 degrees up. The pick and the shadows keep -1..4.
+    const float ramp = s_cvSunArcDawnRamp ? s_cvSunArcDawnRamp->m_floatValue : 0.0f;
+    const float k = ramp > 4.0f ? BodyWeight(elev[body], ramp) : w[body];
+
+    // gfxSunArcMatch (not wxl-light): the DBC colours were authored for the stock light's 20-37 degrees, so the shading
+    // height is capped at the stock light's this hour (SetDirection just wrote it); the bearing still follows the body.
+    float m = s_cvSunArcMatch ? s_cvSunArcMatch->m_floatValue : 0.0f;
+    m = m < 0.0f ? 0.0f : (m > 1.0f ? 1.0f : m);
+    float zs = -DayNight::g_dnInfo.m_light1.m_dir.z;
+    zs = zs < -1.0f ? -1.0f : (zs > 1.0f ? 1.0f : zs);
+    const float elStock = asinf(zs) * 57.29578f;
+    float elCap = elStock + (1.0f - m) * (elev[body] > elStock ? elev[body] - elStock : 0.0f);
+    elCap = elCap > 10.0f ? elCap : 10.0f;
+    const float elDeg = elev[body] < 10.0f ? 10.0f : (elev[body] > elCap ? elCap : elev[body]);
+    const float el = elDeg * 0.017453292f;
     const float h = sqrtf(dir[body].x * dir[body].x + dir[body].y * dir[body].y);
     DNLightState& light = DayNight::g_dnInfo.m_light1;
 
@@ -2914,7 +2939,7 @@ static void PickLightBody() {
         return;
     }
 
-    const float share = sinf(el) * 0.6f + 0.1f;
+    const float share = sinf(el) * (0.6f + 0.4f * m) + 0.1f * (1.0f - m);   // gfxSunArcMatch: what flat ground lost, sin(el)
     uint8_t* d[3] = { &light.m_diffuse.r, &light.m_diffuse.g, &light.m_diffuse.b };
     uint8_t* a[3] = { &light.m_ambient.r, &light.m_ambient.g, &light.m_ambient.b };
 

@@ -905,3 +905,22 @@ engine with `CShadowCache::SetShadowFade` (Engine does not include WoW headers).
 
 Rebuild: `terrain_fade.py --xlate /root/d3d11-port/shader-xlate`, then `build_shaders.py`, translate_shaders.py,
 build_custom_mpq.py (the pack from shadow-s1).
+
+## 2026-10-19: vfog37, gentler sun and debugHour (sun-match)
+
+The arc's light climbed to 62 degrees while the DBC colours were authored for the stock light's 20-37 degrees, so open
+ground got 25-47 % more direct light from 10:00 to 15:00 (audit S1), and dawn colours hit east-facing walls at full
+strength from 4 degrees up (S2). All in `PickLightBody` (DayNight.cpp); the shadows keep the true sun direction.
+
+- `gfxSunArcMatch` (saved, default 1, 0..1): caps the *shading* elevation at the stock light's for the hour.
+  `elStock = asin(-stockDir.z)`, `elCap = max(elStock + (1-m)·max(elBody-elStock, 0), 10)`,
+  `el = clamp(elBody, 10, elCap)`; the bearing still follows the body. 0 = vfog36 behaviour.
+  Same CVar also does S3: the handover's ambient share is `sin(el)·(0.6+0.4m) + 0.1·(1-m)` (= sin el at m = 1).
+- `gfxSunArcDawnRamp` (saved, default 15, degrees): the direct-light weight is `smoothstep(-1, ramp, elBody)` instead of
+  `smoothstep(-1, 4, elBody)`; ≤ 4 = old ramp. The body pick (hysteresis) and gfxShadowFade keep the 4-degree weights.
+- `debugHour` (not saved, default -1): 0-24 draws that hour. Applied at the top of `DayNight::Update` (World.cpp), the
+  common point of both clock feeders, overriding `m_dayProgression`/`m_timeOfDay` (also over MapRec's override and the
+  noon player flag); a change forces the reset path (fog accumulators). The skybox M2 sync (`DayNight::Render`) uses
+  `m_timeOfDay` while it is set. UI clock and `GetGameTime()` stay on server time.
+- S4 (mid colours / light0 not faded at the handover) not done.
+- Advanced page, Light & God Rays: all three. No shader changes; custom.MPQ rebuilt only for the Lua.
