@@ -218,4 +218,8 @@ class MapWeather {
     /* 0195 */ uint8_t unused_0195[3];
 };
 
+// benilla port (weatherSteadyRate): this frame's drop/flake/grain count for a per-second rate.
+// 1 = dt-accumulated with the fraction carried (same rate at any frame rate); 0 = stock min(dt, 1/60) * rate.
+float WeatherSpawnCount(float rate, float& carry);
+
 #endif
