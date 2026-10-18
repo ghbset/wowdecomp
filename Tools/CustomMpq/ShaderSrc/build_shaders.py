@@ -88,11 +88,12 @@ for _q, _steps in ((1, 16), (2, 24), (3, 32)):
             SHADERS['VFogMarch' + _suffix] = ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 5, 6, 7, *_march_noise), 0,
                                               'VFogMarch', _defs)
             SHADERS['VFogComposite' + _suffix] = ('ps_3_0', TEXCOORD0, COLOR0,
-                                                  samplers(0, 1, 3, 4, 5, 6, 7, *_composite_noise), 0, 'VFogComposite',
+                                                  samplers(0, 1, 3, 4, 5, 6, 7, 8, *_composite_noise), 0, 'VFogComposite',
                                                   _defs)
+            # s8: the march's depth for the upsample taps (vf_composite sMarchDepth)
             # MSAA sample split (coa vf_composite_split, vfogMsaaSplit): the same composite per silhouette side
             SHADERS['VFogCompositeSplit' + _suffix] = ('ps_3_0', TEXCOORD0, COLOR0,
-                                                       samplers(0, 1, 3, 4, 5, 6, 7, *_composite_noise), 0,
+                                                       samplers(0, 1, 3, 4, 5, 6, 7, 8, *_composite_noise), 0,
                                                        'VFogComposite',
                                                        dict(_defs, SPLIT=1))
 
