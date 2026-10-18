@@ -36,7 +36,9 @@ int32_t CM2Scene::s_groundDecals = 1;
 // BENILLA: not in 12340 (M2GroundDecal.h). A single-texture, non-env batch of a Spells\ model that is
 // world-planted or on the Base (19) or root attachment, one bone at full weight that is not billboarded,
 // whose 4 vertices are a flat ground rectangle. Chest-anchored quads (ProtectionFrom*) stay geometry.
-static int32_t IsGroundDecalBatch(CM2Model* model, const M2Batch* batch, const M2SkinSection* section) {
+// Most ground spell quads (Consecration, Flamestrike, Blizzard, Death and Decay) already carry the stock
+// projected flag 4; DrawBatchProj asks this again so they get the decal slab too, not the stock +-2.
+int32_t CM2Scene::IsGroundDecalBatch(CM2Model* model, const M2Batch* batch, const M2SkinSection* section) {
     if (section->m_vertexCount != 4 || batch->m_textureCount != 1 || (!(batch->m_shader & 0x8000) && (batch->m_shader & 0x80))) {
         return 0;
     }

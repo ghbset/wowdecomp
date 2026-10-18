@@ -669,11 +669,13 @@ void CM2SceneRender::DrawBatchProj() {
         return;
     }
 
-    // BENILLA: a batch without the projected flag is a ground spell quad CM2Scene redirected here
-    // (IsGroundDecalBatch). It always draws (not only under projectedTextures), keeps its texture
-    // animation, and its slab reaches as far as the quad is wide (benilla's fit_frame), so a slope up
-    // to 45 degrees stays inside the box.
-    int32_t groundDecal = !(this->m_curBatch->m_flags & 4);
+    // BENILLA: a ground spell quad (CM2Scene::IsGroundDecalBatch): either one CM2Scene redirected here
+    // (no projected flag) or a stock flag-4 one (Consecration, Flamestrike, Blizzard, Death and Decay all
+    // ship flag 4, whose stock slab is only +-2 yards, so hills clip them). It always draws (not only
+    // under projectedTextures), keeps its texture animation, and its slab reaches as far as the quad is
+    // wide (benilla's fit_frame), so a slope up to 45 degrees stays inside the box.
+    int32_t groundDecal = !(this->m_curBatch->m_flags & 4)
+        || (CM2Scene::s_groundDecals && CM2Scene::IsGroundDecalBatch(this->m_curModel, this->m_curBatch, this->m_curSkinSection));
     float pad = 2.0f;
 
     if (groundDecal) {

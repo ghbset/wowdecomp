@@ -89,6 +89,8 @@ class CM2Scene {
     static uint32_t s_optFlags;
     static int32_t s_groundDecals;   // BENILLA: CVar groundDecals, not in 12340
 
+    static int32_t IsGroundDecalBatch(CM2Model* model, const M2Batch* batch, const M2SkinSection* section);  // BENILLA
+
     static void AnimateThread(void* param);
     static void __stdcall ComputeElementShaders(M2Element* element);
     static int32_t SortAdditiveParticles(uint32_t a, uint32_t b, const void* param);

@@ -629,7 +629,11 @@ run stock effects that already ship.
   (benilla's ground anchor; chest-anchored quads such as ProtectionFrom* stay geometry); one texture, not
   env-mapped; 4 vertices on one non-billboarded bone at full weight; a flat axis-aligned XY rectangle at model
   z in [-0.01, 1.0] (`M2GroundDecal.h`, benilla's thresholds).
-- `DrawBatchProj`, for those batches only: draws whatever `projectedTextures` says (stock flag-4 batches
+- vfog20: most ground spell quads already carry flag 4 (Consecration's disc and 23-yard floor, Flamestrike,
+  Blizzard_Spawn, DeathAndDecay_Area_Runes), so the `!projected` gate never saw them and they kept the stock
+  ±2-yard slab: hills clipped them and `groundDecals` changed nothing. `DrawBatchProj` now runs
+  `CM2Scene::IsGroundDecalBatch` on flag-4 batches too.
+- `DrawBatchProj`, for those batches only: draws whatever `projectedTextures` says (other flag-4 batches
   still obey it), multiplies the batch's texture animation into the tex matrix, and pads the box in z by the
   quad's width (benilla `fit_frame`: ±2·max half-extent) instead of ±2, so slopes to 45° stay inside.
 - CVar `groundDecals` (default 1; 0 = stock flat planes).
