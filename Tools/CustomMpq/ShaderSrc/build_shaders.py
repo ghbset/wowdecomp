@@ -25,6 +25,7 @@ GPU waves VFogWave{Evolve,Fft,Surface,Mip,Pack}.
 Grass wind (wxl-grasswind, MULTI): Shaders/Vertex/vs_3_0|vs_4_0/DetailDoodad.bls, the stock grass VS's 6 permutations.
 Fading models (wxl-vfog 0.6.3): VFogDepthCopy. Legion FFX post: LegionPost{0,1,2}. Legion SSAO: LegionSsao{,Box,Bilateral,Apply}. Legion heat haze (refraction): LegionRefraction. Land shadow mask (shadowMask): VFogShadowMask. Lamps (lightMode): LegionLights. MSAA sample split (coa): VFogSilhouette and VFogCompositeSplit{Q}[L][N].
 Soft particles (wxl-light Soft.cpp): SoftParticle{0,1}.
+Caustics (wxl-water): VFogCausticsAbove / VFogCausticsUnder.
 """
 import argparse
 import concurrent.futures
@@ -95,6 +96,10 @@ SHADERS = {
     'LegionSsaoApply': ('ps_3_0', TEXCOORD0, COLOR0, samplers(1), 0, 'LegionSsao', {'PASS': 3}),
     # Legion refraction (docs/LEGION_PORT.md): heat haze over tagged fire emitters; s0 scene depth, s1 scene copy
     'LegionRefraction': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 1), 0, 'LegionRefraction', {}),
+    # caustics (wxl-water caustics, docs/BACKLOG_PORT.md): over the shaded water (bed + water depth), and under water
+    # (scene depth, + the tint); s5/s6 the sun shadow bands (vf_shadow.hlsli)
+    'VFogCausticsAbove': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 1, 5, 6), 0, 'VFogCaustics', {'UNDER': 0}),
+    'VFogCausticsUnder': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 5, 6), 0, 'VFogCaustics', {'UNDER': 1}),
 }
 # Cata water (waterStyle 1, docs/BACKLOG_PORT.md "Cata water"): the ProcWater VS and ProcWaterAbove / Below PS,
 # drawn by the liquid material in place of vsLiquidWater / psLiquidWater (WorldClient/CataWater.cpp).
@@ -141,7 +146,7 @@ MULTI = {
 # The shadow band slots of vf_shadow.hlsli: hardware-compare samplers in the SM4 pack (D3D11 binds a LESS_EQUAL
 # comparison sampler for a D24X8 target under hwPCF), like the stock _pcf families' (shader-xlate pcf_slots).
 def compare_slots(name):
-    return (5, 6) if name.startswith(('VFogMarch', 'VFogComposite', 'VFogShadowMask')) else ()
+    return (5, 6) if name.startswith(('VFogMarch', 'VFogComposite', 'VFogShadowMask', 'VFogCaustics')) else ()
 
 
 def bls(recs):
