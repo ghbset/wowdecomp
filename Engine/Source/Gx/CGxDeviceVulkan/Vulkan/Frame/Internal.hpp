@@ -58,8 +58,10 @@ namespace gxvk::vk::frame::detail
     constexpr uint32_t kStagingTrimFrames = 600;
 
     /// Colour formats a target may have (one pass set each), depth buffers (one per target size),
-    /// framebuffers (one per target image, layer and depth buffer) kept at once.
-    constexpr uint32_t kMaxPassFormats  = 8;
+    /// framebuffers (one per target image, layer and depth buffer) kept at once. Pass sets are
+    /// (format, samples): a session that cycles gxMultisample adds up to three scene sets (2x, 4x,
+    /// 8x) on top of the single-sample formats, so 16 leaves room for both.
+    constexpr uint32_t kMaxPassFormats  = 16;
     constexpr uint32_t kMaxDepthBuffers = 8;
     constexpr uint32_t kMaxFramebuffers = 64;
 

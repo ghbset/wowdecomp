@@ -220,6 +220,7 @@ namespace gxvk::vk::loader
         /// GxBlend_ConstantAlpha); 1.0 core.
         PFN_vkCmdSetDepthBias            CmdSetDepthBias            = nullptr;
         PFN_vkCmdSetBlendConstants       CmdSetBlendConstants       = nullptr;
+        PFN_vkCmdSetStencilReference     CmdSetStencilReference     = nullptr;
 
         // --- the engine's SceneClear inside the frame's render pass ------------------------------
         //

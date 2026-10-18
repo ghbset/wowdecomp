@@ -214,6 +214,9 @@ namespace gxvk::vk::frame::detail
         const loader::Device&   d    = *s.dapi;
         FrameSlot&              slot = s.slots[s.fi];
 
+        // A pending clear is applied, not dropped: the next frame starts with none (a Flush or a
+        // read-back cuts the frame here and goes on on the same targets).
+        if (s.clearColourPending || s.clearDepthPending) BeginPass();
         EndPass();
         StagingFrameEnd(slot);
 
@@ -248,6 +251,8 @@ namespace gxvk::vk::frame::detail
         // image is its colour output, so that stage waits for the acquire.
         const VkCommandBuffer      buffers[2] = { slot.pre, slot.cmd };
         const VkPipelineStageFlags wait       = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        // Acquire() runs only in Present, right before FinishFrame(true): an acquired image is
+        // always presented here.
         const bool                 presenting = present && s.acquired;
         VkSubmitInfo submit = {};
         submit.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -291,17 +296,6 @@ namespace gxvk::vk::frame::detail
             if (s.presentedCount == 1)
                 Write(Debug, "vulkan: frame: first frame presented (%ux%u, %u images)", s.extent.width, s.extent.height, s.imageCount);
         }
-        else if (s.acquired)
-        {
-            // An image acquired but not presented (the frame was cut short by a read-back): the
-            // acquire semaphore was never waited on, so it is remade rather than reused signalled.
-            d.DestroySemaphore(s.device, slot.imageAvailable, nullptr);
-            VkSemaphoreCreateInfo sem = {};
-            sem.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-            if (d.CreateSemaphore(s.device, &sem, nullptr, &slot.imageAvailable) != VK_SUCCESS) slot.imageAvailable = VK_NULL_HANDLE;
-            s.imagesInFlight[s.image] = VK_NULL_HANDLE;
-        }
-
         s.open     = false;
         s.acquired = false;
         s.fi       = (s.fi + 1) % kFramesInFlight;
@@ -508,6 +502,9 @@ namespace gxvk::vk::frame
                 EndPass();
                 s.target = kept;
             }
+            // A clear still pending on the current target (the scene touched earlier, then cleared
+            // with no draw after it) goes in before the present pass reads the scene.
+            if (s.clearColourPending || s.clearDepthPending) BeginPass();
             EndPass();
             if (RtWanted())
             {

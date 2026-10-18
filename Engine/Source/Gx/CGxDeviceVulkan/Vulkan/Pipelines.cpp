@@ -71,8 +71,7 @@ namespace gxvk::vk::pipelines
             return false;
         }
 
-        s.entries = new (std::nothrow) Entry[kMaxPipelines];
-        if (!s.entries)
+        if (!GrowPipelines())
         {
             Write(Error, "vulkan: pipelines: cannot allocate the pipeline table");
             return false;
@@ -174,6 +173,7 @@ namespace gxvk::vk::pipelines
         }
         DestroyPrograms();
         delete[] s.entries;
+        delete[] s.index;
         s = State();
     }
 
@@ -244,7 +244,7 @@ namespace gxvk::vk::pipelines
         k.fragmentRecord = draw.fragment == FragmentProgram::Translated ? manifest::IndexOf(draw.fragmentRecord) : manifest::kNoRecord;
         k.layoutIndex    = layoutIndex;
         k.stencil        = draw.stencil;
-        k.stencilMasks   = draw.stencil ? draw.stencilMasks : 0u;
+        k.stencilMasks   = draw.stencil ? (draw.stencilMasks & 0xFFFFu) : 0u;   // the reference is dynamic
         k.alphaToCoverage = (draw.alphaToCoverage && k.samples > 1) ? 1u : 0u;
 
         const Entry* entry = Lookup(k);
@@ -366,6 +366,13 @@ namespace gxvk::vk::pipelines
             d.CmdSetBlendConstants(cmd, draw.blendConstant);
             std::memcpy(b.blendConstant, draw.blendConstant, sizeof b.blendConstant);
             b.blendSet = true;
+        }
+        const uint32_t stencilRef = (draw.stencilMasks >> 16) & 0xFFu;
+        if (draw.stencil && (!b.stencilRefSet || b.stencilRef != stencilRef))
+        {
+            d.CmdSetStencilReference(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, stencilRef);
+            b.stencilRef    = stencilRef;
+            b.stencilRefSet = true;
         }
 
         float push[kPushBytes / sizeof(float)];

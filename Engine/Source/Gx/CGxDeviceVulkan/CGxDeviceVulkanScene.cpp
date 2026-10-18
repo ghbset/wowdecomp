@@ -82,7 +82,9 @@ void CGxDeviceVulkan::SceneClear(uint32_t mask, CImVector color) {
 
     if (this->IPlaceD3d(viewport, rect)) {
         frame::Clear(mask, colour, &rect);
-    } else {
+    } else if (frame::Extent().width == 0 || frame::Extent().height == 0) {
+        // No target size known yet: the whole target, as before.
         frame::Clear(mask, colour, nullptr);
     }
+    // Else an empty viewport or scissor: D3D clears nothing.
 }

@@ -7,6 +7,8 @@
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Log.hpp"
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Memory.hpp"
 
+#include <atomic>
+
 #include "Engine/Source/Gx/CGxDeviceVulkan/Shaders/PresentSpirv.inc"
 
 #include <cstring>
@@ -77,6 +79,9 @@ namespace
         bool loggedNoRecord = false;
     };
     State s;
+
+    /// A Record() warning not yet written: 1 | ready << 1 | framebuffers << 2 | image << 10.
+    std::atomic<uint32_t> gNoRecord{ 0 };
 
     bool CreateModule(const uint32_t* words, size_t bytes, VkShaderModule& out, const char* what)
     {
@@ -485,14 +490,22 @@ namespace gxvk::vk::present
         s.scene   = VK_NULL_HANDLE;
     }
 
+    void LogPending()
+    {
+        const uint32_t v = gNoRecord.exchange(0);
+        if (v) Write(Warn, "vulkan: present: nothing to record with (ready %u, %u framebuffer(s), image %u)", (v >> 1) & 1u, (v >> 2) & 0xFFu, v >> 10);
+    }
+
     bool Record(VkCommandBuffer cmd, uint32_t image, uint32_t slotIndex)
     {
         if (!s.ready || !cmd || image >= s.fbCount || slotIndex >= kSlots || s.pipeline == VK_NULL_HANDLE)
         {
+            // RENDERTHREAD: Record may run on the render thread, and the log is the main thread's;
+            // the warning is raised here and written by LogPending().
             if (!s.loggedNoRecord)
             {
                 s.loggedNoRecord = true;
-                Write(Warn, "vulkan: present: nothing to record with (ready %d, %u framebuffer(s), image %u)", s.ready ? 1 : 0, s.fbCount, image);
+                gNoRecord.store(1u | (s.ready ? 2u : 0u) | (s.fbCount << 2) | (image << 10));
             }
             return false;
         }

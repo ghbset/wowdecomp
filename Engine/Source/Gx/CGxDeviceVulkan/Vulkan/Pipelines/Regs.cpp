@@ -97,19 +97,29 @@ namespace gxvk::vk::pipelines::detail
             ss.lastSliceSet   = VK_NULL_HANDLE;
         }
 
-        uint8_t slice[kSliceBytesMax];
-        std::memcpy(slice, draw.pixelRegs, kPixelRows * 16);
-        std::memcpy(slice + kPixelRows * 16, draw.misc, 16);
-        std::memcpy(slice + kSliceHeadBytes, draw.vertexRegs, rows * 16);
-        if (extRows) std::memcpy(slice + kSliceBytesLarge, draw.pixelRegsFull + kPixelRows * 4, extRows * 16);
-
-        if (ss.lastSliceSet != VK_NULL_HANDLE && ss.lastSliceBytes == bytes && std::memcmp(ss.lastSlice, slice, bytes) == 0)
+        // The slice's pieces, compared in place against the last one written (no copy when it is
+        // reused, the common case); a new slice is assembled once, in lastSlice, and copied out.
+        struct Piece { uint32_t at; const void* src; uint32_t bytes; };
+        const Piece pieces[4] = {
+            { 0, draw.pixelRegs, kPixelRows * 16 },
+            { kPixelRows * 16, draw.misc, 16 },
+            { kSliceHeadBytes, draw.vertexRegs, rows * 16 },
+            { kSliceBytesLarge, extRows ? draw.pixelRegsFull + kPixelRows * 4 : nullptr, extRows * 16 },
+        };
+        bool same = ss.lastSliceSet != VK_NULL_HANDLE && ss.lastSliceBytes == bytes;
+        for (uint32_t i = 0; same && i < 4; ++i)
+            same = !pieces[i].bytes || std::memcmp(ss.lastSlice + pieces[i].at, pieces[i].src, pieces[i].bytes) == 0;
+        if (same)
         {
             set    = ss.lastSliceSet;
             offset = ss.lastSliceOffset;
             ++s.stats.regsReused;
             return true;
         }
+        ss.lastSliceSet = VK_NULL_HANDLE;   // lastSlice is overwritten before the write can fail
+        for (const Piece& piece : pieces)
+            if (piece.bytes) std::memcpy(ss.lastSlice + piece.at, piece.src, piece.bytes);
+        const uint8_t* slice = ss.lastSlice;
 
         // The slice at the next aligned offset of the current chunk; the next chunk when it does
         // not fit (the descriptor's range must stay inside the buffer, so kSliceBytesMax bounds
@@ -139,7 +149,6 @@ namespace gxvk::vk::pipelines::detail
             ss.regsCursor = 0;
         }
 
-        std::memcpy(ss.lastSlice, slice, bytes);
         ss.lastSliceBytes  = bytes;
         ss.lastSliceSet    = set;
         ss.lastSliceOffset = offset;
