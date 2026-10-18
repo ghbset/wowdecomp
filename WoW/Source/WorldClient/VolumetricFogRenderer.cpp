@@ -651,6 +651,37 @@ void InvalidateHistory() {
     s_history.valid = false;
 }
 
+// Shared with the caustics (VolumetricFogWater.h).
+void SunShadowRegisters(bool on, float canopy, const float viewToWorld[16], float shadow[7][4], CGxTex* maps[2]) {
+    std::memset(shadow, 0, sizeof(float) * 28);
+    maps[0] = maps[1] = nullptr;
+    ShadowView view;
+    if (!on || !CShadowCache::GetPublished(view) || (!view.pcf && g_theGxDevicePtr->DeviceApi() == GxApi_D3d11)) {
+        return;
+    }
+
+    float rotation[16];
+    std::memcpy(rotation, viewToWorld, sizeof(rotation));
+    rotation[12] = rotation[13] = rotation[14] = 0.0f;   // camera relative, as the Gx view stack top
+    float a[16];
+    C44Matrix composed = ToMatrix(rotation) * view.view;
+    std::memcpy(a, &composed, sizeof(a));
+    for (int band = 0; band < 2; band++) {
+        for (int k = 0; k < 3; k++) {
+            const C4Vector& row = view.rows[band + 1][k];
+            const float col[4] = { row.x, row.y, row.z, row.w };
+            for (int i = 0; i < 4; i++) {
+                shadow[band * 3 + k][i] = a[i * 4] * col[0] + a[i * 4 + 1] * col[1] + a[i * 4 + 2] * col[2] + a[i * 4 + 3] * col[3];
+            }
+        }
+        maps[band] = view.map[band + 1];
+    }
+    shadow[6][0] = 1.0f;
+    shadow[6][1] = static_cast<float>(view.pcf);
+    shadow[6][2] = canopy;
+    shadow[6][3] = static_cast<float>(view.size);
+}
+
 namespace {
 
 // One RenderFog frame: what the setup acquired and computed, read by the passes (audit O3). Every resource (targets,
@@ -706,33 +737,7 @@ struct FogFrame {
 // (control 0) without the bands (extShadowQuality <= 2) and on D3D11 with R32F maps (hwPCF 0): its SM4 marches
 // sample s5/s6 with SampleCmp, which needs the comparison sampler only depth maps get.
 void ShadowConstants(const Config& cfg, const float viewToWorld[16], FogFrame& f) {
-    std::memset(f.shadow, 0, sizeof(f.shadow));
-    f.shadowMaps[0] = f.shadowMaps[1] = nullptr;
-    ShadowView view;
-    if (!cfg.shadowedSun || !CShadowCache::GetPublished(view) || (!view.pcf && f.device->DeviceApi() == GxApi_D3d11)) {
-        return;
-    }
-
-    float rotation[16];
-    std::memcpy(rotation, viewToWorld, sizeof(rotation));
-    rotation[12] = rotation[13] = rotation[14] = 0.0f;   // camera relative, as the Gx view stack top
-    float a[16];
-    C44Matrix composed = ToMatrix(rotation) * view.view;
-    std::memcpy(a, &composed, sizeof(a));
-    for (int band = 0; band < 2; band++) {
-        for (int k = 0; k < 3; k++) {
-            const C4Vector& row = view.rows[band + 1][k];
-            const float col[4] = { row.x, row.y, row.z, row.w };
-            for (int i = 0; i < 4; i++) {
-                f.shadow[band * 3 + k][i] = a[i * 4] * col[0] + a[i * 4 + 1] * col[1] + a[i * 4 + 2] * col[2] + a[i * 4 + 3] * col[3];
-            }
-        }
-        f.shadowMaps[band] = view.map[band + 1];
-    }
-    f.shadow[6][0] = 1.0f;
-    f.shadow[6][1] = static_cast<float>(view.pcf);
-    f.shadow[6][2] = cfg.canopy;
-    f.shadow[6][3] = static_cast<float>(view.size);
+    SunShadowRegisters(cfg.shadowedSun, cfg.canopy, viewToWorld, f.shadow, f.shadowMaps);
 }
 
 void BindShadows(const FogFrame& f, bool on) {

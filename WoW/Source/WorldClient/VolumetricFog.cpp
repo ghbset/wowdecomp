@@ -118,6 +118,8 @@ struct SavedFog {
 CVars s_cvars = {};
 Config s_cfg;
 FrameInputs s_in = {};
+FrameInputs s_under = {};      // the caustics under water while the fog is off (OnOpaqueDone -> OnWorldDone)
+bool s_underValid = false;
 FogParams s_params = {};
 StockFogFit s_fit = {};
 // Per-model fits for this frame, keyed on the model position (batches of many models interleave back to front).
@@ -576,6 +578,7 @@ void RegisterCVars() {
     s_cvars.liquidDepth = reg("vfogLiquidDepth", "Volumetric fog: water writes depth so it is fogged at its own distance; always on while modern water draws (coa LiquidDepth)", "1");
 
     RegisterWaterCVars();
+    RegisterCausticCVars();
 
     g_vfogM2BatchFog = &BatchFog;
     g_vfogM2FogParticles = &FogParticles;
@@ -596,6 +599,7 @@ void OnWorldUpdate() {
     }
     s_armed = false;
     s_opaqueValid = false;
+    s_underValid = false;
     s_glareDrawn = false;
     s_cfg = ReadConfig();
 
@@ -669,14 +673,9 @@ void OnViewerLiquid() {
     s_wasActive = false;
 }
 
-void OnOpaqueDone() {
-    if (!s_active) {
-        return;
-    }
-
-    FrameInputs& in = s_in;
+// coa CaptureOpaqueState: this frame's view, projection, camera, world viewport and horizon band.
+static bool CaptureView(FrameInputs& in) {
     CGxDevice* device = g_theGxDevicePtr;
-
     // coa CaptureOpaqueState: the Gx view stack top is camera relative (CWorldScene::Update sets the camera at the
     // origin, World.cpp, then translates its own copy by -s_activeWorldView); the projection is the main one.
     const CGxMatrixStack& view = device->m_xforms[GxXform_View];
@@ -709,11 +708,28 @@ void OnOpaqueDone() {
     in.horizonBand[2] = camera ? camera->m_farZ - 50.0f : farClip - 50.0f;
     in.horizonBand[3] = World::s_horizonFarClipScale * farClip;
 
+    return in.viewport[1] > in.viewport[0] && in.viewport[3] > in.viewport[2] && IsPerspective(in.glProjection) &&
+           Finite(in.cameraRelativeView, 16) && Finite(in.camPos, 3);
+}
+
+void OnOpaqueDone() {
+    if (!s_active) {
+        // Caustics / tint under water (the fog is off there by default): the inputs the fog would have taken.
+        if (World::SceneCamLiquidStatus(nullptr) && CausticsUnderWanted() && CaptureView(s_under)) {
+            ReadDayNightInputs(s_under);
+            ReadLightDirection(s_under);
+            s_under.inLiquid = true;
+            s_underValid = std::isfinite(s_under.fogStart) && std::isfinite(s_under.fogEnd);
+        }
+        return;
+    }
+
+    FrameInputs& in = s_in;
+    const bool viewValid = CaptureView(in);
     ReadLightDirection(in);
     CaptureLocalLights(in, s_cfg);
 
-    s_opaqueValid = in.viewport[1] > in.viewport[0] && in.viewport[3] > in.viewport[2] && IsPerspective(in.glProjection) &&
-                    Finite(in.cameraRelativeView, 16) && Finite(in.camPos, 3) && std::isfinite(in.fogStart) && std::isfinite(in.fogEnd);
+    s_opaqueValid = viewValid && std::isfinite(in.fogStart) && std::isfinite(in.fogEnd);
 }
 
 namespace {
@@ -821,6 +837,13 @@ bool GlareDrawn() {
 }
 
 void OnWorldDone() {
+    // Under water: caustics and the tint on the finished world, under the late fog (wxl-water CausticsUnder).
+    if (World::SceneCamLiquidStatus(nullptr)) {
+        if (s_active ? s_opaqueValid && s_in.inLiquid : s_underValid) {
+            CausticsUnder(s_active ? s_in : s_under);
+        }
+    }
+    s_underValid = false;
     if (s_active && s_late) {
         Composite();
     }

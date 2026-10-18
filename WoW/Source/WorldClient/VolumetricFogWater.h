@@ -175,6 +175,21 @@ void SetStencil(EGxStencilCmp func, int32_t ref, int32_t readMask, int32_t write
 // opaque, RGB. False when it could not draw (shader missing, world not on the back buffer, no copy).
 bool RenderGrade(const float* curve32, float strength, int dither, uint32_t frame, const WorldViewport& world);
 
+// vf_common c0-c8 (VolumetricFogWater.cpp): world viewport vp, the depth texture's size, in's view and projection.
+bool CommonRows(const FrameInputs& in, const WorldViewport& vp, const CGxTex* depth, float common[9][4]);
+// vf_shadow.hlsli c56-c62 and its two maps (VolumetricFogRenderer.cpp, SHADOW_PORT_PLAN S3) for the view space whose
+// view-to-world is viewToWorld; all zero (unshadowed) when off or without the bands.
+void SunShadowRegisters(bool on, float canopy, const float viewToWorld[16], float shadow[7][4], CGxTex* maps[2]);
+
+// ---- caustics and the underwater tint (VolumetricFogCaustics.cpp, wxl-water caustics; docs/BACKLOG_PORT.md) ------
+void RegisterCausticCVars();                // from RegisterCVars
+bool CausticsUnderWanted();                 // waterCaustics or waterUnderwaterTint on
+// WaterFlushDone: the bed under the water (bed = the pre-water view Z copy, water = the copy with it, |r| = view Z),
+// over the shaded water; stencil = the water class tags are in the stencil (the interior class is skipped).
+void CausticsAbove(const FrameInputs& in, const float common[9][4], const WorldViewport& vp, CGxTex* bed, CGxTex* water, bool stencil);
+// OnWorldDone with the camera in liquid: caustics on what the scene depth shows below the surface + the screen tint.
+void CausticsUnder(const FrameInputs& in);
+
 // Driver accessors (VolumetricFog.cpp): this frame's inputs once OnOpaqueDone captured them.
 bool WaterFrame(const FrameInputs*& in, const Config*& cfg);
 bool StockFogReplaced();   // the stock fog is pushed out this frame (coa !stockFogApplies)

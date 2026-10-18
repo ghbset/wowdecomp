@@ -22,7 +22,7 @@ plus VFogTemporal and VFogHistoryDepth, and the god rays VFogRayMask, VFogRayBlu
 Grading (coa vp_grade): VFogGrade.
 Water (coa vw_*): VFogWaterDepth, VFogWaterMask, VFogWater{1,2,3} (SSR_STEPS 0/16/32) and VFogRippleStep;
 GPU waves VFogWave{Evolve,Fft,Surface,Mip,Pack}.
-Fading models (wxl-vfog 0.6.3): VFogDepthCopy. MSAA sample split (coa): VFogSilhouette and VFogCompositeSplit{Q}[L][N].
+Fading models (wxl-vfog 0.6.3): VFogDepthCopy. Caustics (wxl-water): VFogCausticsAbove / VFogCausticsUnder. MSAA sample split (coa): VFogSilhouette and VFogCompositeSplit{Q}[L][N].
 """
 import argparse
 import concurrent.futures
@@ -70,6 +70,10 @@ SHADERS = {
     'VFogDepthCopy': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0), 0, 'VFogDepthCopy', {}),
     # MSAA silhouette samples marked in the stencil by an oDepth pass (coa vf_silhouette_mask; Vulkan: gl_FragDepth)
     'VFogSilhouette': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0), 0, 'VFogSilhouette', {}),
+    # caustics (wxl-water caustics, docs/BACKLOG_PORT.md): over the shaded water (bed + water depth), and under water
+    # (scene depth, + the tint); s5/s6 the sun shadow bands (vf_shadow.hlsli)
+    'VFogCausticsAbove': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 1, 5, 6), 0, 'VFogCaustics', {'UNDER': 0}),
+    'VFogCausticsUnder': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 5, 6), 0, 'VFogCaustics', {'UNDER': 1}),
 }
 # VFogWater{1,2,3}: coa ps_vw_shade_low/mid/high (SSR_STEPS 0/16/32, cmake/WaterShaders.cmake)
 for _v, _ssr in ((1, 0), (2, 16), (3, 32)):
@@ -98,7 +102,7 @@ for _q, _steps in ((1, 16), (2, 24), (3, 32)):
 # The shadow band slots of vf_shadow.hlsli: hardware-compare samplers in the SM4 pack (D3D11 binds a LESS_EQUAL
 # comparison sampler for a D24X8 target under hwPCF), like the stock _pcf families' (shader-xlate pcf_slots).
 def compare_slots(name):
-    return (5, 6) if name.startswith(('VFogMarch', 'VFogComposite')) else ()
+    return (5, 6) if name.startswith(('VFogMarch', 'VFogComposite', 'VFogCaustics')) else ()
 
 
 def bls(code, a, b, c, d):

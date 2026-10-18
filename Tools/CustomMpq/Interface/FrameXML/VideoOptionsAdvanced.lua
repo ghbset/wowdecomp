@@ -76,6 +76,9 @@ local PAGES = {
 	  { "vfogWaterRipples", "slider", "Ripples", "Ripples and wakes where characters move through water. 0 turns them off.", 0, 2, 0.05 },
 	  { "vfogWaterClientSplashes", "check", "Stock splashes", "Keeps the stock splash rings and wake trails on top of the ripples." },
 	  { "vfogWaterGpuWaves", "check", "Waves on the GPU", "Works out the waves on the graphics card instead of the processor." },
+	  -- caustics (docs/BACKLOG_PORT.md "Caustics")
+	  { "waterCaustics", "slider", "Caustics", "Rippling sunlight on the ground under shallow water, seen from above and below. Not at night or in shade. 0 turns it off.", 0, 3, 0.05 },
+	  { "waterUnderwaterTint", "slider", "Underwater tint", "Tints the screen with the water's colour and darkens the corners while you are under water. 0 turns it off.", 0, 2, 0.05 },
 	},
 	{ name = "World Effects", parent = "Advanced", title = "World Effects",
 	  { "groundDecals", "check", "Ground effects follow terrain", "Spell circles on the ground bend over hills instead of floating flat." },

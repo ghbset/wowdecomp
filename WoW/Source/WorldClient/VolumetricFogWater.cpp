@@ -830,29 +830,7 @@ void FillClassConstants(ShadingConstants& c, const WaterPreset& preset, WaterCla
 }
 
 bool BuildCommon(CGxTex* depth) {
-    const FrameInputs& in = *s_pass.in;
-    float viewToWorld[16];
-    if (!Invert4x4(in.cameraRelativeView, viewToWorld)) {
-        return false;
-    }
-    viewToWorld[12] = in.camPos[0];
-    viewToWorld[13] = in.camPos[1];
-    viewToWorld[14] = in.camPos[2];
-    const float* proj = in.glProjection;
-    const float worldMinZ = in.viewport[4];
-    const float worldExtent = in.viewport[5] - in.viewport[4];
-    const WorldViewport& vp = s_pass.vp;
-    const float rows[9][4] = {
-        { vp.x, vp.y, vp.w, vp.h },
-        { 1.0f, 0.0f, 1.0f / depth->m_width, 1.0f / depth->m_height },
-        { proj[0], proj[5], proj[8], proj[9] },
-        { worldMinZ + worldExtent * (1.0f + proj[10]) * 0.5f, worldExtent * proj[14] * 0.5f, kWaterMaxViewDepth, in.viewport[5] },
-        {}, {}, {}, {},
-        { vp.w, vp.h, 1.0f / vp.w, 1.0f / vp.h },
-    };
-    std::memcpy(s_pass.common, rows, sizeof(rows));
-    std::memcpy(s_pass.common[4], viewToWorld, sizeof(viewToWorld));
-    return true;
+    return CommonRows(*s_pass.in, s_pass.vp, depth, s_pass.common);
 }
 
 // Linear view Z of the current scene depth into `target`: plain (VFogWaterDepth) or signed against s_pass.previous.
@@ -986,6 +964,31 @@ void ShadeClass(WaterClass waterClass, CGxTex* waterDepth = nullptr) {
 
 }  // namespace
 
+// vf_common c0-c8 for the world viewport vp and the scene depth texture (BuildCommon; also the caustics).
+bool CommonRows(const FrameInputs& in, const WorldViewport& vp, const CGxTex* depth, float common[9][4]) {
+    float viewToWorld[16];
+    if (!Invert4x4(in.cameraRelativeView, viewToWorld)) {
+        return false;
+    }
+    viewToWorld[12] = in.camPos[0];
+    viewToWorld[13] = in.camPos[1];
+    viewToWorld[14] = in.camPos[2];
+    const float* proj = in.glProjection;
+    const float worldMinZ = in.viewport[4];
+    const float worldExtent = in.viewport[5] - in.viewport[4];
+    const float rows[9][4] = {
+        { vp.x, vp.y, vp.w, vp.h },
+        { 1.0f, 0.0f, 1.0f / depth->m_width, 1.0f / depth->m_height },
+        { proj[0], proj[5], proj[8], proj[9] },
+        { worldMinZ + worldExtent * (1.0f + proj[10]) * 0.5f, worldExtent * proj[14] * 0.5f, kWaterMaxViewDepth, in.viewport[5] },
+        {}, {}, {}, {},
+        { vp.w, vp.h, 1.0f / vp.w, 1.0f / vp.h },
+    };
+    std::memcpy(common, rows, sizeof(rows));
+    std::memcpy(common[4], viewToWorld, sizeof(viewToWorld));
+    return true;
+}
+
 void RegisterWaterCVars() {
     // coa CoAVolFog.ini Water* defaults.
     s_cvars.enable = CVar::Register("vfogWater", "Modern water while the volumetric fog draws (lakes, rivers, sea, indoor pools; magma and slime keep the client's look)", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
@@ -1098,9 +1101,13 @@ void WaterFlushDone() {
                     ShadeClass(static_cast<WaterClass>(c), waterDepth);
                 }
             }
+            CausticsAbove(*s_pass.in, s_pass.common, s_pass.vp, s_targets.sceneDepth, waterDepth, true);
         }
     } else if (!s_pass.stencil && s_pass.current != WaterClass::None && !s_pass.failed) {
         ShadeClass(s_pass.current);
+        if (s_pass.previous != s_targets.sceneDepth) {   // the last class's signed copy: |r| = the depth with all the water
+            CausticsAbove(*s_pass.in, s_pass.common, s_pass.vp, s_targets.sceneDepth, s_pass.previous, false);
+        }
     }
     if (s_pass.begun && !s_pass.failed && s_pass.water.waves > 0.0f) {
         // coa PrepareWaves: the drawn classes' tiles, 128 at WaterQuality=1, else 256; amplitude scale = waves^2.
