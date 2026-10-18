@@ -77,6 +77,26 @@ struct CVars {
     CVar* fadeEarly;
     CVar* fadeStencil;
     CVar* msaaSplit;
+    // coa settings that had no CVar (vfog13)
+    CVar* sunScatter;
+    CVar* exposure;
+    CVar* classicExposure;
+    CVar* classicPhase;
+    CVar* colorSpace;
+    CVar* localLightIntensity;
+    CVar* localLightPhase;
+    CVar* interior;
+    CVar* interiorDensity;
+    CVar* interiorFarFog;
+    CVar* noiseScale;
+    CVar* noiseWind;
+    CVar* classicNoise;
+    CVar* glowCompensation;
+    CVar* underwater;
+    CVar* stockFog;
+    CVar* foreverGlow;
+    CVar* sunMarker;
+    CVar* liquidDepth;
 };
 
 // coa forever_look.cpp GradingFrame: decided at the end of the world, drawn after the glow.
@@ -118,6 +138,9 @@ bool s_armed = false;          // the composite is on the frame: later batches t
 bool s_dataLoaded = false;
 GradeFrame s_grade = {};
 uint32_t s_frame = 0;
+bool s_late = false;         // the composite runs once after the world this frame (coa's TransparentFog=0 path)
+bool s_glowFed = false;      // vfogForeverGlow replaces the glow amount this frame
+float s_glowAmount = 0.0f;
 
 float CVarFloat(CVar* var, float fallback) {
     return var && std::isfinite(var->m_floatValue) ? var->m_floatValue : fallback;
@@ -152,6 +175,26 @@ Config ReadConfig() {
     cfg.gradeStrength = std::clamp(CVarFloat(s_cvars.gradeStrength, cfg.gradeStrength), 0.0f, 1.0f);   // coa config.cpp:52
     cfg.dither = std::clamp(CVarInt(s_cvars.dither, 1), 0, 2);
     cfg.hdrTargets = CVarInt(s_cvars.hdrTargets, 1) != 0;
+    // coa config.cpp ranges
+    cfg.sunScatter = std::clamp(CVarFloat(s_cvars.sunScatter, cfg.sunScatter), 0.0f, 10.0f);
+    cfg.exposure = std::clamp(CVarFloat(s_cvars.exposure, cfg.exposure), 0.0f, 10.0f);
+    cfg.classicExposure = std::clamp(CVarFloat(s_cvars.classicExposure, cfg.classicExposure), 0.0f, 10.0f);
+    cfg.classicPhase = std::clamp(CVarInt(s_cvars.classicPhase, cfg.classicPhase), 0, 1);
+    cfg.colorSpace = std::clamp(CVarInt(s_cvars.colorSpace, cfg.colorSpace), 0, 1);
+    cfg.localLightIntensity = std::clamp(CVarFloat(s_cvars.localLightIntensity, cfg.localLightIntensity), 0.0f, 8.0f);
+    cfg.localLightPhase = std::clamp(CVarFloat(s_cvars.localLightPhase, cfg.localLightPhase), -0.9f, 0.9f);
+    cfg.interiorAware = CVarInt(s_cvars.interior, 1) != 0;
+    cfg.interiorDensity = std::clamp(CVarFloat(s_cvars.interiorDensity, cfg.interiorDensity), 0.0f, 1.0f);
+    cfg.interiorFarFog = std::clamp(CVarFloat(s_cvars.interiorFarFog, cfg.interiorFarFog), 0.0f, 1.0f);
+    cfg.noiseScale = std::clamp(CVarFloat(s_cvars.noiseScale, cfg.noiseScale), 0.001f, 1.0f);
+    cfg.noiseWindSpeed = std::clamp(CVarFloat(s_cvars.noiseWind, cfg.noiseWindSpeed), 0.0f, 10.0f);
+    cfg.classicNoise = CVarInt(s_cvars.classicNoise, 1) != 0;
+    cfg.glowCompensation = CVarInt(s_cvars.glowCompensation, 1) != 0;
+    cfg.underwater = CVarInt(s_cvars.underwater, 0) != 0;
+    cfg.stockFog = CVarInt(s_cvars.stockFog, 1) != 0;
+    cfg.foreverGlow = CVarInt(s_cvars.foreverGlow, 0) != 0;
+    cfg.sunMarker = CVarInt(s_cvars.sunMarker, 0) != 0;
+    cfg.liquidDepth = CVarInt(s_cvars.liquidDepth, 1) != 0;
     return cfg;
 }
 
@@ -445,7 +488,7 @@ LightParamsSelection SelectionFor(const FrameInputs& in) {
 // out the view under water (coa kCameraUnderWater); the ghost view is skipped as coa kGhostEffect.
 void PrepareGrade() {
     s_grade.pending = false;
-    if (!s_cfg.grade || !(s_cfg.gradeStrength > 0.0f) || !s_active || !s_opaqueValid ||
+    if (!s_cfg.grade || !(s_cfg.gradeStrength > 0.0f) || !s_active || !s_opaqueValid || s_in.inLiquid ||
         (CGWorldFrame::ffxEffectDeath && FFX::s_effect == CGWorldFrame::ffxEffectDeath)) {
         return;
     }
@@ -459,6 +502,26 @@ void PrepareGrade() {
     std::memcpy(s_grade.curve, look.gradingCurve, sizeof(s_grade.curve));
     s_grade.world = LiveWorldViewport();
     s_grade.pending = s_grade.strength > 0.0f && Finite(s_grade.curve, kGradingCurveEntries);
+}
+
+// coa forever_look.cpp FeedGlow + ForeverGlowByte: the glow amount the FFX glow gets (UpdateScreenEffectParams reads it
+// through GlowAmount) becomes lerp(client, Forever glow, saturate((coverage - 0.5) / 0.5)); never the ghost view's
+// (that is not the glow effect) and not under water. The fog's glow compensation uses the amount delivered (coa
+// UseDeliveredGlow). The camera position is last frame's: OnOpaqueDone captures this frame's later.
+void FeedForeverGlow() {
+    if (!s_cfg.foreverGlow || s_in.inLiquid || !GlowScreenEffectRuns()) {
+        return;
+    }
+    AuthoredFog look;
+    ResolveFogData(s_in.mapId, s_in.camPos, s_in.dayFraction, SelectionFor(s_in), look);
+    if (!look.hasGlow || !std::isfinite(look.glow) || !std::isfinite(look.coverage) || !(look.coverage > kMinimumClassicCoverage)) {
+        return;
+    }
+    const float weight = std::min((look.coverage - kMinimumClassicCoverage) / (1.0f - kMinimumClassicCoverage), 1.0f);
+    const float client = Clamp01(DayNight::g_dnInfo.m_bands.m_glow);
+    s_glowAmount = Clamp01(client + (look.glow - client) * weight);
+    s_glowFed = true;
+    s_in.clientGlowAmount = s_glowAmount;
 }
 
 bool FogParticles() {
@@ -493,6 +556,30 @@ void RegisterCVars() {
     s_cvars.hdrTargets = CVar::Register("vfogHdrTargets", "Volumetric fog: 1 = half-float fog and god ray targets where the device has them (default), 0 = 8 bit (bands)", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.godRays = CVar::Register("vfogGodRays", "Volumetric fog god rays from the bright sky around the sun: 0 = off, 1 = on (default), up to 4 = strength", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
 
+    auto reg = [](const char* name, const char* help, const char* value) {
+        return CVar::Register(name, help, 1, value, nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    };
+    // coa CoAVolFog.ini keys that were constants until vfog13 (defaults as coa, the user's look where VFOG_PORT 8 says).
+    s_cvars.sunScatter = reg("vfogSunScatter", "Volumetric fog in-scattered sun or moon light (coa SunScatter), 0..10", "1");
+    s_cvars.exposure = reg("vfogExposure", "Volumetric fog brightness of the derived layers (coa Exposure), 0..10", "1");
+    s_cvars.classicExposure = reg("vfogClassicExposure", "Volumetric fog brightness of the authored layers (coa ClassicExposure, 1 = as authored), 0..10", "0.5");
+    s_cvars.classicPhase = reg("vfogClassicPhase", "Volumetric fog authored sun scattering: 0 = phase peaks at 1, 1 = energy-normalised (coa ClassicPhase)", "0");
+    s_cvars.colorSpace = reg("vfogColorSpace", "Volumetric fog: 1 = scatter and blend in linear light (default), 0 = gamma (coa ColorSpace)", "1");
+    s_cvars.localLightIntensity = reg("vfogLocalLightIntensity", "Volumetric fog point light intensity, 0..8 (coa LocalLightIntensity)", "2.5");
+    s_cvars.localLightPhase = reg("vfogLocalLightPhase", "Volumetric fog point light phase g, -0.9..0.9 (coa LocalLightPhase)", "0.3");
+    s_cvars.interior = reg("vfogInterior", "Volumetric fog fades outdoor layers and sunlight indoors (coa InteriorAware)", "1");
+    s_cvars.interiorDensity = reg("vfogInteriorDensity", "Volumetric fog outdoor layer density kept indoors, 0..1 (coa InteriorDensity)", "0.15");
+    s_cvars.interiorFarFog = reg("vfogInteriorFarFog", "Volumetric fog distance fog density kept indoors, 0..1; lower clears dungeon haze (coa InteriorFarFog)", "1");
+    s_cvars.noiseScale = reg("vfogNoiseScale", "Volumetric fog density variation scale, 0.001..1, larger is smaller patches (coa NoiseScale)", "0.025");
+    s_cvars.noiseWind = reg("vfogNoiseWind", "Volumetric fog density variation drift in yd/s, 0..10 (coa NoiseWindSpeed)", "0.5");
+    s_cvars.classicNoise = reg("vfogClassicNoise", "Volumetric fog drifting banks from the authored noise (coa ClassicNoise)", "1");
+    s_cvars.glowCompensation = reg("vfogGlowCompensation", "Volumetric fog pre-compensated for the client's glow (coa GlowCompensation)", "1");
+    s_cvars.underwater = reg("vfogUnderwater", "Volumetric fog also with the camera under water, over the stock fog (coa Underwater)", "0");
+    s_cvars.stockFog = reg("vfogStockFog", "Volumetric fog: 1 = replaces the stock fog (default), 0 = keeps it and adds no distance fog (coa StockFog)", "1");
+    s_cvars.foreverGlow = reg("vfogForeverGlow", "Volumetric fog: the modern client's glow amount where its lights cover the camera (coa ForeverGlow)", "0");
+    s_cvars.sunMarker = reg("vfogSunMarker", "Volumetric fog debug: red dot where the light direction projects (coa SunMarker)", "0");
+    s_cvars.liquidDepth = reg("vfogLiquidDepth", "Volumetric fog: water writes depth so it is fogged at its own distance; always on while modern water draws (coa LiquidDepth)", "1");
+
     RegisterWaterCVars();
 
     g_vfogM2BatchFog = &BatchFog;
@@ -519,7 +606,9 @@ void OnWorldUpdate() {
         LoadFogData();   // missing or invalid: the derived layers are used (coa)
     }
 
-    s_active = s_cfg.enable && g_theGxDevicePtr->MasterEnable(GxMasterEnable_Fog) && !World::SceneCamLiquidStatus(nullptr) && RendererReady();
+    const bool inLiquid = World::SceneCamLiquidStatus(nullptr) != 0;
+    s_glowFed = false;
+    s_active = s_cfg.enable && g_theGxDevicePtr->MasterEnable(GxMasterEnable_Fog) && (!inLiquid || s_cfg.underwater) && RendererReady();
 
     if (!s_active) {
         if (s_wasActive) {
@@ -531,18 +620,35 @@ void OnWorldUpdate() {
 
     s_wasActive = true;
     ReadDayNightInputs(s_in);
-    PushStockFogOutOfRange();
+    s_in.inLiquid = inLiquid;
+    if (inLiquid) {
+        s_in.clientGlowAmount = 0.0f;   // coa engine.cpp:409
+    }
+    FeedForeverGlow();
+    // coa FogDrawsInPlaceOfStockFog / EarlyCompositeUnready: the stock fog is replaced only above water with StockFog=1;
+    // under water, with StockFog=0, a debug view or the sun marker the fog is drawn once after the world.
+    s_late = !s_cfg.transparentFog || !s_cfg.stockFog || inLiquid || s_cfg.debugView != 0 || s_cfg.sunMarker;
+    if (s_cfg.stockFog && !inLiquid) {
+        PushStockFogOutOfRange();
+    }
 }
 
 void OnViewerLiquid() {
     // OnWorldUpdate decided on last frame's liquid status (UpdateViewerLiquid writes it later, in CWorldScene::Render,
     // which calls this right after it and before anything is drawn): the camera just went under, so the frame takes
     // the underwater branch, which has no composite. Give it the stock fog.
-    if (!s_active || !World::SceneCamLiquidStatus(nullptr)) {
+    if (!s_active || s_in.inLiquid || !World::SceneCamLiquidStatus(nullptr)) {
         return;
     }
     RestoreStockFog();
     InvalidateHistory();
+    if (s_cfg.underwater) {   // coa Underwater=1: the fog after the world, over the stock fog
+        s_in.inLiquid = true;
+        s_in.clientGlowAmount = 0.0f;
+        s_glowFed = false;
+        s_late = true;
+        return;
+    }
     s_active = false;
     s_wasActive = false;
 }
@@ -673,7 +779,7 @@ bool Composite() {
 void OnLiquidDone() {
     // vfogTransparent 0 is coa's TransparentFog=0: one composite after the whole world (OnWorldDone), so
     // transparents take the fog of the scene behind them.
-    if (!s_active || !s_cfg.transparentFog) {
+    if (!s_active || s_late) {
         return;
     }
 
@@ -699,7 +805,7 @@ bool GlareDrawn() {
 }
 
 void OnWorldDone() {
-    if (s_active && !s_cfg.transparentFog) {
+    if (s_active && s_late) {
         Composite();
     }
     // coa RenderGodRaysOverTheWorld: after the whole world, before FFX glow. Only a RenderFog this frame arms it.
@@ -721,11 +827,20 @@ void OnWorldRendered() {
 bool WaterFrame(const FrameInputs*& in, const Config*& cfg) {
     in = &s_in;
     cfg = &s_cfg;
-    return s_active && s_opaqueValid;
+    return s_active && s_opaqueValid && !s_in.inLiquid;   // coa ArmWaterPass: no modern water under water
+}
+
+bool StockFogReplaced() {
+    return s_pushed;
 }
 
 bool LiquidDepthWrite() {
-    return s_active;
+    // coa LiquidDepth; modern water needs the depth whatever it says (WaterArmed: this frame's liquid pass).
+    return s_active && (s_cfg.liquidDepth || WaterArmed());
+}
+
+float GlowAmount(float client) {
+    return s_glowFed ? s_glowAmount : client;
 }
 
 bool BatchFog(const float modelPos[3], float& start, float& end, float& density, float color[3]) {

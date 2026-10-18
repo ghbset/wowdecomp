@@ -319,7 +319,8 @@ bool SameSettings(const Config& a, const Config& b) {
         && a.noiseAmount == b.noiseAmount && a.noiseScale == b.noiseScale && a.noiseWindSpeed == b.noiseWindSpeed
         && a.classicNoise == b.classicNoise && a.glowCompensation == b.glowCompensation
         && a.maxDistance == b.maxDistance && a.startOffset == b.startOffset && a.temporal == b.temporal
-        && a.debugView == b.debugView;
+        && a.debugView == b.debugView && a.interiorFarFog == b.interiorFarFog && a.underwater == b.underwater
+        && a.stockFog == b.stockFog && a.sunMarker == b.sunMarker;
 }
 
 // wxl-vfog ec1c66b TangentSpan: tangents (lateral over depth) of the directions ahead that can meet a circle.
@@ -779,7 +780,7 @@ bool RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg,
     float march[4] = { temporal ? 1.0f : 0.0f, fog.maxDistance, fog.horizonStart, fog.farClip };
     float localControl[4] = { static_cast<float>(lightCount), marchLightLimit, cfg.localLightPhase, 0.0f };
 
-    // Sun position for c98 and the god rays (coa :1338-1347); the marker is not drawn.
+    // Sun position for c98 and the god rays (coa :1338-1347), and vfogSunMarker's dot (coa sunInFront).
     float sunPx[2] = {};
     float sunScreenFade = 0.0f;
     if (toLightInView[2] > 0.05f) {
@@ -888,7 +889,7 @@ bool RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg,
     float compositeConstants[3][4] = {
         { exposure, 0.0f, static_cast<float>(cfg.debugView), static_cast<float>(blend) },
         { fog.rayColor[0], fog.rayColor[1], fog.rayColor[2], 0.0f },    // w = 0: no dither
-        { sunPx[0], sunPx[1], 0.0f, glow },                               // coa m_drawnGlowCompensation
+        { sunPx[0], sunPx[1], cfg.sunMarker && toLightInView[2] > 0.05f ? 1.0f : 0.0f, glow },                               // coa m_drawnGlowCompensation
     };
     const FogParams compositeFog = lit ? WithMeanNoise(fog) : fog;
     SetPs(9, celestialLight, 1);

@@ -702,6 +702,11 @@ float ScrollOffset(double seconds, int axis, float multiplier) {
 
 // coa BuildReflectionFog: the fog model's layers (mean noise) for the reflected rays.
 void BuildReflectionFog() {
+    if (!StockFogReplaced()) {   // coa: the stock fog applies (vfogStockFog 0), no volumetric reflection fog
+        std::memset(s_pass.reflectionFog, 0, sizeof(s_pass.reflectionFog));
+        s_pass.reflectionFogRange = {};
+        return;
+    }
     const FogParams fog = WithMeanNoise(BuildFogParams(*s_pass.in, *s_pass.cfg));
     const float exposure = fog.authored ? s_pass.cfg->classicExposure : s_pass.cfg->exposure;
     auto linearScattered = [&fog, exposure](const float* rgb) {
@@ -731,12 +736,18 @@ void BuildReflectionFog() {
     s_pass.reflectionFogRange = { fog.maxDistance, fog.maxDistance, 0.0f, 1.0f };
 }
 
-// coa FillClassConstants. The stock fog never applies (water draws only while vfog pushes it out).
+// coa FillClassConstants. The stock fog applies only with vfogStockFog 0 (water draws only above water).
 void FillClassConstants(ShadingConstants& c, const WaterPreset& preset, WaterClass waterClass) {
     c = {};
     const FrameInputs& in = *s_pass.in;
     const WaterConfig& cfg = s_pass.water;
     const bool noSun = waterClass == WaterClass::Interior;
+    if (!StockFogReplaced()) {   // coa water.stockFogApplies, water_renderer.cpp:1209
+        float fog[3];
+        UnpackColor(in.fogColor, fog);
+        c.stockFogColour = { fog[0], fog[1], fog[2], 1.0f };
+        c.stockFog = { in.fogEnd, 1.0f / std::max(in.fogEnd - in.fogStart, 1e-3f), 0.0f, 0.0f };
+    }
     float toLight[3] = { in.toLight[0], in.toLight[1], in.toLight[2] };
     const float length = std::sqrt(toLight[0] * toLight[0] + toLight[1] * toLight[1] + toLight[2] * toLight[2]);
     for (float& axis : toLight) {
@@ -1084,6 +1095,10 @@ void WaterFlushDone() {
         WaveLaunch(s_data.tiles, s_pass.drawnTiles, settings, s_pass.seconds);
     }
     s_pass.armed = false;
+}
+
+bool WaterArmed() {
+    return s_pass.armed;
 }
 
 bool WaterHidesClientRipples() {

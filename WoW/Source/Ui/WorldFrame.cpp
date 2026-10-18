@@ -929,7 +929,7 @@ void CGWorldFrame::UpdateScreenEffectParams() {
         return;
     }
 
-    float glow = DayNight::GetInfo()->m_bands.m_glow * 255.0f + 512.0f;
+    float glow = VolumetricFog::GlowAmount(DayNight::GetInfo()->m_bands.m_glow) * 255.0f + 512.0f;   // VFOG: vfogForeverGlow, not in 12340
     uint8_t glowLevel = *reinterpret_cast<uint32_t*>(&glow) >> 14;
     int32_t underwater = 0;
     uint8_t minimum = 0;

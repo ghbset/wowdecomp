@@ -55,7 +55,18 @@ The decisions:
   would otherwise be bare. Transparents drawn after it (weather, M2PASS_1, spell visuals, particles, GxuCat_1)
   get the fitted linear fog. The fit uses the screen-wide fit, or the per-model fit when the model is past the
   fit range (wxl-vfog 0.4/0.6.13).
-- **Under water: off**, with stock fog (coa `Underwater=0`). The under-water branch has no early composite.
+- **Under water: off** by default, with stock fog (coa `Underwater=0`). `vfogUnderwater 1` (vfog13, coa Underwater=1):
+  the stock fog stays (no push-out) and the fog is composited once in `OnWorldDone`, glow compensation 0 (coa
+  engine.cpp:409); no modern water, no grade. A camera that goes under mid-frame (`OnViewerLiquid`) switches to that.
+- **Late composite** (vfog13, coa FogDrawsInPlaceOfStockFog / EarlyCompositeUnready): the early composite and the
+  fitted fog run only above water with `vfogStockFog 1`, `vfogDebug 0` and `vfogSunMarker 0`; otherwise the fog is
+  drawn once after the world. `vfogStockFog 0` keeps the stock fog, drops the distance layer (coa fog_model.cpp:214)
+  and gives the water shader the stock fog constants with no volumetric reflection fog (coa stockFogApplies).
+- **ForeverGlow** (vfog13, `vfogForeverGlow`, coa forever_look.cpp FeedGlow): `CGWorldFrame::UpdateScreenEffectParams`
+  reads the glow amount through `VolumetricFog::GlowAmount`, which while vfog draws above water returns
+  `lerp(client, look.glow, saturate((coverage - 0.5) / 0.5))` (the authored glow already blended in ResolveFogData);
+  the glow compensation uses the delivered amount (coa UseDeliveredGlow). Natively the float is replaced before the
+  byte is packed, so there is no glow-byte RE and nothing to restore. Camera position is last frame's.
 - **Fading doodads** (vfog8, `vfogFadeEarly 1`): coa has no such step. This is wxl-vfog 0.6.0's DrawFadingModelsBeforeFog,
   to the RE spec in `/root/RE/render-path/doodad-fade-frame.md` 5b-5d and `doodad-fade-route.md`. A model with
   `CM2Model::m_alpha < 0.99999` has its batches routed by the client from pass 0 to the blended pass 1, which draws after
@@ -97,7 +108,9 @@ The decisions:
   as an fps regression that was **never isolated** (wxl-vfog/wxl-light composites, 2026-10-10), so it is a CVar:
   `vfogDither 0` skips it on a uniform branch (c79.x = c79.z = 0), the old path.
 - **MSAA** (vfog9): see section 3, scene depth per backend; coa's sample split (`vfogMsaaSplit`, D3D only): section 3, MSAA.
-- **Not ported:** the GPU density probe, the overlay, ForeverGlow, and wxl's TopUp.
+- **Not ported:** the GPU density probe and the log (diagnostics only), the overlay (CVars), wxl's TopUp, coa's
+  `Multisampling` setting + depth-copy self-test, NVAPI, FarClipMax (Ascension's cap; the decomp has none). See
+  /root/d3d11-port/vfog-gap-audit.md.
 
 ## 2. Passes (RenderFog, WP6)
 
@@ -496,8 +509,14 @@ stencil bits), `vfogWaterClientSplashes` (0 = the client's splash discs and wake
 WaterClientSplashes), `vfogWaterDebug` (0; 1 normal, 2 foam, 3 transmittance, 4 reflection, 5 class, 6 ripples).
 The defaults are coa CoAVolFog.ini plus the user's wxl-vfog look: Ambient 1.75, ClassicExposure 0.5,
 LocalLightIntensity 2.5, StartOffset 10. FarFog is 1, not wxl's 0, because no far-field plugin owns far fog
-now. Dither: see section 1 (vfogDither; the old fps regression was never isolated, so it can be toggled). The remaining Config fields are constants in code
-until someone needs a knob for them.
+now. Dither: see section 1 (vfogDither; the old fps regression was never isolated, so it can be toggled).
+vfog13, every remaining coa key (coa ranges): `vfogSunScatter` (1, 0..10), `vfogExposure` (1, 0..10),
+`vfogClassicExposure` (0.5, 0..10), `vfogClassicPhase` (0), `vfogColorSpace` (1; 0 = gamma), `vfogLocalLightIntensity`
+(2.5, 0..8), `vfogLocalLightPhase` (0.3, -0.9..0.9), `vfogInterior` (1, coa InteriorAware), `vfogInteriorDensity`
+(0.15), `vfogInteriorFarFog` (1, coa PR #9: the distance layer x lerp(1, f, interior weight)), `vfogNoiseScale`
+(0.025, 0.001..1), `vfogNoiseWind` (0.5, 0..10), `vfogClassicNoise` (1), `vfogGlowCompensation` (1), `vfogUnderwater`
+(0), `vfogStockFog` (1), `vfogForeverGlow` (0), `vfogSunMarker` (0, debug), `vfogLiquidDepth` (1; modern water forces
+the depth writes anyway, `WaterArmed`).
 
 ## 9. Perf budget (1440p, mid GPU)
 

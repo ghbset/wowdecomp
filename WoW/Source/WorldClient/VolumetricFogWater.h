@@ -140,5 +140,7 @@ bool RenderGrade(const float* curve32, float strength, int dither, uint32_t fram
 
 // Driver accessors (VolumetricFog.cpp): this frame's inputs once OnOpaqueDone captured them.
 bool WaterFrame(const FrameInputs*& in, const Config*& cfg);
+bool StockFogReplaced();
+bool WaterArmed();         // modern water draws in this liquid pass   // the stock fog is pushed out this frame (coa !stockFogApplies)
 
 }  // namespace VolumetricFog

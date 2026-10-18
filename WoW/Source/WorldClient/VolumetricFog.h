@@ -63,6 +63,12 @@ struct Config {
     float gradeStrength = 1.0f;     // vfogGradeStrength: coa ColorGrading's 0..1 strength when on
     int dither = 1;                 // vfogDither: 0 off, 1 = +-1/255 triangular on the 8-bit outputs, 2 = twice that
     bool hdrTargets = true;         // vfogHdrTargets: half-float fog targets where the device has them, 0 = 8 bit
+    float interiorFarFog = 1.0f;    // vfogInteriorFarFog: coa InteriorFarFog (PR #9), distance fog kept indoors 0..1
+    bool underwater = false;        // vfogUnderwater: coa Underwater, fog after the world with the camera in liquid
+    bool stockFog = true;           // vfogStockFog: coa StockFog, 0 = keep the stock fog, no distance layer
+    bool foreverGlow = false;       // vfogForeverGlow: coa ForeverGlow, the modern client's glow amount
+    bool sunMarker = false;         // vfogSunMarker: coa SunMarker, red dot at the light's screen position
+    bool liquidDepth = true;        // vfogLiquidDepth: coa LiquidDepth, water writes depth while the fog draws
 };
 
 // ---- per-frame engine inputs (coa-vfog src/engine.h FrameInputs, read natively) ----------------
@@ -205,6 +211,7 @@ void OnWorldDone();                         // end of CGWorldFrame::OnWorldRende
 void OnWorldRendered();                     // CGWorldFrame::RenderWorld, after OnWorldRender (glow done), before names
 bool GlareDrawn();                          // OnLiquidDone drew DayNight::RenderGlares under the fog: skip the stock call
 bool LiquidDepthWrite();                    // force liquid depth writes while Active()
+float GlowAmount(float client);             // coa ForeverGlow: the glow amount the FFX glow gets (UpdateScreenEffectParams)
 bool WaterHidesClientRipples();              // CMap::CreateWaterRipple: the modern water's ripples replace the client's sprites
 bool BatchFog(const float modelPos[3], float& start, float& end, float& density, float color[3]);
 

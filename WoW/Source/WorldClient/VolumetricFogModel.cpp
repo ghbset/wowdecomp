@@ -211,8 +211,8 @@ void DistanceLayer(const FrameInputs& in, const Config& cfg, const FogParams& p,
     float farStart = std::min(std::max(in.fogStart, 0.0f), p.farLimit * kFarStartFraction);
     float opticalDepthPerDensity = DistanceFogOpticalDepthPerDensity(farStart, p.farLimit, p.maxDistance);
     out.start = farStart;
-    // coa: cfg.stockFog == 1 (replace the stock fog) is the only mode natively.
-    out.density = opticalDepthPerDensity > 0.0f ? kFarOpticalDepth * cfg.farFog * cfg.density / opticalDepthPerDensity
+    // coa: vfogStockFog 0 keeps the stock fog and drops the distance layer.
+    out.density = cfg.stockFog && opticalDepthPerDensity > 0.0f ? kFarOpticalDepth * cfg.farFog * cfg.density / opticalDepthPerDensity
                                                 : 0.0f;
     out.g = kFarG;
     out.isotropic = kFarIsotropic;
@@ -301,6 +301,9 @@ void ApplyInteriorFog(float weight, const Config& cfg, FogParams& fog) {
     for (int i = 0; i < kSceneLayers; ++i) {
         fog.layers[i].density *= densityScale;
     }
+    // coa PR #9 InteriorFarFog: the distance fog keeps this fraction indoors (1 = as before).
+    const float retainedFarFog = std::isfinite(cfg.interiorFarFog) ? std::clamp(cfg.interiorFarFog, 0.0f, 1.0f) : 1.0f;
+    fog.layers[kDistanceFogLayer].density *= 1.0f + (retainedFarFog - 1.0f) * weight;
     for (FogLayer& layer : fog.layers) {
         Scale(layer.diffuse, 1.0f - weight, layer.diffuse);
     }
