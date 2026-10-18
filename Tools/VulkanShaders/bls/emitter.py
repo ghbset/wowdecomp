@@ -101,6 +101,7 @@ class Emitter(object):
         self.samplers = {}                         # slot -> '2d' | 'cube'
         self.temps = set()
         self.uses_odepth = False
+        self.uses_vpos = False       # dcl vPos (our custom.MPQ shaders only) -> gl_FragCoord
         self.outregs = collections.OrderedDict()
         self.uses_a0 = False
         self.uses_aL = False
@@ -170,6 +171,8 @@ class Emitter(object):
             return 'i%d' % o.index
         if rt == ir.RT_CONSTBOOL:
             raise Refused('bool constant b%d' % o.index)
+        if rt == ir.RT_MISCTYPE and o.index == 0 and self.uses_vpos:
+            return 'vPos'
         if rt == ir.RT_MISCTYPE:
             raise Refused('%s is not supported' % self.regname(o))
         if rt == ir.RT_PREDICATE:
@@ -295,6 +298,9 @@ class Emitter(object):
             if d.index > 15:
                 raise Refused('sampler slot s%d' % d.index)
             self.samplers[d.index] = t
+            return
+        if d.rtype == ir.RT_MISCTYPE and d.index == 0 and not self.vs:
+            self.uses_vpos = True
             return
         if d.centroid:
             raise Refused('_centroid declaration')
@@ -711,6 +717,8 @@ class Emitter(object):
                 P('    vec4 %s = vec4(0.0);' % nm)
         else:
             P('    oC0 = vec4(0.0);')
+            if self.uses_vpos:
+                P('    vec4 vPos = vec4(gl_FragCoord.xy - 0.5, 0.0, 0.0);   // D3D9 vPos is the pixel corner')
             if self.uses_odepth:
                 P('    vec4 oDepth = vec4(gl_FragCoord.z);   // oDepth -> gl_FragDepth (D3D: one write on every path)')
             for nm, sem in self.inputs.items():

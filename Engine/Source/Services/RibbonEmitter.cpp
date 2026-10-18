@@ -5,6 +5,7 @@
 #include "Engine/Source/Base/Handle.h"
 #include "Engine/Source/Gx/CGxDevice/CGxDevice.h"
 #include "Engine/Source/Gx/Gx.h"
+#include "Engine/Source/Services/ParticleSystem2.h"
 #include "Engine/Source/Services/Texture.h"
 #include "Engine/Source/ShaderEffect/ShaderEffect.h"
 #include "Engine/Source/Storm/H/storm.h"
@@ -529,7 +530,10 @@ int32_t CRibbonEmitter::Render(const C44Matrix* frameOfReference) {
             GxTexSetWrap(gxTex, GxTex_Clamp, GxTex_Clamp);
             CShaderEffect::SetDefaultShaders(0);
             CShaderEffect::UpdateWorldViewMatrix();
+            void (*soft)(bool) = g_softParticleDraw;   // SOFTPARTICLES: ribbons' Gx blends map 0/1 to opaque/key
+            if (soft) soft(true);
             g_theGxDevicePtr->Draw(&batch, 1);
+            if (soft) soft(false);
         }
 
         g_theGxDevicePtr->RsPop();

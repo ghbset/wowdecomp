@@ -24,6 +24,7 @@ Water (coa vw_*): VFogWaterDepth, VFogWaterMask, VFogWater{1,2,3} (SSR_STEPS 0/1
 GPU waves VFogWave{Evolve,Fft,Surface,Mip,Pack}.
 Grass wind (wxl-grasswind, MULTI): Shaders/Vertex/vs_3_0|vs_4_0/DetailDoodad.bls, the stock grass VS's 6 permutations.
 Fading models (wxl-vfog 0.6.3): VFogDepthCopy. Legion FFX post: LegionPost{0,1,2}. Legion SSAO: LegionSsao{,Box,Bilateral,Apply}. Legion heat haze (refraction): LegionRefraction. Land shadow mask (shadowMask): VFogShadowMask. Lamps (lightMode): LegionLights. MSAA sample split (coa): VFogSilhouette and VFogCompositeSplit{Q}[L][N].
+Soft particles (wxl-light Soft.cpp): SoftParticle{0,1}.
 """
 import argparse
 import concurrent.futures
@@ -74,6 +75,9 @@ SHADERS = {
     # Falling leaves (wxl-treewind Leaves.cpp, docs/BACKLOG_PORT.md): a vertex shader over a static PNCT2 buffer + its pixel shader
     'TreeLeavesVS': ('vs_3_0', 0, 0, 0, 0, 'TreeLeavesVS', {}),
     'TreeLeavesPS': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0), 0, 'TreeLeavesPS', {}),
+    # Soft particles (wxl-light Soft.cpp, docs/BACKLOG_PORT.md): Combiners_Mod 0 / 8 (texkill) + the fade; s12 scene depth
+    'SoftParticle0': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 12), 0, 'SoftParticle', {'ALPHAKILL': 0}),
+    'SoftParticle1': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 12), 0, 'SoftParticle', {'ALPHAKILL': 1}),
     # Cata ProcMagma lava/slime over the stock vsLiquidMagma (backlog #10, liquidProcMagma)
     'LiquidProcMagma': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 1, 2, 3), 0, 'LiquidProcMagma', {}),
     # shadowMask (Legion survey 2.7): the land's sun shadow over the opaque world, a multiply; s5/s6 cascades, s7 land
