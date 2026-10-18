@@ -665,3 +665,13 @@ The 2026-10-18 audit's findings, fixed on four branches and merged together (pub
   `s_mipBits` shrinks back after small loads; dead `NDEBUG` returns removed from DebugLog.
 
 Checks: `check_gpu_waves.py` PASS (no foam exemption), GroundDecalCheck ok.
+
+## 2026-10-18: vfog23, ghost-image fix
+
+Published as `2026.10.18-vfog23`:
+
+- **Vulkan** (`Readback.cpp`): a pending clear is applied before a scene copy or read-back, so copies no longer
+  pick up the previous frame's contents (the ghost image).
+- **FFX** (`FFX::Finish`): the glow is skipped when `GxTexCopy` fails instead of compositing a stale copy.
+
+No shader or custom.MPQ changes.
