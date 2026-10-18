@@ -182,6 +182,7 @@ bool CommonRows(const FrameInputs& in, const WorldViewport& vp, const CGxTex* de
 // vf_shadow.hlsli c56-c62 and its two maps (VolumetricFogRenderer.cpp, SHADOW_PORT_PLAN S3) for the view space whose
 // view-to-world is viewToWorld; all zero (unshadowed) when off or without the bands.
 void SunShadowRegisters(bool on, float canopy, const float viewToWorld[16], float shadow[7][4], CGxTex* maps[2]);
+void SetShadowFadeRegister();   // c64 (gfxShadowFade), with the c56-c62 above
 
 // ---- caustics and the underwater tint (VolumetricFogCaustics.cpp, wxl-water caustics; docs/BACKLOG_PORT.md) ------
 void RegisterCausticCVars();                // from RegisterCVars

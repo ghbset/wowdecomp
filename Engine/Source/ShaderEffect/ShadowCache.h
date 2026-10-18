@@ -71,6 +71,8 @@ class CShadowCache {
     static const float s_bandUpdateDistance[3];
     static C4Vector s_cutoffPlane;
     static C4Vector s_cutoffPlaneDefault;
+    static float s_shadowFade;   // not stock: gfxShadowFade, 0..1 of the sun/moon shadow shown (DayNight sets it)
+    static void SetShadowFade(float fade) { s_shadowFade = fade; }
     static float s_debugAspect;
     static int32_t s_debugLevel;
     static CShadowBand s_extDynShadow;

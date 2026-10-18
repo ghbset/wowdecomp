@@ -669,6 +669,13 @@ void InvalidateHistory() {
     s_history.valid = false;
 }
 
+// gfxShadowFade: vf_shadow.hlsli cShadowFade (c64.x = 1 - fade) for SunVisibility, the fog's and the caustics' sun
+// tap (shafts, in-scatter, canopy). The sun glare's occlusion is real and is not faded. Shared with the caustics.
+void SetShadowFadeRegister() {
+    const float unfade[4] = { 1.0f - DayNight::g_shadowFade, 0.0f, 0.0f, 0.0f };
+    SetPs(kShadowRegister + 8, unfade, 1);
+}
+
 // Shared with the caustics (VolumetricFogWater.h).
 void SunShadowRegisters(bool on, float canopy, const float viewToWorld[16], float shadow[7][4], CGxTex* maps[2]) {
     std::memset(shadow, 0, sizeof(float) * 28);
@@ -768,6 +775,7 @@ void ShadowConstants(bool shadowedSun, float canopy, const FrameInputs& in, cons
 void BindShadows(const FogFrame& f, bool on) {
     if (on) {
         SetPs(kShadowRegister, &f.shadow[0][0], 8);
+        SetShadowFadeRegister();
     }
     Bind(kShadowStage, on ? f.shadowMaps[0] : nullptr);
     Bind(kShadowStage + 1, on ? f.shadowMaps[1] : nullptr);

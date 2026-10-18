@@ -960,6 +960,8 @@ void ShadeClass(WaterClass waterClass, CGxTex* waterDepth = nullptr) {
         land[3] = 0.0f;
     }
     SetPs(kLandShadowRegister, land, 1);
+    const float unfade[4] = { 1.0f - DayNight::g_shadowFade, 0.0f, 0.0f, 0.0f };   // gfxShadowFade: c69 cLandShadowFade
+    SetPs(kLandShadowRegister + 1, unfade, 1);
     Bind(kLandShadowStage, landTex);
     // coa ShadingVariant: the quality's reflection march, or sky reflections only when reflections are off.
     const int variant = s_pass.water.reflections > 0.0f ? s_pass.water.quality - 1 : 0;

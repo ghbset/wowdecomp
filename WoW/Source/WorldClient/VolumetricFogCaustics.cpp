@@ -59,6 +59,7 @@ void Draw(CGxShader* shader, const float common[9][4], const float rows[4][4], c
     SetPs(0, &common[0][0], 9);
     SetPs(kCausticRegister, &rows[0][0], 4);
     SetPs(kShadowRegister, &shadow[0][0], 7);
+    SetShadowFadeRegister();
     Bind(kShadowStage, maps[0]);
     Bind(kShadowStage + 1, maps[1]);
     GxRsSet(GxRs_BlendingMode, GxBlend_Mod2x);   // 2 src dest: dest (1 + caustic) tint

@@ -35,6 +35,7 @@ float4 cRippleWindow : register(c65);
 float4 cRippleShape : register(c66);
 float4 cRippleFade : register(c67);
 float4 cLandShadow : register(c68);      // shadowMask: TerrainSunShadow row (u0, v0, k, 1 / soft), w = 0 off
+float4 cLandShadowFade : register(c69);  // gfxShadowFade: x = 1 - fade (0 = the full land shadow)
 sampler2D sLandShadow : register(s13);   // its lit-height texture
 static float gLandSun = 1;               // VFogWater.hlsl sets it per pixel (LandSunVisibility)
 
@@ -76,7 +77,8 @@ float LandSunVisibility(float3 world)
     [branch] if (cLandShadow.w <= 0)
         return 1;
     float lit = tex2Dlod(sLandShadow, float4(cLandShadow.xy - cLandShadow.z * world.yx, 0, 0)).x;
-    return saturate(1 - (lit - world.z) * cLandShadow.w);
+    float sun = saturate(1 - (lit - world.z) * cLandShadow.w);
+    return sun + (1 - sun) * cLandShadowFade.x;
 }
 
 float3 SunColour()

@@ -411,3 +411,7 @@ FodyWeavers.xsd
 # Local Visual Studio CMake settings (absolute paths to re/tools)
 CMakeSettings.json
 /Tools/VulkanShaders/translated
+
+# gfxShadowFade terrain shaders: patched from the client's (Tools/CustomMpq/ShaderSrc/terrain_fade.py), not versioned
+Tools/CustomMpq/Shaders/Pixel/ps_3_0/terrain*.bls
+Tools/CustomMpq/Shaders/Pixel/ps_4_0/terrain*.bls

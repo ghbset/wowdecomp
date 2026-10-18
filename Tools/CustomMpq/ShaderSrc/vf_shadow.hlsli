@@ -34,6 +34,9 @@ sampler2D sShadowFar : register(s6);
 // over kSoftYards (1 / c63.w). c63 = (u0, v0, k, 1 / soft): uv = c63.xy - c63.z * world.yx; w = 0: off. Clamped.
 float4 cTerrainShadow : register(c63);
 sampler2D sTerrainShadow : register(s7);
+// gfxShadowFade (DayNight PickLightBody): x = 1 - fade, how much of the sun's shadow (land and cascades) is lifted at
+// dusk and dawn. 0 = the full shadow, exactly.
+float4 cShadowFade : register(c64);
 
 float TerrainSunVisibility(float3 viewPosition)
 {
@@ -114,8 +117,8 @@ float SunVisibility(float3 viewPosition, float edgeJitter)
     [branch] if (sun > 0)
         sun *= CascadeSunVisibility(viewPosition, edgeJitter);
 #endif
-    return sun;
 #else
-    return CascadeSunVisibility(viewPosition, edgeJitter);
+    float sun = CascadeSunVisibility(viewPosition, edgeJitter);
 #endif
+    return sun + (1 - sun) * cShadowFade.x;
 }

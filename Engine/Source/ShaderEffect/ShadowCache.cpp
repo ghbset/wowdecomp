@@ -1,4 +1,3 @@
-#include "WoW/Source/WorldClient/DayNight.h"
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -114,6 +113,8 @@ C4Vector CShadowCache::s_cutoffPlane;
 
 // STATIC: 0x00D431AC
 C4Vector CShadowCache::s_cutoffPlaneDefault;
+
+float CShadowCache::s_shadowFade = 1.0f;
 
 // STATIC: 0x00D431BC
 float CShadowCache::s_textureSize[2];
@@ -432,16 +433,24 @@ void CShadowCache::SetShadowMapGenericInterior(int32_t interior) {
     }
 
     // Not stock (gfxShadowFade): the M2/WMO receivers take lerp(shadow, lit, saturate(dot(pos, c3.xyz) + c3.w)), so
-    // the default plane's w is 1 - fade (exact). The interior/low-mode height plane keeps its own.
-    C4Vector faded = CShadowCache::s_cutoffPlaneDefault;
-    faded.w = 1.0f - DayNight::g_shadowFade;
-    GxShaderConstantsSet(GxSh_Pixel, 3, cutoffPlane == &CShadowCache::s_cutoffPlaneDefault ? &faded.x : &cutoffPlane->x, 1);
+    // outdoors (every shadow quality) w goes to 1 - (1 - w) * fade, 1 - fade on the stock zero planes (fade 1: stock).
+    // The interior map is not the sun's and keeps its plane.
+    C4Vector plane = *cutoffPlane;
+    if (!interior) {
+        plane.w = 1.0f - (1.0f - plane.w) * CShadowCache::s_shadowFade;
+    }
+    GxShaderConstantsSet(GxSh_Pixel, 3, &plane.x, 1);
     g_theGxDevicePtr->RsSet(GxRs_Texture4, texture);
 }
 
 // VERIFY: f70f0371 auto
 // OFFSET: 0x00874660
 void CShadowCache::SetShadowMapTerrain() {
+    // Not stock (gfxShadowFade): Terrain2/3[_pcf] from custom.MPQ (ShaderSrc/terrain_fade.py) take their shadow as
+    // S * c15.x + c15.y; set first, as those shaders draw even while the maps are being recreated. (1, 0): stock.
+    const float fade[4] = { CShadowCache::s_shadowFade, 1.0f - CShadowCache::s_shadowFade, 0.0f, 0.0f };
+    GxShaderConstantsSet(GxSh_Pixel, 15, fade, 1);
+
     if (CShadowCache::s_recreateTextures) {
         return;
     }
@@ -479,7 +488,7 @@ void CShadowCache::SetShadowMapDetailDoodad() {
 
     GxShaderConstantsSet(GxSh_Vertex, 23, &CShadowCache::s_shadowMatrices[0].x, 12);
     C4Vector faded = CShadowCache::s_cutoffPlaneDefault;   // gfxShadowFade, as SetShadowMapGenericInterior
-    faded.w = 1.0f - DayNight::g_shadowFade;
+    faded.w = 1.0f - CShadowCache::s_shadowFade;
     GxShaderConstantsSet(GxSh_Pixel, 3, &faded.x, 1);
     GxShaderConstantsSet(GxSh_Pixel, 4, &CShadowCache::s_sunDirViewSpace.x, 1);
     GxShaderConstantsSet(GxSh_Pixel, 5, &CShadowCache::s_pcfOffsets[0].x, 8);

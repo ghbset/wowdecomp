@@ -18,7 +18,8 @@ Contents:
                           foam\\waterchop7bw.blp from Cataclysm 4.3.4, waterStyle 1, WorldClient/CataWater.cpp).
   Shaders\\...            our own shaders, Tools/CustomMpq/Shaders (ps_3_0 for D3D9, ps_4_0 for D3D11),
                           built from ShaderSrc/*.hlsl by ShaderSrc/build_shaders.py (VFog*: volumetric
-                          fog, docs/VFOG_PORT.md). Tools/VulkanShaders translates the ps_3_0 ones with the client's.
+                          fog, docs/VFOG_PORT.md), plus the stock Terrain2/3[_pcf] patched by
+                          ShaderSrc/terrain_fade.py (gfxShadowFade; generated, not committed). Tools/VulkanShaders translates the ps_3_0 ones with the client's.
   VFog\\...               every file in Tools/CustomMpq/VFog (fogdata.bin: the Classic/Forever fog layers,
                           coa-vfog data/fogdata.bin, read by VolumetricFogData.cpp; waterdata.bin: the Forever
                           water presets, FFT tiles and foam masks, coa-vfog data/waterdata.bin, read by
@@ -162,6 +163,11 @@ def main(argv):
     textures.update(folder_files('XTextures', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'XTextures')))
     files.update(textures)
     ours = folder_files('Shaders', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Shaders'))
+    # gfxShadowFade's terrain shaders are generated from the client's, not committed (ShaderSrc/terrain_fade.py)
+    missing = ['%s\\%s.bls' % (p, f) for p in ('ps_3_0', 'ps_4_0') for f in ('terrain2', 'terrain2_pcf', 'terrain3', 'terrain3_pcf')
+               if ('shaders\\pixel\\%s\\%s.bls' % (p, f)) not in {n.lower() for n in ours}]
+    if missing:
+        sys.exit('missing %s: run Tools/CustomMpq/ShaderSrc/terrain_fade.py first' % ', '.join(missing))
     # ours replace a stock SM4 file of the same name (DetailDoodad.bls); MPQ names are case-insensitive
     replaced = {n.lower() for n in ours}
     for n in [n for n in files if n.lower() in replaced]:

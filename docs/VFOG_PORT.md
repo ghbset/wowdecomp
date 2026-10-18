@@ -878,3 +878,30 @@ sky body under `gfxSunArc 1`:
 - **Sky dome highlight** (`DNSky::SetColors`): keyed to the camera's facing and the hour, not a body. Unchanged.
 
 `gfxSunArc 0` is stock exactly. No shaders; custom.MPQ unchanged from vfog35.
+
+## 2026-10-19: vfog37, shadows fade at dusk and dawn (shadowfade)
+
+`gfxShadowFade` (default 1, Video Options > Advanced > Shadows "Shadows fade at dusk and dawn"; 0 = always full, the
+vfog36 behaviour). `DayNight::PickLightBody` computes the fade f (wxl-light Sun.cpp g_shadowK: the light body's
+BodyWeight less the other's and the swap margin, so f = 0 on the frame the light changes body) and hands it to the
+engine with `CShadowCache::SetShadowFade` (Engine does not include WoW headers). Every sun/moon shadow consumer takes
+`S' = S + (1 - S)(1 - f)` (f = 1 is S exactly):
+
+- **M2 / WMO / grass** (`SetShadowMapGenericInterior`, `SetShadowMapDetailDoodad`): PS c3.w = 1 - (1 - w) f on the
+  outdoor cutoff plane, at every shadow quality (1-2 use `s_cutoffPlane`, also zero); the interior map is not faded.
+- **Terrain**: the stock Terrain2 / Terrain2_pcf / Terrain3 / Terrain3_pcf (all 256 dynamic-shadow permutations) are
+  patched by `Tools/CustomMpq/ShaderSrc/terrain_fade.py`: one `mad rS, rS, c15.x, c15.y` before the stock
+  `0.3 S + 0.7` mad (S feeds the diffuse and the specular), c15 = (f, 1 - f) set at the top of
+  `SetShadowMapTerrain`. The baked chunk shadow is in S (min) and fades with it. ps_3_0 (D3D9, translated for Vulkan
+  by translate_shaders.py through Tools/CustomMpq/Shaders) and ps_4_0 (shader-xlate compile_one with its pcf_slots)
+  are written to Tools/CustomMpq/Shaders and replace the stock/pack files by name in custom.MPQ. They are derived from
+  the client's shaders, so they are .gitignored; `build_custom_mpq.py` refuses to build without them. The SM4 pack
+  itself is unchanged.
+- **Fog** (`vf_shadow.hlsli SunVisibility`: in-scatter, shadowed shafts, canopy; land and cascade taps) and the
+  **caustics**: c64.x = 1 - f (`SetShadowFadeRegister`, with the shadow registers). The sun glare's occlusion is not
+  faded (real occlusion).
+- **Water** (glint, foam, in-scatter land tap, `vw_constants LandSunVisibility`): c69.x = 1 - f.
+- **Land shadow mask** (shadowMask): c10.w strength x f (350f294).
+
+Rebuild: `terrain_fade.py --xlate /root/d3d11-port/shader-xlate`, then `build_shaders.py`, translate_shaders.py,
+build_custom_mpq.py (the pack from shadow-s1).

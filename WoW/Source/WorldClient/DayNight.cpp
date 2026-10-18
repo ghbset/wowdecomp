@@ -1,5 +1,6 @@
 #include "WoW/Source/WorldClient/TerrainSunShadow.h"
 #include "WoW/Source/WorldClient/DayNight__DNInfo.h"
+#include "Engine/Source/ShaderEffect/ShadowCache.h"
 #include <cmath>
 #include <new>
 #include <typeinfo>
@@ -2885,6 +2886,7 @@ static void PickLightBody() {
         }
 
         DayNight::g_shadowFade = ShadowFade(BodyWeight(elev[body]), BodyWeight(elev[1 - body]));
+        CShadowCache::SetShadowFade(DayNight::g_shadowFade);
         return;
     }
 
@@ -2895,6 +2897,7 @@ static void PickLightBody() {
     }
 
     DayNight::g_shadowFade = ShadowFade(w[body], w[1 - body]);
+    CShadowCache::SetShadowFade(DayNight::g_shadowFade);
 
     const float k = w[body];
     const float el = (elev[body] > 10.0f ? elev[body] : 10.0f) * 0.017453292f;
