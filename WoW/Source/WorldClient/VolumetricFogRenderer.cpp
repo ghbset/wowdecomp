@@ -651,7 +651,7 @@ bool RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg,
     CGxShader* unlitMarch = VariantShader(s_shaders.march, "VFogMarch", quality, false, noiseVariant);
     CGxShader* litMarch = lit ? VariantShader(s_shaders.march, "VFogMarch", quality, true, noiseVariant) : unlitMarch;
     CGxShader* composite = VariantShader(s_shaders.composite, "VFogComposite", quality, lit, noiseVariant);
-    // vfogMsaaSplit: only with a multisampled depth (D3D9 RESZ / D3D11; Vulkan has none, and cannot load VFogSilhouette).
+    // vfogMsaaSplit: only with a multisampled depth (D3D9 RESZ / D3D11; Vulkan MSAA cannot load VFogSilhouette: no oDepth).
     CGxShader* splitComposite = cfg.msaaSplit && device->m_format.m_multisampleCount > 1 && StencilAvailable() && !vp.target
             && Shader(s_shaders.silhouette, "VFogSilhouette")
         ? VariantShader(s_shaders.compositeSplit, "VFogCompositeSplit", quality, lit, noiseVariant)
