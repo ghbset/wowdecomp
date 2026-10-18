@@ -67,6 +67,7 @@ class CMapRenderChunk {
     typedef void (*RenderLayersFunc)(CMapRenderChunk* renderChunk);
 
     static int32_t s_bPoolsDirty;
+    static uint32_t s_poolMaxMB;   // BACKLOG F3: CVar terrainPoolMaxMB, 0 = uncapped
     static EGxVertexBufferFormat s_gxBufVertexFormat;
     static uint32_t s_pnEstimateVertex;
     static uint32_t s_pnEstimateIndex;

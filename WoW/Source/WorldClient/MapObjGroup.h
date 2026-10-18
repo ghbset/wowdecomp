@@ -148,6 +148,7 @@ class CMapObjGroup {
     static void AsyncFailedCallback(CAsyncObject* object);
     static void AsyncPostloadCallback(void* arg);
     static void AllocVertArray(CMapObjGroup::VertArray** vertArray, uint32_t count);
+    static bool s_repairNormals;   // BACKLOG: not in 12340. CVar wmoNormalRepair (wxl-light Normals.cpp)
 
     /* 0000 */ int32_t m_objectIndex;
     /* 0004 */ VBBList_Block* m_vertsBlock;
@@ -233,6 +234,7 @@ class CMapObjGroup {
     void InitPtrs();
     void Create();
     void CreateDataPointers(SIffChunk* dataChunk);
+    void RepairNormals();   // BACKLOG: not in 12340
     void CreateOptionalDataPointers(SIffChunk* dataChunk);
     void AllocVB();
     void AllocLiquidVB(EGxVertexBufferFormat format, uint32_t vertexCount, uint32_t indexCount, CGxBatch** batch);

@@ -347,6 +347,10 @@ float Spell_C_GetSpellRadius();
 void Spell_C_ModifyCooldown(int32_t spellId, uint32_t time, int32_t index, int32_t remove);
 void Spell_C_DelayCooldown(int32_t index, int32_t spellId, int32_t delay);
 bool Spell_C_GetSpellCooldown(int32_t spellId, int32_t petSpell, uint32_t* duration, uint32_t* start, uint32_t* enable);
+// BACKLOG F4: spell queue window (CVars spellQueue / spellQueueWindow). Like Spell_C_GetSpellCooldown, but a
+// player cooldown ending within the window answers "ready"; the server's SpellQueue holds the early cast.
+extern int32_t s_spellQueueWindow;   // ms, 0 = off
+bool Spell_C_GetSpellCooldownQueued(int32_t spellId, int32_t petSpell);
 bool Spell_C_IsActiveSpell(const SpellRec* spell, const CGUnit_C* unit);
 uint32_t Spell_C_GetPowerDisplayMod(POWER_TYPE powerType);
 const char* GetPowerString(POWER_TYPE powerType);

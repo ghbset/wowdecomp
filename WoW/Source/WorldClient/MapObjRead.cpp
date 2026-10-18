@@ -5,6 +5,7 @@
 #include "Engine/Source/Storm/H/storm.h"
 #include "Engine/Source/ShaderEffect/ShaderEffect.h"
 #include <cmath>
+#include <vector>
 #include "WoW/Source/WorldClient/Types.h"
 #include "WoW/Source/WorldClient/DayNight.h"
 #include "Engine/Source/Services/AsyncFile.h"
@@ -405,7 +406,95 @@ void CMapObjGroup::CreateDataPointers(SIffChunk* dataChunk) {
     this->m_batchList = reinterpret_cast<SMOBatch*>(&chunk->m_data);
     this->m_batchListCount = chunk->m_size / sizeof(SMOBatch);
 
+    if (CMapObjGroup::s_repairNormals) {
+        this->RepairNormals();   // BACKLOG: not in 12340
+    }
+
     this->CreateOptionalDataPointers(reinterpret_cast<SIffChunk*>(reinterpret_cast<uint8_t*>(&chunk->m_data) + chunk->m_size));
+}
+
+// BACKLOG: not in 12340. Port of wxl-light Normals.cpp (the plugin hooked 0x007D7F50 and edited the
+// group's file buffer before this walk). Many low-poly buildings store MONR normals that are not their
+// faces' own (Ratchet's dock deck: two flat 390 sq yd triangles whose corner normals lean 50 degrees out),
+// which under a low sun draws a hard-edged dark wedge across the face. A vertex takes the area-weighted
+// normal of the rendered faces round it WHEN those faces all but lie in one plane (agreement >= 0.8), one
+// of them is large (>= 20 sq yd) and the stored normal is more than 25 degrees off. Creases, curves, small
+// detail and normals that already agree are left as the artist made them. Applies at load only.
+bool CMapObjGroup::s_repairNormals = true;
+
+void CMapObjGroup::RepairNormals() {
+    constexpr float kMinArea = 20.0f;    // sq yd: the largest face round the vertex is at least this
+    constexpr float kMinAgree = 0.8f;    // |sum of area-weighted face normals| / sum of areas: 1 = one plane
+    constexpr float kMaxCos = 0.906f;    // cos 25 degrees: the stored normal is further off than this
+
+    const uint32_t tris = static_cast<uint32_t>(this->m_indicesCount) / 3;
+    const uint32_t verts = static_cast<uint32_t>(this->m_vertexListCount);
+
+    if (!tris || !verts || static_cast<uint32_t>(this->m_normalListCount) != verts || static_cast<uint32_t>(this->m_polyListSize) < tris) {
+        return;
+    }
+
+    std::vector<float> acc(size_t(verts) * 3, 0.0f), tot(verts, 0.0f), big(verts, 0.0f);
+
+    for (uint32_t t = 0; t < tris; t++) {
+        if (this->m_polyList[t].m_materialId == 0xFF) {
+            continue;   // no material: collision only, never lit
+        }
+
+        const uint16_t* i = &this->m_indices[t * 3];
+
+        if (i[0] >= verts || i[1] >= verts || i[2] >= verts) {
+            return;   // not the layout we know: touch nothing
+        }
+
+        const C3Vector& a = this->m_vertexList[i[0]];
+        const C3Vector& b = this->m_vertexList[i[1]];
+        const C3Vector& c = this->m_vertexList[i[2]];
+        const float e0[3] = { b.x - a.x, b.y - a.y, b.z - a.z };
+        const float e1[3] = { c.x - a.x, c.y - a.y, c.z - a.z };
+        const float fn[3] = {
+            (e0[1] * e1[2] - e0[2] * e1[1]) * 0.5f,
+            (e0[2] * e1[0] - e0[0] * e1[2]) * 0.5f,
+            (e0[0] * e1[1] - e0[1] * e1[0]) * 0.5f,
+        };
+        const float area = std::sqrt(fn[0] * fn[0] + fn[1] * fn[1] + fn[2] * fn[2]);
+
+        if (!(area > 1.0e-6f)) {
+            continue;
+        }
+
+        for (int k = 0; k < 3; k++) {
+            const uint32_t v = i[k];
+            acc[v * 3] += fn[0];
+            acc[v * 3 + 1] += fn[1];
+            acc[v * 3 + 2] += fn[2];
+            tot[v] += area;
+
+            if (area > big[v]) {
+                big[v] = area;
+            }
+        }
+    }
+
+    for (uint32_t v = 0; v < verts; v++) {
+        const float* s = &acc[v * 3];
+        const float len = std::sqrt(s[0] * s[0] + s[1] * s[1] + s[2] * s[2]);
+
+        if (big[v] < kMinArea || !(len > 1.0e-6f) || len < kMinAgree * tot[v]) {
+            continue;
+        }
+
+        C3Vector& n = this->m_normalList[v];
+        const float cosOff = (s[0] * n.x + s[1] * n.y + s[2] * n.z) / len;
+
+        if (!(cosOff < kMaxCos)) {
+            continue;   // also leaves a NaN normal alone
+        }
+
+        n.x = s[0] / len;
+        n.y = s[1] / len;
+        n.z = s[2] / len;
+    }
 }
 
 // VERIFY: aea1ef5e manual

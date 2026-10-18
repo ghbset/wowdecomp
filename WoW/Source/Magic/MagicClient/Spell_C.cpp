@@ -3276,6 +3276,27 @@ bool Spell_C_GetSpellCooldown(int32_t spellId, int32_t petSpell, uint32_t* durat
     return s_spellHistory[petSpell].GetSpellCooldown(spellId, 0, duration, start, enable);
 }
 
+// BACKLOG F4: not in 12340. Port of ClientExtensions Gameplay/SpellQueue.cpp (wxl-spellqueue): on-hold and pet
+// cooldowns are never let through.
+int32_t s_spellQueueWindow = 150;
+
+bool Spell_C_GetSpellCooldownQueued(int32_t spellId, int32_t petSpell) {
+    uint32_t duration = 0;
+    uint32_t start = 0;
+    uint32_t enable = 1;
+
+    if (!Spell_C_GetSpellCooldown(spellId, petSpell, &duration, &start, &enable)) {
+        return false;
+    }
+
+    if (s_spellQueueWindow <= 0 || petSpell || !enable) {
+        return true;
+    }
+
+    int32_t remaining = static_cast<int32_t>(start + duration - OsGetAsyncTimeMs());
+    return remaining > s_spellQueueWindow;
+}
+
 // VERIFY: f18946a2 auto
 // OFFSET: 0x007FD440
 static bool GetEffectModifierType(int32_t effect, bool* periodic, int32_t aura, bool* rounded) {

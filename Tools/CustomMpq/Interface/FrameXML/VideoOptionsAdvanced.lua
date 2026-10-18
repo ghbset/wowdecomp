@@ -80,6 +80,11 @@ local PAGES = {
 	},
 	{ name = "World Effects", parent = "Advanced", title = "World Effects",
 	  { "groundDecals", "check", "Ground effects follow terrain", "Spell circles on the ground bend over hills instead of floating flat." },
+	  { "wmoNormalRepair", "check", "Repair building lighting", "Fixes dark wedges across flat floors and docks under a low sun. Buildings already loaded keep their old lighting until you relog or travel far away." },
+	  { "treeSway", "check", "Trees sway in the wind", "Living trees and bushes lean gently in passing gusts. Their shadows move with them." },
+	  { "treeSwayStrength", "slider", "Tree sway amount", "How far trees and bushes lean in the wind.", 0, 3, 0.05 },
+	  { "treeLeaves", "check", "Falling leaves", "Leaves drift down from the swaying trees nearest you, more when the wind gusts." },
+	  { "treeLeavesDensity", "slider", "Falling leaf amount", "How many leaves each tree can shed at once.", 1, 48, 1 },
 	  { "weatherSteadyRate", "check", "Steady weather", "Rain, snow and sand fall just as thickly at any frame rate." },
 	  { "selectionCircleStyle", "drop", "Target circle", "The look of the circle under your target.",
 	    { { "0", "Stock" }, { "1", "Arrow" }, { "2", "Arrow, no fill" }, { "3", "Ring" }, { "4", "Ring, no fill" } } },
@@ -98,6 +103,11 @@ local PAGES = {
 	  { "shadowMask", "check", "Mountain shadows on the world", "Hills and distant mountains cast the sun's shadow onto the ground, buildings and creatures. Needs \"Mountains block the sun\"." },
 	  { "shadowSoft", "slider", "Mountain shadow softness", "How soft the edge of a mountain's shadow is. 0 is hard.", 0, 4, 0.25 },
 	},
+	{ name = "Loading & Gameplay", parent = "Advanced", title = "Loading & Gameplay",
+	  { "fastLoad", "check", "Fast loading", "Loading screens finish sooner; one processor core stays busy while they are up." },
+	  { "terrainPoolMaxMB", "slider", "Terrain memory budget (MB)", "Caps the memory kept for drawing ground at long view distances. Far ground that does not fit is skipped. 0 = no cap.", 0, 1024, 32 },
+	  { "spellQueueWindow", "slider", "Spell queue window (ms)", "Lets a spell be pressed this long before the global cooldown ends; it casts the moment the cooldown is over. 0 turns it off.", 0, 400, 10 },
+	},
 	{ name = "Debug", parent = "Advanced", title = "Debug & Technical",
 	  text = "For testing. The defaults are right for normal play.",
 	  { "vfogDebug", "drop", "Fog debug view", "Shows one part of the fog on screen.",
@@ -115,6 +125,20 @@ local PAGES = {
 	  { "vfogClassicPhase", "check", "Normalised zone sun glow", "Uses energy-normalised sun scattering for the zone fog." },
 	},
 }
+
+-- Grass wind (wxl-grasswind, DetailDoodad.hlsl): its own page, placed before Debug.
+table.insert(PAGES, #PAGES, { name = "Grass", parent = "Advanced", title = "Grass",
+	{ "grassWind", "check", "Grass sways in the wind", "Grass moves gently in the wind." },
+	{ "grassWindStrength", "slider", "Wind strength", "How far the grass sways.", 0, 4, 0.1 },
+	{ "grassParting", "check", "Grass parts as you walk", "Grass leans away from your character and settles back behind you." },
+})
+
+-- Lava and slime (backlog #10, docs/BACKLOG_PORT.md): on the Water page.
+for _, page in ipairs(PAGES) do
+	if page.name == "Water" then
+		table.insert(page, { "liquidProcMagma", "check", "Cataclysm lava and slime", "Lava and slime flow with layered, moving textures as in Cataclysm. Off keeps the stock look." })
+	end
+end
 
 local function Num(v)
 	return tonumber(v) or 0
