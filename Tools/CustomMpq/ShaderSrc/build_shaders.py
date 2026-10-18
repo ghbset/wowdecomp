@@ -82,7 +82,7 @@ SHADERS = {
     # Cata ProcMagma lava/slime over the stock vsLiquidMagma (backlog #10, liquidProcMagma)
     'LiquidProcMagma': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 1, 2, 3), 0, 'LiquidProcMagma', {}),
     # shadowMask (Legion survey 2.7): the land's sun shadow over the opaque world, a multiply; s5/s6 cascades, s7 land
-    'VFogShadowMask': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 5, 6, 7), 0, 'VFogShadowMask', {}),
+    'VFogShadowMask': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 5, 6, 7, 8, 9), 0, 'VFogShadowMask', {}),
     # Legion lights (lightMode, docs/LEGION_PORT.md): the frame's M2 point lights on the surfaces, colour += colour * light
     'LegionLights': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0), 0, 'LegionLights', {}),
     # Legion FFX post (docs/LEGION_PORT.md): colour shift only, FXAA low + colour shift, FXAA high + colour shift
@@ -98,8 +98,8 @@ SHADERS = {
     'LegionRefraction': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 1), 0, 'LegionRefraction', {}),
     # caustics (wxl-water caustics, docs/BACKLOG_PORT.md): over the shaded water (bed + water depth), and under water
     # (scene depth, + the tint); s5/s6 the sun shadow bands (vf_shadow.hlsli)
-    'VFogCausticsAbove': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 1, 5, 6), 0, 'VFogCaustics', {'UNDER': 0}),
-    'VFogCausticsUnder': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 5, 6), 0, 'VFogCaustics', {'UNDER': 1}),
+    'VFogCausticsAbove': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 1, 5, 6, 7), 0, 'VFogCaustics', {'UNDER': 0}),
+    'VFogCausticsUnder': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 5, 6, 7), 0, 'VFogCaustics', {'UNDER': 1}),
 }
 # Cata water (waterStyle 1, docs/BACKLOG_PORT.md "Cata water"): the ProcWater VS and ProcWaterAbove / Below PS,
 # drawn by the liquid material in place of vsLiquidWater / psLiquidWater (WorldClient/CataWater.cpp).
@@ -146,7 +146,9 @@ MULTI = {
 # The shadow band slots of vf_shadow.hlsli: hardware-compare samplers in the SM4 pack (D3D11 binds a LESS_EQUAL
 # comparison sampler for a D24X8 target under hwPCF), like the stock _pcf families' (shader-xlate pcf_slots).
 def compare_slots(name):
-    return (5, 6) if name.startswith(('VFogMarch', 'VFogComposite', 'VFogShadowMask', 'VFogCaustics')) else ()
+    if name == 'VFogShadowMask':
+        return (5, 6, 8, 9)     # + band 0 and the unit map (vfog38)
+    return (5, 6) if name.startswith(('VFogMarch', 'VFogComposite', 'VFogCaustics')) else ()
 
 
 def bls(recs):

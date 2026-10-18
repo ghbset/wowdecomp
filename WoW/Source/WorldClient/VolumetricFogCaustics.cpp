@@ -16,15 +16,16 @@
 #include "Engine/Source/Gx/CGxTex.h"
 #include "Engine/Source/Gx/Gx.h"
 #include "WoW/Source/WorldClient/FrameTime.h"
+#include "WoW/Source/WorldClient/TerrainSunShadow.h"
 #include "WoW/Source/WorldClient/World.h"
 
 namespace VolumetricFog {
 namespace {
 
 constexpr uint32_t kCausticRegister = 9;        // VFogCaustics.hlsl c9-c12
-constexpr uint32_t kShadowRegister = 56;        // vf_shadow.hlsli c56-c62
+constexpr uint32_t kShadowRegister = 56;        // vf_shadow.hlsli c56-c62, c63 the land
 constexpr uint32_t kHorizonRegister = 99;       // vf_common cHorizonBand
-constexpr int kShadowStage = 5;                 // vf_shadow.hlsli s5, s6
+constexpr int kShadowStage = 5;                 // vf_shadow.hlsli s5, s6, s7 the land
 
 CVar* s_caustics = nullptr;
 CVar* s_tint = nullptr;
@@ -52,22 +53,30 @@ bool CausticRows(const FrameInputs& in, float surface, float rows[4][4]) {
     return on;
 }
 
-void Draw(CGxShader* shader, const float common[9][4], const float rows[4][4], const float viewToWorld[16], const WorldViewport& vp) {
-    float shadow[7][4];
+void Draw(const FrameInputs& in, CGxShader* shader, const float common[9][4], const float rows[4][4], const float viewToWorld[16], const WorldViewport& vp) {
+    float shadow[8][4];
     CGxTex* maps[2];
     SunShadowRegisters(true, 0.0f, viewToWorld, shadow, maps);
+    // vfog38 (shadow audit M4): the land's shadow (gfxTerrainShadow), else c63.w = 0 (off).
+    CGxTex* land = nullptr;
+    if (!TerrainSunShadow::Update(in.toLight, in.camPos, land, shadow[7]) || !land) {
+        std::memset(shadow[7], 0, sizeof(shadow[7]));
+        land = nullptr;
+    }
     SetPs(0, &common[0][0], 9);
     SetPs(kCausticRegister, &rows[0][0], 4);
-    SetPs(kShadowRegister, &shadow[0][0], 7);
+    SetPs(kShadowRegister, &shadow[0][0], 8);
     SetShadowFadeRegister();
     Bind(kShadowStage, maps[0]);
     Bind(kShadowStage + 1, maps[1]);
+    Bind(kShadowStage + 2, land);
     GxRsSet(GxRs_BlendingMode, GxBlend_Mod2x);   // 2 src dest: dest (1 + caustic) tint
     GxRsSet(GxRs_ColorWrite, 7);
     g_theGxDevicePtr->RsSet(GxRs_PixelShader, shader);
     DrawQuad(static_cast<uint32_t>(vp.w), static_cast<uint32_t>(vp.h), vp.minX, vp.maxX, vp.minY, vp.maxY);
     Bind(kShadowStage, nullptr);
     Bind(kShadowStage + 1, nullptr);
+    Bind(kShadowStage + 2, nullptr);
 }
 
 }  // namespace
@@ -94,7 +103,7 @@ void CausticsAbove(const FrameInputs& in, const float common[9][4], const WorldV
     }
     Bind(0, bed);
     Bind(1, water);
-    Draw(s_above, common, rows, &common[4][0], vp);
+    Draw(in, s_above, common, rows, &common[4][0], vp);
     EndPasses(s_saved, vp);
 }
 
@@ -130,7 +139,7 @@ void CausticsUnder(const FrameInputs& in) {
     SetPs(kHorizonRegister, in.horizonBand, 1);
     Bind(0, depth);
     device->DeviceSceneDepthBound(false);   // D3D9: s0 is the INTZ depth-stencil the back buffer uses
-    Draw(s_under, common, rows, &common[4][0], vp);
+    Draw(in, s_under, common, rows, &common[4][0], vp);
     device->DeviceSceneDepthBound(true);
     EndPasses(s_saved, vp);
 }

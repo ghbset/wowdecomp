@@ -94,6 +94,7 @@ static CVar* s_cvSunArcDawnRamp;    // not stock: gfxSunArcDawnRamp (PickLightBo
 static CVar* s_cvDebugHour;         // not stock: debugHour (DayNight::DebugHour)
 static CVar* s_cvShadowFade;
 float DayNight::g_shadowFade = 1.0f;
+float DayNight::g_lightStrength = 1.0f;
 int32_t DayNight::g_lightBody;   // 0 the sun, 1 the moon: the body the light, the shadows and the fog come from
 
 bool DayNight::SunArc() {
@@ -2897,6 +2898,7 @@ static void PickLightBody() {
         }
 
         DayNight::g_shadowFade = ShadowFade(BodyWeight(elev[body]), BodyWeight(elev[1 - body]));
+        DayNight::g_lightStrength = 1.0f;
         CShadowCache::SetShadowFade(DayNight::g_shadowFade);
         return;
     }
@@ -2914,6 +2916,7 @@ static void PickLightBody() {
     // dusk colours do not hit sun-facing walls at full strength from 4 degrees up. The pick and the shadows keep -1..4.
     const float ramp = s_cvSunArcDawnRamp ? s_cvSunArcDawnRamp->m_floatValue : 0.0f;
     const float k = ramp > 4.0f ? BodyWeight(elev[body], ramp) : w[body];
+    DayNight::g_lightStrength = k < 0.0f ? 0.0f : (k > 1.0f ? 1.0f : k);
 
     // gfxSunArcMatch (not wxl-light): the DBC colours were authored for the stock light's 20-37 degrees, so the shading
     // height is capped at the stock light's this hour (SetDirection just wrote it); the bearing still follows the body.

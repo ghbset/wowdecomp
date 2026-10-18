@@ -37,6 +37,11 @@ sampler2D sTerrainShadow : register(s7);
 // gfxShadowFade (DayNight PickLightBody): x = 1 - fade, how much of the sun's shadow (land and cascades) is lifted at
 // dusk and dawn. 0 = the full shadow, exactly.
 float4 cShadowFade : register(c64);
+// VF_TERRAIN_BIAS (yd): a surface point (the caustics' bed) is tested this far up, as the ADT ground between WDL
+// vertices may sit under their lit height (the shadow mask's 4 yd). 0 for fog samples in the air.
+#ifndef VF_TERRAIN_BIAS
+#define VF_TERRAIN_BIAS 0
+#endif
 
 float TerrainSunVisibility(float3 viewPosition)
 {
@@ -44,7 +49,7 @@ float TerrainSunVisibility(float3 viewPosition)
         return 1;
     // The texture's border texels are "nothing blocks" (TerrainSunShadow.cpp), so the clamp lights points past it.
     float3 world = mul(float4(viewPosition, 1), cViewToWorld).xyz;
-    return saturate(1 - (tex2Dlod(sTerrainShadow, float4(cTerrainShadow.xy - cTerrainShadow.z * world.yx, 0, 0)).x - world.z) * cTerrainShadow.w);
+    return saturate(1 - (tex2Dlod(sTerrainShadow, float4(cTerrainShadow.xy - cTerrainShadow.z * world.yx, 0, 0)).x - world.z - VF_TERRAIN_BIAS) * cTerrainShadow.w);
 }
 
 bool ShadowedSun()

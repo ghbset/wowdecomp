@@ -95,6 +95,9 @@ struct FrameInputs {
     uint32_t sunColor;              // m_bands.m_sunCloudColors[0]
     uint32_t directColor;           // m_bands.m_diffuse (+4)
     uint32_t ambientColor;          // m_bands.m_ambient (+0)
+    float shadeToLight[3];          // world, unit: -m_light1.m_dir, the direction the receivers shade with (gfxSunArcMatch cap)
+    uint32_t shadeDiffuse;          // ARGB m_light1.m_diffuse / m_ambient: the receivers' light after PickLightBody
+    uint32_t shadeAmbient;
     float fogStart;                 // m_fogInterior start/end SAVED BEFORE the push-out
     float fogEnd;
     float zoneFogDistance;          // m_bands.m_fogEnd

@@ -946,3 +946,28 @@ strength from 4 degrees up (S2). All in `PickLightBody` (DayNight.cpp); the shad
 - **L5.** `RenderBatchShadowMap` and `CM2SceneRender::DrawBatchDoodad` cap instances so bones stay within c31..c255
   (75 bones). Stock skins (<= 64 bones) never hit it.
 - No shader changes. custom.MPQ rebuilt only for the Lua page.
+
+## 2026-10-19: vfog38, shadow mask, fog consumers, caustics (receivers H1/M1/M4, fog F1/F2/F3/F6/F7)
+- **H1 = F1, the mask's receiver model.** Stock receivers multiply the whole lit colour by `0.7 + 0.3 x lit`; the mask
+  now divides by that: `ratio = lerp(saturate(A / stock), 1, T)`, `stock = (A + D ndl)(1 - k (1 - C))`, k = c12.w =
+  0.3 x gfxShadowFade. In the land's shadow every receiver goes to the ambient, so tree and building shadows inside a
+  mountain's shadow no longer come out lighter than the ground around them. Linear in T across the penumbra.
+- **M1, the mask's C.** C = min(unit map, band 0 where it covers the point, else bands 1/2), as the receivers take it.
+  `CShadowCache::GetPublishedUnit` (new) gives the unit map and rows at every shadow quality (so quality 1-2 and the
+  player's own shadow no longer double-darken); band 0 comes from `GetPublished`. Mask registers c65-c67 band 0,
+  c68-c70 unit, c71 (band 0 on, unit on); samplers s8 band 0, s9 unit (compare slots 5, 6, 8, 9 in the SM4 pack).
+  Off on D3D11 with hwPCF 0 (R32F in compare slots), as before (F5 not fixed).
+- **F2 / L9, the mask's light.** ndl, ambient and diffuse come from `m_light1` after PickLightBody (FrameInputs
+  `shadeToLight`, `shadeAmbient`, `shadeDiffuse`): gfxSunArcMatch's capped shading height and the handover's faded
+  diffuse. The land texture keeps the true sun (`in.toLight`), so only the shading half uses the capped direction.
+  With gfxSunArc 0 this is the stock world light.
+- **M4, caustics.** VFogCausticsAbove/Under take the land's tap (VF_TERRAIN 1, c63 / s7 from TerrainSunShadow::Update,
+  bed tested 4 yd up via the new `VF_TERRAIN_BIAS`), faded with the cascades by c64 as before.
+- **F6.** c62.z (canopy) = vfogCanopy x the fog's lightVisibility x `DayNight::g_lightStrength` (new: PickLightBody's
+  k, 1 without gfxSunArc), and set with the land shadow alone (no cascades).
+- **F7.** vfogShadowedSun 0 drops the fog's land tap too; the temporal filter's adaptive reject counts only the
+  cascades (c62.x), not the land.
+- **F3.** The composite's full-res fallback marches with `StepJitter(pixel)` instead of a fixed 0.5.
+- gfxShadowFade 0 (fade 1): the fade paths are unchanged (c10.w, c64, c69, c15).
+- No new CVars. Shaders rebuilt: VFogShadowMask, VFogCausticsAbove/Under, VFogComposite*/VFogCompositeSplit* (24).
+- Not done: F5 (non-compare mask variant for D3D11 hwPCF 0), F4, the models' grazing-ndl shadow fade in the mask.

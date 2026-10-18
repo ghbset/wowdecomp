@@ -63,6 +63,8 @@ struct ShadowView {
     uint32_t size;           // texels per side
     int32_t pcf;             // 1 = hardware compare (depth maps), 0 = R32F compared in the shader
     uint32_t stamp;          // PostUpdate count: unchanged since the consumer's last frame = not updated
+    CGxTex* unitMap;         // the unit (dynamic, 20 yd) map the receivers also take the min with, or nullptr; borrowed
+    C4Vector unitRows[3];
 };
 
 class CShadowCache {
@@ -110,6 +112,7 @@ class CShadowCache {
     static void GatherBands(CShadowCacheQueryData& data, const C3Vector& pos, CFrustum& frustum, int32_t useCullFrustum);
     static uint32_t GetMaxShadowMode();
     static int32_t GetPublished(ShadowView& out);
+    static int32_t GetPublishedUnit(ShadowView& out);   // not stock: unitMap/unitRows/view/size/pcf only, every quality
     static EShadowMode GetShadowMode();
     static const char* GetShadowModeDesc(uint32_t mode);
     static uint32_t GetShadowValue();

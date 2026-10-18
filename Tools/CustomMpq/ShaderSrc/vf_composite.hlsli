@@ -220,7 +220,7 @@ float4 FogWithoutMatchingTap(float2 pixel, float depth, float viewZ)
         [branch] if (TapsReproduceMarch(taps, viewZ))
             return taps.currentMarch;
     }
-    return IntegrateFogAtDepth(pixel, depth, 0.5);
+    return IntegrateFogAtDepth(pixel, depth, StepJitter(pixel));   // vfog38 (F3): the march's jitter, not fixed mid-steps
 }
 
 float4 DepthAwareUpsample(float2 pixel, float depth, float viewZ)

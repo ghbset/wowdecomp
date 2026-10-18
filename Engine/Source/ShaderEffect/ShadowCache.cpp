@@ -1191,10 +1191,27 @@ int32_t CShadowCache::GetPublished(ShadowView& out) {
         }
     }
 
-    out.view = CShadowCache::s_publishedView;
-    out.size = CShadowCache::s_shadowSize;
-    out.pcf = CShaderEffect::s_usePcfFiltering ? 1 : 0;
+    GetPublishedUnit(out);
     out.stamp = CShadowCache::s_publishStamp;
     CShadowCache::s_publishedRead = 1;
     return 1;
+}
+
+// Not stock (vfog38, shadowMask): the unit map the receivers take the min with (terrain s5, models s4), which exists
+// at every shadow quality. 0 (unitMap nullptr) while it is being recreated or before the first PostUpdate.
+int32_t CShadowCache::GetPublishedUnit(ShadowView& out) {
+    out.unitMap = nullptr;
+    out.view = CShadowCache::s_publishedView;
+    out.size = CShadowCache::s_shadowSize;
+    out.pcf = CShaderEffect::s_usePcfFiltering ? 1 : 0;
+    if (CShadowCache::s_recreateTextures || CShadowCache::s_shadowMode <= SHADOW_LOWEST || !CShadowCache::s_matrixCallback
+        || !CShadowCache::s_publishStamp) {
+        return 0;
+    }
+    CTexture* texture = CShadowCache::s_extDynShadow.m_textures[CShaderEffect::s_usePcfFiltering];
+    out.unitMap = texture ? TextureGetGxTex(texture, 1, nullptr) : nullptr;
+    for (int32_t row = 0; row < 3; row++) {
+        out.unitRows[row] = CShadowCache::s_shadowMatrices[row];
+    }
+    return out.unitMap ? 1 : 0;
 }

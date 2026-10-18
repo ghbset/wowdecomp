@@ -5,10 +5,12 @@
 //   the shaded water; the caustic scales the water pixel by 1 + c (wxl-water lit the refraction; this pass sees the
 //   shaded surface, so the reflected share, Schlick at the flat surface, is taken out of c).
 // UNDER 1: s0 = the scene depth (DeviceCopySceneDepth, decoded through c3 / c99), plus the underwater tint.
-// The sun shadow: vf_shadow.hlsli (the engine's bands 1 and 2, s5 / s6, c56-c62) in place of wxl-water's SunVis.
+// The sun shadow: vf_shadow.hlsli (the engine's bands 1 and 2, s5 / s6, c56-c62; the land s7, c63) in place of wxl-water's SunVis.
 #include "vf_common.hlsli"
-// No land tap: Draw sets c56-c62 and s5 / s6 only (SunShadowRegisters), not gfxTerrainShadow's c63 / s7.
-#define VF_TERRAIN 0
+// vfog38 (shadow audit M4): the land's tap too (gfxTerrainShadow c63 / s7), so no caustic shines in a mountain's
+// shadow; the bed is ground, tested 4 yd up as the shadow mask does. Faded with the cascades by c64 (SunVisibility).
+#define VF_TERRAIN 1
+#define VF_TERRAIN_BIAS 4.0
 #include "vf_shadow.hlsli"
 
 sampler2D sDepth : register(s0);

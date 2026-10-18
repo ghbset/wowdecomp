@@ -287,6 +287,12 @@ void ReadDayNightInputs(FrameInputs& in) {
     in.fogEnd = info.m_fogInterior.m_end;
     in.ambientColor = Argb(info.m_bands.m_ambient);
     in.directColor = Argb(info.m_bands.m_diffuse);
+    // vfog38 (shadow audit F2): the light the receivers were shaded with this frame, for the shadow mask's ndl and ratio.
+    in.shadeDiffuse = Argb(info.m_light1.m_diffuse);
+    in.shadeAmbient = Argb(info.m_light1.m_ambient);
+    in.shadeToLight[0] = -info.m_light1.m_dir.x;
+    in.shadeToLight[1] = -info.m_light1.m_dir.y;
+    in.shadeToLight[2] = -info.m_light1.m_dir.z;
     in.sunColor = Argb(info.m_bands.m_sunCloudColors[0]);
     in.zoneFogDistance = info.m_bands.m_fogEnd;
     in.farClip = World::s_farClip;
