@@ -155,6 +155,13 @@ namespace gxvk::vk::texture
      */
     bool RecordGenerateMips(VkCommandBuffer cmd, Image& img);
 
+    /**
+     * Records a copy of every level and layer of `src` into `dst` (same format, extent, levels and
+     * layers; dst's old contents are discarded). `src` must rest in SHADER_READ_ONLY_OPTIMAL and is
+     * left there; `dst` ends in SHADER_READ_ONLY_OPTIMAL. Outside a render pass.
+     */
+    bool RecordCopy(VkCommandBuffer cmd, Image& src, Image& dst);
+
     struct Stats
     {
         uint64_t created   = 0;

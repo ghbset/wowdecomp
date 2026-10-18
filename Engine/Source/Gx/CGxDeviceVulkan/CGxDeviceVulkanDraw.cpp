@@ -350,6 +350,7 @@ void CGxDeviceVulkan::Draw(CGxBatch* batch, int32_t count) {
     }
     d.pixelRegs = pixelRows;
     d.vertexRegs = this->m_vertexRegs;
+    d.vertexRegsGen = this->m_vertexRegsGen;
 
     if (!this->IPlaceD3d(d.viewport, d.scissor)) {
         return;
@@ -363,6 +364,10 @@ void CGxDeviceVulkan::Draw(CGxBatch* batch, int32_t count) {
 
     if (!cmd) {
         return;
+    }
+
+    if (d.depthWrite) {
+        frame::DepthWritten();   // VFOG: the next scene-depth copy is taken again
     }
 
     if (!pipelines::Record(cmd, frame::RenderPass(), frame::PassGeneration(), frame::PassSamples(), frame::Serial(), frame::Slot(), d)) {

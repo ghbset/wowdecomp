@@ -62,6 +62,7 @@ CGxDeviceVulkan::CGxDeviceVulkan() {
     this->m_hwCursorDirty = 0;
     // D3D's constant registers start at zero.
     memset(this->m_vertexRegs, 0, sizeof(this->m_vertexRegs));
+    this->m_vertexRegsGen++;
     memset(this->m_pixelRegs, 0, sizeof(this->m_pixelRegs));
     this->m_caps.m_colorFormat = GxCF_argb;
     this->m_caps.unk_0018 = 1;

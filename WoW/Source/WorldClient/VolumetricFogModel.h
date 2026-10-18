@@ -2,6 +2,7 @@
 // src/transparent_fog.cpp @ 4e31ddf). Shared by VolumetricFogModel/Data/Noise/Fit.cpp; plain C++17.
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include "WoW/Source/WorldClient/VolumetricFog.h"
@@ -70,6 +71,7 @@ struct AuthoredFog {
 // VolumetricFogData.cpp. LoadFogData() reads the archive file and hands it to LoadFogDataFromMemory.
 bool LoadFogDataFromMemory(const void* data, size_t size);
 bool FogDataLoaded();
+void EnsureFogData();   // LoadFogData once, whoever asks first (the driver's first enabled frame, or ResolveFogData)
 // True when Classic fog covers the position (coverage >= 0.5 on a map with fog); out is filled either way.
 bool ResolveFogData(int mapId, const float position[3], float dayFraction, const LightParamsSelection& selection,
                     AuthoredFog& out);
@@ -81,6 +83,17 @@ constexpr float kNoiseCurvePivot = 0.5f;
 constexpr float kNoiseCurveMean = 0.5f;
 
 void UnpackColor(uint32_t argb, float* rgb);
+// The LightParams selection of the frame's inputs (storm blend, screen-effect slot).
+LightParamsSelection SelectionFor(const FrameInputs& in);
+
+inline float SmoothStep(float e0, float e1, float x) {
+    const float t = std::clamp((x - e0) / (e1 - e0), 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+
+inline float Dot3(const float* a, const float* b) {
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
 // BuildFogParams with the data already resolved (nullptr = derived layers).
 FogParams BuildFogParamsFrom(const FrameInputs& in, const Config& cfg, const AuthoredFog* authored);
 float EnergyNormalisedPhaseScale(float g);

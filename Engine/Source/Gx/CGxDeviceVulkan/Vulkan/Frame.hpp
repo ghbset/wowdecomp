@@ -148,6 +148,9 @@ namespace gxvk::vk::frame
     /// Whether a query is active on the open frame.
     bool QueryActive();
 
+    /// A draw that writes depth was recorded: the next CopyDepthFromScene copies again.
+    void DepthWritten();
+
     /// Submits the open frame's work so far without presenting (the next call opens a new frame
     /// on the same targets, their contents kept): what a blocking query read needs.
     void Flush();

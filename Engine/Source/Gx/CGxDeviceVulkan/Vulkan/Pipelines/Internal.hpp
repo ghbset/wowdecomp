@@ -222,6 +222,7 @@ namespace gxvk::vk::pipelines::detail
         uint32_t        lastSliceBytes  = 0;
         VkDescriptorSet lastSliceSet    = VK_NULL_HANDLE;
         uint32_t        lastSliceOffset = 0;
+        uint64_t        lastVertexGen   = 0;       ///< Draw::vertexRegsGen of lastSlice's vertex rows
     };
 
     struct State

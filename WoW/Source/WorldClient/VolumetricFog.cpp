@@ -51,7 +51,6 @@ constexpr float kMaxLightComponent = 10000.0f;
 constexpr float kMaxUploadedLightComponent = 1000000.0f;
 constexpr float kMaxAttenuationCoefficient = 1000000.0f;
 constexpr int kLightGridCells = 64 * 64;   // CM2Scene::m_lightGrid (CM2Light::Link)
-constexpr int kLightParamsSlots = 8;
 
 struct CVars {
     CVar* enable;
@@ -135,7 +134,6 @@ bool s_active = false;
 bool s_wasActive = false;
 bool s_opaqueValid = false;
 bool s_armed = false;          // the composite is on the frame: later batches take the fitted fog
-bool s_dataLoaded = false;
 GradeFrame s_grade = {};
 uint32_t s_frame = 0;
 bool s_late = false;         // the composite runs once after the world this frame (coa's TransparentFog=0 path)
@@ -475,15 +473,6 @@ const StockFogFit& FitFor(const float modelPos[3]) {
     return slot.fit;
 }
 
-LightParamsSelection SelectionFor(const FrameInputs& in) {
-    LightParamsSelection selection;
-    selection.stormBlend = std::isfinite(in.stormBlend) ? std::clamp(in.stormBlend, 0.0f, 1.0f) : 0.0f;
-    if (in.screenEffectSlot >= 0 && in.screenEffectSlot < kLightParamsSlots) {
-        selection.screenEffectSlot = in.screenEffectSlot;
-    }
-    return selection;
-}
-
 // coa forever_look.cpp PrepareGrading + ForeverLookWeight. Only while vfog draws this frame, which already rules
 // out the view under water (coa kCameraUnderWater); the ghost view is skipped as coa kGhostEffect.
 void PrepareGrade() {
@@ -604,9 +593,8 @@ void OnWorldUpdate() {
     s_glareDrawn = false;
     s_cfg = ReadConfig();
 
-    if (s_cfg.enable && !s_dataLoaded) {
-        s_dataLoaded = true;
-        LoadFogData();   // missing or invalid: the derived layers are used (coa)
+    if (s_cfg.enable) {
+        EnsureFogData();
     }
 
     s_glowFed = false;
