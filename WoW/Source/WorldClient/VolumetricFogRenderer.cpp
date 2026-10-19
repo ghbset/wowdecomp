@@ -1216,7 +1216,12 @@ bool RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg,
     }
 
     // coa :1344. The rays need the back buffer (scene copies) and their three shaders; without them the fog still draws.
-    const float rayStrength = cfg.godRays * fog.lightVisibility * sunScreenFade;
+    // vfog39: the rays come from the shown disc (in.toLight, gfxSunArc's g_lightBody, not gfxSunArcMatch's capped
+    // shading light): none at or under the horizon, full by 3 degrees (lightVisibility keeps the fog's sunset glow),
+    // and none when the land hides the disc (gfxTerrainShadow, the glare's GetPointOcclusion test).
+    const float rayElevation = SmoothStep(0.0f, 0.0523f, in.toLight[2]);
+    const float rayLand = rayElevation > 0.0f ? TerrainSunShadow::Visibility(in.camPos, in.toLight) : 0.0f;
+    const float rayStrength = cfg.godRays * fog.lightVisibility * sunScreenFade * rayElevation * rayLand;
     const uint32_t rayW = std::max(kMinTargetSize, static_cast<uint32_t>(vpW) / kRayScale);
     const uint32_t rayH = std::max(kMinTargetSize, static_cast<uint32_t>(vpH) / kRayScale);
     const bool rays = rayStrength > kMinGodRayStrength && !prevTarget && Shader(s_shaders.rayMask, "VFogRayMask")

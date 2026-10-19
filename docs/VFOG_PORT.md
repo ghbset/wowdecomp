@@ -989,3 +989,15 @@ strength from 4 degrees up (S2). All in `PickLightBody` (DayNight.cpp); the shad
   weight in the tap (the lit-height alone cannot fade a deep shadow), i.e. a shader change in all four consumers,
   and the fog marches are at their temp limit. The M2 fade does soften the pop when a recentre brings a caster in.
 - No new CVars. Shaders rebuilt: VFogWater1/2/3.
+
+## 2026-10-19: vfog39, god rays gated at the horizon and behind the land (raygate)
+
+- The screen-space rays (VolumetricFogRenderer.cpp, `rayStrength`) took only `lightVisibility`
+  (`SmoothStep(-0.03, 0.10, toLight.z)`), so they streaked the horizon glow from a sun up to ~1.7° under the
+  horizon and from a sun hidden behind a ridge. They now also multiply by their own elevation gate,
+  `SmoothStep(0, 0.0523, toLight.z)` (0 at or under 0°, full by 3°), and by `TerrainSunShadow::Visibility(camPos,
+  toLight)` (gfxTerrainShadow; 1 with it off), the same CPU test the sun glare's `GetPointOcclusion` uses.
+- `in.toLight` is the shown disc (sun or moon sprite, the body `g_lightBody` picks under gfxSunArc), not
+  `shadeToLight` (gfxSunArcMatch's capped shading light), so the gate follows what is on screen.
+- `lightVisibility` is unchanged: the fog in-scatter keeps its sunset glow. `vfogGodRays` stays the toggle.
+- No new CVars, no shader change (custom.MPQ unchanged).
