@@ -751,7 +751,7 @@ Battlenet::TumorManager* BattlenetLogin::CreateTumorManager() {
 
         uint32_t localeCount = 0;
 
-        for (int32_t i = 0; i < 12; i++) {
+        for (int32_t i = 0; i < NUM_DB_LOCALES; i++) {
             if (g_hasIsoLocale[i]) {
                 component = settings.m_components.New();
                 component->m_program = BSN::FourCC("WoW");

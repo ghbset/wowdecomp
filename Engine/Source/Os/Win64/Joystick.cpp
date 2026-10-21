@@ -150,7 +150,7 @@ static BOOL CALLBACK EnumObjectsCallback(LPCDIDEVICEOBJECTINSTANCEA object, LPVO
 }
 
 // OFFSET: 0x00870420
-void OsJoystickMapStick(uint32_t index, int32_t stick, int32_t xAxis, int32_t yAxis) {
+void OsJoystickMapStick(OsJoystickID index, int32_t stick, int32_t xAxis, int32_t yAxis) {
     if (index >= OsJoystickCount()) {
         return;
     }
@@ -204,7 +204,7 @@ uint32_t OsJoystickCount() {
 }
 
 // OFFSET: 0x00870730
-uint32_t OsJoystickOpen(uint32_t index) {
+OsJoystickID OsJoystickOpen(OsJoystickID index) {
     if (index >= OsJoystickCount()) {
         return 0xFFFFFFFF;
     }
@@ -215,7 +215,7 @@ uint32_t OsJoystickOpen(uint32_t index) {
         return 0xFFFFFFFF;
     }
 
-    if (joystick->m_device->SetDataFormat(&c_dfDIJoystick) >= 0 && joystick->m_device->SetCooperativeLevel(static_cast<HWND>(OsGuiGetWindow(0)), DISCL_EXCLUSIVE | DISCL_FOREGROUND) >= 0 && joystick->m_device->EnumObjects(EnumObjectsCallback, joystick, DIDFT_ALL) >= 0) {
+    if (joystick->m_device->SetDataFormat(&c_dfDIJoystick) >= 0 && joystick->m_device->SetCooperativeLevel(static_cast<HWND>(OsGuiGetWindow(OSGUI_WINDOW_TYPE_GX)), DISCL_EXCLUSIVE | DISCL_FOREGROUND) >= 0 && joystick->m_device->EnumObjects(EnumObjectsCallback, joystick, DIDFT_ALL) >= 0) {
         DIPROPDWORD bufferSize;
         bufferSize.diph.dwSize = sizeof(DIPROPDWORD);
         bufferSize.diph.dwHeaderSize = sizeof(DIPROPHEADER);
@@ -242,7 +242,7 @@ uint32_t OsJoystickOpen(uint32_t index) {
 }
 
 // OFFSET: 0x00870840
-void OsJoystickClose(uint32_t index) {
+void OsJoystickClose(OsJoystickID index) {
     if (index >= OsJoystickCount()) {
         return;
     }
@@ -256,7 +256,7 @@ void OsJoystickClose(uint32_t index) {
 }
 
 // OFFSET: 0x00870890
-char* OsJoystickGetName(uint32_t index, char* buffer, uint32_t size) {
+char* OsJoystickGetName(OsJoystickID index, char* buffer, uint32_t size) {
     if (index >= OsJoystickCount()) {
         return nullptr;
     }
@@ -273,7 +273,7 @@ char* OsJoystickGetName(uint32_t index, char* buffer, uint32_t size) {
 }
 
 // OFFSET: 0x008708D0
-void OsJoystickMapSlider(uint32_t index, int32_t axis) {
+void OsJoystickMapSlider(OsJoystickID index, int32_t axis) {
     if (index >= OsJoystickCount()) {
         return;
     }
@@ -286,7 +286,7 @@ void OsJoystickMapSlider(uint32_t index, int32_t axis) {
 }
 
 // OFFSET: 0x00870910
-void OsJoystickMapHat(uint32_t index, int32_t hat, int32_t up, int32_t right, int32_t down, int32_t left) {
+void OsJoystickMapHat(OsJoystickID index, int32_t hat, int32_t up, int32_t right, int32_t down, int32_t left) {
     if (index >= OsJoystickCount()) {
         return;
     }
@@ -307,7 +307,7 @@ void OsJoystickMapHat(uint32_t index, int32_t hat, int32_t up, int32_t right, in
 }
 
 // OFFSET: 0x008709E0
-void OsJoystickSetMouseMode(uint32_t index, int32_t enable) {
+void OsJoystickSetMouseMode(OsJoystickID index, int32_t enable) {
     if (index >= OsJoystickCount()) {
         return;
     }
@@ -356,7 +356,7 @@ void OsJoystickSetMouseMode(uint32_t index, int32_t enable) {
 }
 
 // OFFSET: 0x00870B00
-void OsJoystickConfigureMouseMode(uint32_t index, int32_t stick, int32_t leftButton, int32_t rightButton, float speed) {
+void OsJoystickConfigureMouseMode(OsJoystickID index, int32_t stick, int32_t leftButton, int32_t rightButton, float speed) {
     if (index >= OsJoystickCount()) {
         return;
     }
@@ -401,7 +401,7 @@ static void PollJoystick(uint32_t index, int32_t active) {
             HRESULT acquired = joystick->m_device->Acquire();
 
             if (acquired == DIERR_OTHERAPPHASPRIO) {
-                acquired = joystick->m_device->SetCooperativeLevel(static_cast<HWND>(OsGuiGetWindow(0)), DISCL_EXCLUSIVE | DISCL_FOREGROUND);
+                acquired = joystick->m_device->SetCooperativeLevel(static_cast<HWND>(OsGuiGetWindow(OSGUI_WINDOW_TYPE_GX)), DISCL_EXCLUSIVE | DISCL_FOREGROUND);
             }
 
             polled = acquired >= 0 && joystick->m_device->Poll() >= 0;

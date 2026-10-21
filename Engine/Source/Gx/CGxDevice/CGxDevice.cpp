@@ -1384,7 +1384,7 @@ void CGxDevice::IRsInit() {
     this->m_appRenderStates[GxRs_Lighting].m_value.m_data.i[0] = 1;
     this->m_appRenderStates[GxRs_Fog].m_value.m_data.i[0] = 1;
     this->m_appRenderStates[GxRs_DepthTest].m_value.m_data.i[0] = 1;
-    this->m_appRenderStates[GxRs_DepthFunc].m_value.m_data.i[0] = 0;
+    this->m_appRenderStates[GxRs_DepthFunc].m_value.m_data.i[0] = GxCmp_LEqual;
     this->m_appRenderStates[GxRs_DepthWrite].m_value.m_data.i[0] = 1;
     this->m_appRenderStates[GxRs_ColorWrite].m_value.m_data.i[0] = 15;
     this->m_appRenderStates[GxRs_Culling].m_value.m_data.i[0] = 1;
@@ -2039,7 +2039,7 @@ uint32_t CGxDevice::ITexBitsSize(CGxTex* texId, uint32_t width, uint32_t height)
     }
 
     if (texId->m_target == GxTex_CubeMap) {
-        return 6 * size;
+        return GxTexCubeFaces_Last * size;
     }
 
     return size;
@@ -2097,7 +2097,7 @@ void CGxDevice::RsInit() {
     this->RsSet(GxRs_Lighting, 1);
     this->RsSet(GxRs_Fog, 1);
     this->RsSet(GxRs_DepthTest, 1);
-    this->RsSet(GxRs_DepthFunc, 0);
+    this->RsSet(GxRs_DepthFunc, GxCmp_LEqual);
     this->RsSet(GxRs_Culling, 1);
     this->RsSet(GxRs_ClipPlaneMask, 0);
     this->RsSet(GxRs_ScissorTest, 0);

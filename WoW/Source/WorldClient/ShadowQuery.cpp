@@ -1,4 +1,5 @@
 #include "ShadowQuery.h"
+#include "WoW/Source/WorldClient/WorldConstants.h"
 #include "Engine/Source/ConsoleBase/ConsoleVar.h"
 #include "Engine/Source/ConsoleBase/Types.h"
 #include "Engine/Source/Storm/H/storm.h"
@@ -103,7 +104,7 @@ static void GetViewerPosition(C3Vector* position) {
         return;
     }
 
-    CGObject_C* object = ClntObjMgrObjectPtr(camera->m_targetGUID, TYPEMASK_OBJECT, __FILE__, __LINE__);
+    CGObject_C* object = ClntObjMgrObjectPtr(camera->m_targetGUID, TYPE_OBJECT, __FILE__, __LINE__);
 
     if (object) {
         *position = object->GetPosition();
@@ -810,10 +811,10 @@ static void GetChunkRect(const CAaBox& box, CiRect& rect) {
         maxY = 34132.332f;
     }
 
-    int32_t cellMaxX = CMath::fint_(maxX * 0.23999999f - 0.5f);
-    int32_t cellMaxY = CMath::fint_(maxY * 0.23999999f - 0.5f);
-    int32_t cellMinX = CMath::fint_(minX * 0.23999999f - 0.5f);
-    int32_t cellMinY = CMath::fint_(minY * 0.23999999f - 0.5f);
+    int32_t cellMaxX = CMath::fint_(maxX * OO_COORD_TO_SUBCHUNK - 0.5f);
+    int32_t cellMaxY = CMath::fint_(maxY * OO_COORD_TO_SUBCHUNK - 0.5f);
+    int32_t cellMinX = CMath::fint_(minX * OO_COORD_TO_SUBCHUNK - 0.5f);
+    int32_t cellMinY = CMath::fint_(minY * OO_COORD_TO_SUBCHUNK - 0.5f);
     rect.minY = cellMinY >> 3;
     rect.minX = cellMinX >> 3;
     rect.maxY = cellMaxY >> 3;

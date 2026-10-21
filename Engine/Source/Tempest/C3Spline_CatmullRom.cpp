@@ -16,23 +16,23 @@ static const C34Matrix s_catmullRomDer1 = { -1.5f, 2.0f, -0.5f, 4.5f, -5.0f, 0.0
 // VERIFY: e9bcea7f auto
 // OFFSET: 0x00409740
 C3Spline_CatmullRom::C3Spline_CatmullRom() {
-    this->m_splineMode = 1;
+    this->splineMode = MODE_CATMULLROM;
 }
 
 // VERIFY: 0afb68ad auto
 // OFFSET: 0x00409760
-uint32_t C3Spline_CatmullRom::GetSplineMode() {
-    return this->m_splineMode;
+SPLINE_MODE C3Spline_CatmullRom::GetSplineMode() {
+    return this->splineMode;
 }
 
 // VERIFY: f3bb76de manual
 // OFFSET: 0x004C3FD0
 void C3Spline_CatmullRom::Evaluate(uint32_t seg, float t, C3Vector& pos) {
-    if (this->m_splineMode) {
+    if (this->splineMode != MODE_LINEAR) {
         C3Spline::Evaluate(seg, t, s_catmullRomBasis, pos);
 
         // CUSTOM: mode 2 (4.3.4 0x004C9C10) = Catmull-Rom in X/Y, linear Z (smoothed ground paths)
-        if (this->m_splineMode == 2) {
+        if (this->splineMode == MODE_SMOOTHGROUND) {
             const C3Vector& a = this->Point(seg + 1);
             const C3Vector& b = this->Point(seg + 2);
             pos.z = (b.z - a.z) * t + a.z;
@@ -52,7 +52,7 @@ void C3Spline_CatmullRom::Evaluate(uint32_t seg, float t, C3Vector& pos) {
 // VERIFY: f0c48125 manual
 // OFFSET: 0x004C40B0
 float C3Spline_CatmullRom::SegLength(uint32_t seg) {
-    if (this->m_splineMode) {
+    if (this->splineMode != MODE_LINEAR) {
         return C3Spline::SegLength(seg, s_catmullRomBasis);
     }
 
@@ -173,7 +173,7 @@ void C3Spline_CatmullRom::IFrameArclength(float t, C44Matrix& frame) {
         dir.z = inv * dir.z;
     }
 
-    if (this->m_splineMode == 2) {
+    if (this->splineMode == MODE_SMOOTHGROUND) {
         // CUSTOM: mode 2 (4.3.4 0x004CA370): heading = the horizontal tangent, no pitch
         C3Vector vel(0.0f, 0.0f, 0.0f);
         C3Spline::EvaluateDer1(seg, segT, C44Matrix(s_catmullRomDer1), vel);
@@ -190,7 +190,7 @@ void C3Spline_CatmullRom::IFrameArclength(float t, C44Matrix& frame) {
         }
 
         frame.a2 = 0.0f;
-    } else if (this->m_splineMode) {
+    } else if (this->splineMode != MODE_LINEAR) {
         C3Vector vel(0.0f, 0.0f, 0.0f);
         C3Spline::EvaluateDer1(seg, segT, C44Matrix(s_catmullRomDer1), vel);
 
@@ -271,7 +271,7 @@ int32_t C3Spline_CatmullRom::Smooth(float minLength) {
     const int32_t maxAllowed = 100;
     int32_t segCount = static_cast<int32_t>(this->m_pointCount) - 3;
 
-    if (segCount <= 1 || this->m_length <= 0.0f) {
+    if (segCount <= 1 || this->cachedLength <= 0.0f) {
         return 0;
     }
 
@@ -289,7 +289,7 @@ int32_t C3Spline_CatmullRom::Smooth(float minLength) {
         }
     }
 
-    float maxPointsF = this->m_length / stepLength + static_cast<float>(segCount + 4);
+    float maxPointsF = this->cachedLength / stepLength + static_cast<float>(segCount + 4);
 
     if (!(maxPointsF <= static_cast<float>(maxAllowed))) {
         return 0;
@@ -297,13 +297,13 @@ int32_t C3Spline_CatmullRom::Smooth(float minLength) {
 
     int32_t maxPoints = static_cast<int32_t>(maxPointsF);
     C3Vector points[maxAllowed];
-    points[0] = this->m_points[0];
+    points[0] = this->points[0];
 
-    float totalLength = this->m_length;
+    float totalLength = this->cachedLength;
     float traveled = 0.0f;
     int32_t count = 1;
-    uint32_t mode = this->m_splineMode;
-    this->m_splineMode = 0;
+    SPLINE_MODE mode = this->splineMode;
+    this->splineMode = MODE_LINEAR;
 
     for (int32_t seg = 0; seg < segCount && count < maxPoints; seg++) {
         const C3Vector& point = this->Point(seg + 1);
@@ -340,7 +340,7 @@ int32_t C3Spline_CatmullRom::Smooth(float minLength) {
         traveled += length;
     }
 
-    this->m_splineMode = mode;
+    this->splineMode = mode;
 
     if (count >= maxPoints - 2 || count < 3) {
         return 0;
@@ -370,7 +370,7 @@ int32_t C3Spline_CatmullRom::Smooth(float minLength) {
 
     if (this->m_pointCount > 3) {
         this->IValidateCache();
-        this->m_length = this->ILength();
+        this->cachedLength = this->ILength();
     }
 
     return 1;
@@ -405,7 +405,7 @@ CDataStore& operator>>(CDataStore& msg, C3Spline_CatmullRom& spline) {
 
     uint8_t mode;
     msg.Get(mode);
-    spline.m_splineMode = mode;
+    spline.splineMode = static_cast<SPLINE_MODE>(mode);
 
     if (count && msg.m_read <= msg.m_size) {
         spline.SetPoints(static_cast<const C3Vector*>(points), count);

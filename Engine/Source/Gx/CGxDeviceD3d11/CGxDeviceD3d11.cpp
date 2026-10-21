@@ -2529,8 +2529,8 @@ void CGxDeviceD3d11::IStateSyncFixedFunction(bool vs, bool ps, bool lighting, bo
 
             switch (gen) {
                 case GxTexGen_ObjectLinear:
-                case GxTexGen_EyeLinear:
-                case GxTexGen_Unk3:
+                case GxTexGen_World:
+                case GxTexGen_View:
                     source = 8.0f;
                     break;
 
@@ -2853,7 +2853,7 @@ void CGxDeviceD3d11::IStateSyncScissorRect() {
 void CGxDeviceD3d11::ISetTexGen(uint32_t tmu, int32_t texGen) {
     C44Matrix matrix;
 
-    if (texGen == GxTexGen_ObjectLinear || texGen == GxTexGen_EyeLinear) {
+    if (texGen == GxTexGen_ObjectLinear || texGen == GxTexGen_World) {
         CGxMatrixStack& view = this->m_xforms[GxXform_View];
         matrix = view.m_mtx[view.m_level];
         matrix = matrix.AffineInverse();

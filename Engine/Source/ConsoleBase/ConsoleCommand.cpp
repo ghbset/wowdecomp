@@ -6,7 +6,7 @@
 #include "Engine/Source/Storm/H/storm.h"
 
 // STATIC: 0x00ADBD48
-int32_t s_execState = 4;
+int32_t s_execState = EM_NOTACTIVE;
 
 // STATIC: 0x00CA1A28
 static char s_execBuffer[0x2000];
@@ -282,27 +282,27 @@ void ConsoleInitializeClientCommand() {
 // VERIFY: e5a78592 auto
 // OFFSET: 0x0076B2A0
 int32_t AddLineToExecFile(const char* line) {
-    if (!s_execState) {
+    if (s_execState == EM_PROMPTOVERWRITE) {
         if (*line == 'n') {
             ConsoleWrite("Canceled File Creation", ECHO_COLOR);
-            s_execState = 4;
+            s_execState = EM_NOTACTIVE;
             return 0;
         }
 
         if (*line == 'y') {
             ConsoleWrite("Begin Typing the commands", ECHO_COLOR);
-            s_execState = 1;
+            s_execState = EM_RECORDING;
             return 0;
         }
 
         ConsoleWrite("You must type 'y' to confirm overwrite. Process aborted!", ERROR_COLOR);
-        s_execState = 4;
+        s_execState = EM_NOTACTIVE;
         return 0;
     }
 
     if (!SStrCmpI(line, "end", STORM_MAX_STR)) {
-        if (s_execState != 2) {
-            s_execState = 3;
+        if (s_execState != EM_APPEND) {
+            s_execState = EM_WRITEFILE;
         }
 
         return 1;

@@ -1,4 +1,5 @@
 #include "MapEntity.h"
+#include "WoW/Source/WorldClient/WorldLightingConstants.h"
 #include "Engine/Source/Tempest/C3Segment.h"
 #include "WoW/Source/DB/DBClient/DBClient.h"
 #include "WoW/Source/DB/Rec/AreaTableRec.h"
@@ -16,6 +17,8 @@
 #include "WoW/Source/WorldClient/MapObjGroup.h"
 #include "WoW/Source/Ui/MinimapFrame.h"
 #include "WoW/Source/WorldClient/CWorldMath.h"
+
+static const float dirLightScaleRate = 3.3333333f;
 
 // STATIC: 0x00ADEEBC
 float CMapStaticEntity::s_characterAmbient = 1.0f;
@@ -484,7 +487,7 @@ void CMapEntity::Tick() {
         this->m_targetAmbientColor = ambient;
     }
 
-    float rate = FrameTime::s_tickTimeSec * 3.3333333f;
+    float rate = FrameTime::s_tickTimeSec * dirLightScaleRate;
     float delta = this->m_diffuseLightScale - this->m_targetDiffuseLightScale;
 
     if (0.0f != delta) {
@@ -600,8 +603,8 @@ bool CMapEntity::QueryInteriorLighting(CMapObjDef* mapObjDef, int32_t groupNum, 
     }
 
     CImVector limit;
-    *reinterpret_cast<uint32_t*>(&limit) = 0xA8;
-    this->AdjustLightmap(&color, &this->m_m2DiffuseColor, limit, &this->m_targetAmbientColor, 96);
+    *reinterpret_cast<uint32_t*>(&limit) = MIN_INTERIOR_DIRCOLOR;
+    this->AdjustLightmap(&color, &this->m_m2DiffuseColor, limit, &this->m_targetAmbientColor, MAX_AMBIENT);
 
     if (!flag) {
         this->m_staticFlags &= ~0x1000;

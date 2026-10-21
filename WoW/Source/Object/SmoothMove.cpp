@@ -73,7 +73,7 @@ void SmoothMove::SmoothSpline(CMovement_C* mov) {
     const uint32_t skip = SPLINEFLAG_NO_SPLINE | SPLINEFLAG_FALLING | SPLINEFLAG_PARABOLIC | SPLINEFLAG_FLYING | SPLINEFLAG_CATMULLROM | SPLINEFLAG_CYCLIC | SPLINEFLAG_ENTER_CYCLE | SPLINEFLAG_BACKWARD | SPLINEFLAG_TRANSPORT_ENTER | SPLINEFLAG_TRANSPORT_EXIT;
     C3Spline_CatmullRom& curve = spline->m_spline;
 
-    if ((spline->m_flags & skip) || curve.m_splineMode != 0 || curve.m_pointCount < 5) {
+    if ((spline->m_flags & skip) || curve.splineMode != MODE_LINEAR || curve.m_pointCount < 5) {
         return;
     }
 
@@ -90,10 +90,10 @@ void SmoothMove::SmoothSpline(CMovement_C* mov) {
     C3Vector oldP0 = p0;
     p0 = C3Vector(p1.x - lead.x * 2.0f, p1.y - lead.y * 2.0f, p1.z - lead.z * 2.0f);
 
-    curve.m_splineMode = 2;
+    curve.splineMode = MODE_SMOOTHGROUND;
 
     if (!curve.Smooth(1.0f)) {
-        curve.m_splineMode = 0;
+        curve.splineMode = MODE_LINEAR;
         curve.Point(0) = oldP0;
     }
 }
@@ -144,7 +144,7 @@ void SmoothMove::Tick(uint32_t elapsedMs) {
 
     for (size_t i = 0; i < s_pending.size();) {
         Pending& p = s_pending[i];
-        CGUnit_C* unit = static_cast<CGUnit_C*>(ClntObjMgrObjectPtr(p.guid, TYPEMASK_UNIT, __FILE__, __LINE__));
+        CGUnit_C* unit = static_cast<CGUnit_C*>(ClntObjMgrObjectPtr(p.guid, TYPE_UNIT, __FILE__, __LINE__));
         CMovement_C* mov = unit ? unit->m_movement : nullptr;
         bool done = true;
 

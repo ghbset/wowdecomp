@@ -26,7 +26,7 @@
 #include "Engine/Source/Tempest/CImVector.h"
 
 // STATIC: 0x00A45390
-const uint32_t s_fogModes[7] = { 1, 1, 1, 2, 2, 3, 4 };
+const uint32_t s_fogModes[M2BLEND_COUNT] = { 1, 1, 1, 2, 2, 3, 4 };
 
 // STATIC: 0x00AF58A8
 static C44Matrix s_identity;
@@ -197,7 +197,7 @@ CM2SceneRender::CM2SceneRender(CM2Scene* scene) {
     this->m_prevMaterial = nullptr;
     this->m_curMaterial = nullptr;
     this->m_defaultMaterial.m_flags = 0;
-    this->m_defaultMaterial.m_blendMode = 0;
+    this->m_defaultMaterial.m_blendMode = M2BLEND_OPAQUE;
     this->m_particleEffect = CShaderEffectManager::GetEffect("Particle");
     this->m_particleUnlitEffect = CShaderEffectManager::GetEffect("Particle_Unlit");
     this->m_projectedModModEffect = CShaderEffectManager::GetEffect("Projected_ModMod");
@@ -443,7 +443,7 @@ void CM2SceneRender::SetupMaterial() {
         int32_t blend;
 
         if (this->m_curElement->m_flags & 1) {
-            blend = this->m_curMaterial->m_blendMode == 1;
+            blend = this->m_curMaterial->m_blendMode == M2BLEND_ALPHA_KEY;
         } else {
             blend = s_blendModes[this->m_pass][this->m_curMaterial->m_blendMode];
         }
@@ -453,9 +453,9 @@ void CM2SceneRender::SetupMaterial() {
 
         float alphaRef;
 
-        if (!this->m_curMaterial->m_blendMode) {
+        if (this->m_curMaterial->m_blendMode == M2BLEND_OPAQUE) {
             alphaRef = 0.0f;
-        } else if (this->m_curMaterial->m_blendMode == 1) {
+        } else if (this->m_curMaterial->m_blendMode == M2BLEND_ALPHA_KEY) {
             alphaRef = this->m_curElement->m_alpha * 0.87843138f;
         } else {
             alphaRef = 0.0039215689f;
@@ -523,10 +523,10 @@ void CM2SceneRender::SetupMaterial() {
 
     C3Vector diffuse = this->m_curModel->m_diffuseColor;
     C3Vector emissive = this->m_curModel->m_emissiveColor;
-    uint16_t blend = this->m_curMaterial->m_blendMode;
+    M2BLEND blend = this->m_curMaterial->m_blendMode;
 
-    if (blend == 5 || blend == 6) {
-        if (blend == 6) {
+    if (blend == M2BLEND_MOD || blend == M2BLEND_MOD2X) {
+        if (blend == M2BLEND_MOD2X) {
             scale = 0.5f;
         }
 
@@ -753,8 +753,8 @@ void CM2SceneRender::DrawBatchProj() {
 
     effect->SetCurrent();
     this->SetupBillboardView(*reinterpret_cast<const C3Vector*>(&this->m_scene->m_viewInv.d0));
-    CShaderEffect::SetTexMtx_TexGen(GxTexGen_EyeLinear, texMatrix, 0);
-    CShaderEffect::SetTexMtx_TexGen(GxTexGen_EyeLinear, depthMatrix, 1);
+    CShaderEffect::SetTexMtx_TexGen(GxTexGen_World, texMatrix, 0);
+    CShaderEffect::SetTexMtx_TexGen(GxTexGen_World, depthMatrix, 1);
     // BENILLA: 2 marks a quad rerouted from plain geometry; when it hits nothing (over water) draw it flat as stock did
     int32_t rerouted = !(this->m_curBatch->m_flags & 4);
     int32_t hit = this->m_scene->m_projectTextureCallback(box, imColor, this->m_curLocalLighting, this->m_scene->m_projectTextureParam, ((this->m_curModel->m_fFlags >> 2) & 1) | groundDecal | (rerouted ? 2 : 0));
@@ -1076,7 +1076,7 @@ uint32_t CM2SceneRender::DrawParticle(uint32_t index, M2Element* elements, uint3
         material.m_flags |= 0x10;
     }
 
-    material.m_blendMode = static_cast<uint16_t>(ParticleBlendToM2Blend(emitter->m_params.m_materialBlend));
+    material.m_blendMode = static_cast<M2BLEND>(ParticleBlendToM2Blend(emitter->m_params.m_materialBlend));
 
     this->m_curMaterial = &material;
     this->m_prevMaterial = nullptr;
@@ -1162,7 +1162,7 @@ void CM2SceneRender::Draw(M2PASS pass, M2Element* elements, uint32_t* indices, u
     world.m_flags[world.m_level] &= ~CGxMatrixStack::F_Identity;
     world.m_mtx[world.m_level] = s_identity;
 
-    GxRsSet(GxRs_DepthFunc, 0);
+    GxRsSet(GxRs_DepthFunc, GxCmp_LEqual);
     GxRsSet(GxRs_PolygonOffset, 0);
     GxRsSet(GxRs_Lighting, 0);
     GxRsSet(GxRs_Fog, 0);

@@ -30,12 +30,12 @@ int main() {
     const int n = 6;
     const float step = 2.0f;
     C3Spline_CatmullRom s;
-    s.m_splineMode = 0;
+    s.splineMode = MODE_LINEAR;
     s.SetPoints(pts, n);
     float linearLen = s.m_length;
     C3Vector linearEnd; s.Pos(1.0f, linearEnd, C3Spline::EVAL_ARCLENGTH);
 
-    s.m_splineMode = 2;
+    s.splineMode = MODE_SMOOTHGROUND;
     int ok = s.Smooth(1.0f);
     assert(ok);
     assert(s.m_pointCount == 12);   // lead, 3 segment starts, 3 + 0 + 3 samples (step = 2.06 yd), end, end control
@@ -74,10 +74,10 @@ int main() {
 
     // refusals: one segment, or more than 100 points
     C3Vector one[] = { {-1, 0, 0}, {0, 0, 0}, {5, 0, 0}, {5, 0, 0} };
-    C3Spline_CatmullRom s1; s1.m_splineMode = 0; s1.SetPoints(one, 4); s1.m_splineMode = 2;
+    C3Spline_CatmullRom s1; s1.splineMode = MODE_LINEAR; s1.SetPoints(one, 4); s1.splineMode = MODE_SMOOTHGROUND;
     assert(!s1.Smooth(1.0f));
     C3Vector longp[] = { {-1, 0, 0}, {0, 0, 0}, {200, 0, 0}, {200, 1.5f, 0}, {200, 1.5f, 0} };
-    C3Spline_CatmullRom s2; s2.m_splineMode = 0; s2.SetPoints(longp, 5); s2.m_splineMode = 2;
+    C3Spline_CatmullRom s2; s2.splineMode = MODE_LINEAR; s2.SetPoints(longp, 5); s2.splineMode = MODE_SMOOTHGROUND;
     assert(!s2.Smooth(1.0f));
     assert(s2.m_pointCount == 5);
 

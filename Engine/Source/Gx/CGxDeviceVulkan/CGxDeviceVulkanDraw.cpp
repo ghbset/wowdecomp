@@ -317,7 +317,7 @@ void CGxDeviceVulkan::Draw(CGxBatch* batch, int32_t count) {
             const int32_t gen = this->m_appRenderStates[GxRs_TexGen0 + stage].m_value.m_data.i[0];
             const int32_t shader = this->m_appRenderStates[GxRs_TextureShader0 + stage].m_value.m_data.i[0];
 
-            if (gen != GxTexGen_ObjectLinear && gen != GxTexGen_EyeLinear && gen != GxTexGen_Unk3) {
+            if (gen != GxTexGen_ObjectLinear && gen != GxTexGen_World && gen != GxTexGen_View) {
                 continue;
             }
 
@@ -327,7 +327,7 @@ void CGxDeviceVulkan::Draw(CGxBatch* batch, int32_t count) {
             const C44Matrix& viewMtx = view.m_mtx[view.m_level];
             C44Matrix t;
 
-            if (gen != GxTexGen_Unk3) {
+            if (gen != GxTexGen_View) {
                 t = viewMtx.AffineInverse();
 
                 if (gen == GxTexGen_ObjectLinear) {

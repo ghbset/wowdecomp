@@ -324,7 +324,7 @@ void CGUnit_C::UpdateMissileTrajectoryTargeting() {
         return;
     }
 
-    CGUnit_C* unit = static_cast<CGUnit_C*>(ClntObjMgrObjectPtr(s_trajectoryTargetGuid, TYPEMASK_UNIT, __FILE__, __LINE__));
+    CGUnit_C* unit = static_cast<CGUnit_C*>(ClntObjMgrObjectPtr(s_trajectoryTargetGuid, TYPE_UNIT, __FILE__, __LINE__));
 
     if (!unit) {
         s_trajectoryTargetGuid = WOWGUID();
@@ -553,7 +553,7 @@ void CGUnit_C::RenderMissileTrajectoryTargetingTexture() {
         return;
     }
 
-    CGUnit_C* unit = static_cast<CGUnit_C*>(ClntObjMgrObjectPtr(s_trajectoryTargetGuid, TYPEMASK_UNIT, __FILE__, __LINE__));
+    CGUnit_C* unit = static_cast<CGUnit_C*>(ClntObjMgrObjectPtr(s_trajectoryTargetGuid, TYPE_UNIT, __FILE__, __LINE__));
 
     if (!unit) {
         s_trajectoryTargetGuid = WOWGUID();
@@ -790,7 +790,7 @@ static float ComputeTrajectoryImpact(const C3Vector* start, const C3Vector* delt
 // VERIFY: 6f3c88ff manual
 // OFFSET: 0x006FC4A0
 float CMissileCollision::ComputeUnitRank(CGUnit_C* unit) {
-    if (unit->m_obj->m_type & TYPEMASK_PLAYER) {
+    if (unit->m_obj->m_type & TYPE_PLAYER) {
         int32_t mode = this->m_missile->m_flags & 0xC;
 
         if (!mode) {
@@ -798,7 +798,7 @@ float CMissileCollision::ComputeUnitRank(CGUnit_C* unit) {
         }
 
         if (mode != 0xC) {
-            CGUnit_C* mover = static_cast<CGUnit_C*>(ClntObjMgrObjectPtr(CGUnit_C::s_activeMover, TYPEMASK_UNIT, __FILE__, __LINE__));
+            CGUnit_C* mover = static_cast<CGUnit_C*>(ClntObjMgrObjectPtr(CGUnit_C::s_activeMover, TYPE_UNIT, __FILE__, __LINE__));
 
             if (!mover || !(mode & 0x4) != !mover->CanAttack(unit)) {
                 return -1.0f;
@@ -812,7 +812,7 @@ float CMissileCollision::ComputeUnitRank(CGUnit_C* unit) {
         }
 
         if (mode != 0x30) {
-            CGUnit_C* mover = static_cast<CGUnit_C*>(ClntObjMgrObjectPtr(CGUnit_C::s_activeMover, TYPEMASK_UNIT, __FILE__, __LINE__));
+            CGUnit_C* mover = static_cast<CGUnit_C*>(ClntObjMgrObjectPtr(CGUnit_C::s_activeMover, TYPE_UNIT, __FILE__, __LINE__));
 
             if (!mover || !(mode & 0x10) != !mover->CanAttack(unit)) {
                 return -1.0f;
@@ -943,9 +943,9 @@ float CMissileCollision::ComputeSegmentImpactTime(const C3Vector* start, const C
 // VERIFY: 1d5508fa manual
 // OFFSET: 0x006FCAA0
 int32_t CMissileCollision::MaybeAddUnitToWorkingList(WOWGUID guid, void* param) {
-    CGUnit_C* unit = static_cast<CGUnit_C*>(ClntObjMgrObjectPtr(guid, TYPEMASK_OBJECT, __FILE__, __LINE__));
+    CGUnit_C* unit = static_cast<CGUnit_C*>(ClntObjMgrObjectPtr(guid, TYPE_OBJECT, __FILE__, __LINE__));
 
-    if (!unit || !(unit->m_obj->m_type & TYPEMASK_UNIT) || unit == s_unitRankExclude) {
+    if (!unit || !(unit->m_obj->m_type & TYPE_UNIT) || unit == s_unitRankExclude) {
         return 1;
     }
 

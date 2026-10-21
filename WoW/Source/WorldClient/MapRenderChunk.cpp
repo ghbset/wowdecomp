@@ -1,5 +1,6 @@
 #include "MapRenderChunk.h"
 #include <algorithm>
+#include "WoW/Source/WorldClient/WorldConstants.h"
 #include <cmath>
 #include <cstring>
 #include "Engine/Source/Gx/CGxBuf.h"
@@ -596,7 +597,7 @@ void CMapRenderChunk::UpdatePools() {
     CMap::ClearAllRenderChunks();
     CMapRenderChunk::Destroy();
 
-    int32_t radius = 1 - static_cast<int32_t>(World::s_farClip * -0.03f);
+    int32_t radius = 1 - static_cast<int32_t>(World::s_farClip * -OO_COORD_TO_CHUNK);
     uint32_t stride = CMapRenderChunk::s_gxBufVertexFormat == GxVBF_PNC ? sizeof(CGxVertexPNC) : sizeof(CGxVertexPN);
 
     // BACKLOG F3 (wraithhost-lite, 0x007BA600): the pools grow with farclip^2 (about 0.9 GB at 10000 yd).
@@ -2023,7 +2024,7 @@ void CMapRenderChunk::InitializeVertexShaderConstants(const C44Matrix& world, co
         consts.m_sunDir.y = dir.y;
         consts.m_sunDir.z = dir.z;
         consts.m_sunDir.w = 1.0f;
-        consts.m_sunSpecularW = 20.0f;
+        consts.m_sunSpecularW = TERRAIN_SPEC_EXP;
     } else {
         consts.m_sunAmbient = C3Vector(1.0f, 1.0f, 1.0f);
         consts.m_sunAmbientW = 1.0f;
@@ -2218,7 +2219,7 @@ void CMapRenderChunk::RenderMultiPassAdditive(CMapRenderChunk* renderChunk) {
         g_theGxDevicePtr->Draw(&renderChunk->m_batch, 1);
 
         if (i == 0 && specular) {
-            GxRsSet(GxRs_TexGen0, GxTexGen_EyeLinear);
+            GxRsSet(GxRs_TexGen0, GxTexGen_World);
             GxRsSet(GxRs_TextureShader0, 1);
         }
 
@@ -2289,7 +2290,7 @@ void CMapRenderChunk::RenderMultiPassAlpha(CMapRenderChunk* renderChunk) {
         g_theGxDevicePtr->Draw(&renderChunk->m_batch, 1);
 
         if (i == 0 && specular) {
-            GxRsSet(GxRs_TexGen0, GxTexGen_EyeLinear);
+            GxRsSet(GxRs_TexGen0, GxTexGen_World);
             GxRsSet(GxRs_TextureShader0, 1);
         }
 
@@ -2383,7 +2384,7 @@ void CMapRenderChunk::RenderMultiPassPixelShaderBigAlpha(CMapRenderChunk* render
         g_theGxDevicePtr->Draw(&renderChunk->m_batch, 1);
 
         if (i == 0 && specular) {
-            GxRsSet(GxRs_TexGen0, GxTexGen_EyeLinear);
+            GxRsSet(GxRs_TexGen0, GxTexGen_World);
             GxRsSet(GxRs_TextureShader0, 1);
         }
 
@@ -2461,7 +2462,7 @@ void CMapRenderChunk::RenderMultiPassPixelShader(CMapRenderChunk* renderChunk) {
         g_theGxDevicePtr->Draw(&renderChunk->m_batch, 1);
 
         if (i == 0 && specular) {
-            GxRsSet(GxRs_TexGen0, GxTexGen_EyeLinear);
+            GxRsSet(GxRs_TexGen0, GxTexGen_World);
             GxRsSet(GxRs_TextureShader0, 1);
         }
 

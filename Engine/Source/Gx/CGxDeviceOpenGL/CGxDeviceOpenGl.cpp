@@ -14,6 +14,8 @@
 #include "Engine/Source/Gx/Gx.h"
 #include "Engine/Source/Storm/H/storm.h"
 
+static const uint32_t kNullTmu = 0xFFFFFFFF;
+
 // STATIC: 0x00A2E000
 static const GLenum s_glBufferTarget[GxPoolTargets_Last] = { GL_ARRAY_BUFFER_ARB, GL_ELEMENT_ARRAY_BUFFER_ARB };
 
@@ -42,7 +44,7 @@ static const GLint s_glMagFilter[GxTexFilters_Last] = { GL_NEAREST, GL_LINEAR, G
 static const uint32_t s_glBytesPerPixel[GxTexFormats_Last] = { 0, 4, 4, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0 };
 
 // STATIC: 0x00A2F2E0
-static const GLenum s_glCubeFaces[6] = { 0x8515, 0x8516, 0x8517, 0x8518, 0x8519, 0x851A };
+static const GLenum s_glCubeFaces[GxTexCubeFaces_Last] = { 0x8515, 0x8516, 0x8517, 0x8518, 0x8519, 0x851A };
 
 // STATIC: 0x00A2F278
 static const GLenum s_glFormat[GxTexFormats_Last] = { 0, GL_RGBA, 0x80E1, 0x80E1, 0x80E1, GL_RGB, 0, 0, 0, 0x86F5, GL_RGB, GL_RGB, GL_DEPTH_COMPONENT };
@@ -88,7 +90,7 @@ static GLenum s_glBlendSrc[12] = { GL_ONE, GL_ONE, GL_SRC_ALPHA, GL_SRC_ALPHA, G
 static GLenum s_glBlendDst[12] = { GL_ZERO, GL_ZERO, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ZERO, GL_SRC_COLOR, GL_ONE, GL_ONE, GL_ZERO, GL_ZERO, GL_ONE, GL_ONE_MINUS_CONSTANT_ALPHA_EXT };
 
 // STATIC: 0x00AD8E80
-static GLenum s_glDepthFunc[4] = { GL_LEQUAL, GL_EQUAL, GL_GEQUAL, GL_LESS };
+static GLenum s_glDepthFunc[GxCmps_Last] = { GL_LEQUAL, GL_EQUAL, GL_GEQUAL, GL_LESS };
 
 // STATIC: 0x00AD8E90
 static GLenum s_glColorMaterial[3] = { GL_AMBIENT_AND_DIFFUSE, GL_SPECULAR, GL_EMISSION };
@@ -1215,7 +1217,7 @@ void CGxDeviceOpenGl::IDeviceSetRenderTargetFBO(EGxBuffer buffer, CGxTex* textur
         }
 
         if (texture->m_needsCreation) {
-            this->BindTexture(texture, 0xFFFFFFFF);
+            this->BindTexture(texture, kNullTmu);
 
             GLenum target = s_glTexTarget[texture->m_target];
             glTexImage2D(target, 0, s_glInternalFormat[texture->m_format], texture->m_width, texture->m_height, 0, s_glFormat[texture->m_format], s_glType[texture->m_format], nullptr);
@@ -2457,7 +2459,7 @@ void CGxDeviceOpenGl::IDeviceSetRenderTargetCopy(EGxBuffer buffer, CGxTex* textu
             glGenTextures(1, reinterpret_cast<GLuint*>(&previous->m_apiSpecificData));
         }
 
-        this->BindTexture(previous, 0xFFFFFFFF);
+        this->BindTexture(previous, kNullTmu);
 
         if (previous->m_needsFlagUpdate) {
             this->ITexSetFlags(previous);
@@ -2843,10 +2845,10 @@ void CGxDeviceOpenGl::CapsWindowSize(CRect& rect) {
 // VERIFY: 37050252 auto
 // OFFSET: 0x00691870
 static void ColorToFloats(GLfloat* out, const CImVector& color) {
-    out[0] = color.r * (1.0f / 255.0f);
-    out[1] = color.g * (1.0f / 255.0f);
-    out[2] = color.b * (1.0f / 255.0f);
-    out[3] = color.a * (1.0f / 255.0f);
+    out[0] = color.r * oo255;
+    out[1] = color.g * oo255;
+    out[2] = color.b * oo255;
+    out[3] = color.a * oo255;
 }
 
 // VERIFY: 8cbcfafc manual
@@ -3506,8 +3508,8 @@ void CGxDeviceOpenGl::ISetTexGen(uint32_t tmu, int32_t texGen) {
             this->DsSet(static_cast<EDeviceState>(Ds_TexGenQ0 + tmu), 0, 0);
             break;
 
-        case GxTexGen_EyeLinear:
-        case GxTexGen_Unk3:
+        case GxTexGen_World:
+        case GxTexGen_View:
             this->DsSet(static_cast<EDeviceState>(Ds_TexGenS0 + tmu), GL_EYE_LINEAR, 0);
             this->DsSet(static_cast<EDeviceState>(Ds_TexGenT0 + tmu), GL_EYE_LINEAR, 0);
             this->DsSet(static_cast<EDeviceState>(Ds_TexGenR0 + tmu), GL_EYE_LINEAR, 0);
@@ -3539,7 +3541,7 @@ void CGxDeviceOpenGl::ISetTexGen(uint32_t tmu, int32_t texGen) {
             break;
     }
 
-    if (texGen == GxTexGen_EyeLinear) {
+    if (texGen == GxTexGen_World) {
         CGxMatrixStack& stack = this->m_texGen[tmu];
         stack.m_dirty = 1;
         stack.m_flags[stack.m_level] &= ~CGxMatrixStack::F_Identity;
@@ -3611,7 +3613,7 @@ void CGxDeviceOpenGl::IRsSendToHw(EGxRenderState which) {
             if (value.m_data.i[0] <= 0) {
                 this->DsSet(Ds_AlphaTest, 0, 0);
             } else {
-                glAlphaFunc(GL_GEQUAL, value.m_data.i[0] * (1.0f / 255.0f));
+                glAlphaFunc(GL_GEQUAL, value.m_data.i[0] * oo255);
                 this->DsSet(Ds_AlphaTest, 1, 0);
             }
 
@@ -3865,7 +3867,7 @@ void CGxDeviceOpenGl::IStateSync() {
 // VERIFY: b88c4866 manual
 // OFFSET: 0x0069E150
 void CGxDeviceOpenGl::SceneClear(uint32_t mask, CImVector color) {
-    glClearColor(color.r * (1.0f / 255.0f), color.g * (1.0f / 255.0f), color.b * (1.0f / 255.0f), color.a * (1.0f / 255.0f));
+    glClearColor(color.r * oo255, color.g * oo255, color.b * oo255, color.a * oo255);
 
     uint32_t depthMask = this->m_deviceStates[Ds_DepthMask];
     this->DsSet(Ds_DepthMask, 1, 0);
@@ -4001,7 +4003,7 @@ void CGxDeviceOpenGl::PrimLineWidth(float width) {
 // VERIFY: 9ddcedf6 manual
 // OFFSET: 0x0069D5D0
 void CGxDeviceOpenGl::BindTexture(CGxTex* texId, uint32_t tmu) {
-    if (tmu == 0xFFFFFFFF) {
+    if (tmu == kNullTmu) {
         this->DsSet(Ds_ActiveTexture, 0, 0);
         this->IRsForceUpdate(GxRs_Texture0);
     }
@@ -4064,7 +4066,7 @@ int32_t CGxDeviceOpenGl::TexCopy(CGxTex* dest, const C2iVector& destPos, const C
         glGenTextures(1, reinterpret_cast<GLuint*>(&dest->m_apiSpecificData));
     }
 
-    this->BindTexture(dest, 0xFFFFFFFF);
+    this->BindTexture(dest, kNullTmu);
 
     if (dest->m_needsFlagUpdate) {
         this->ITexSetFlags(dest);
@@ -4352,7 +4354,7 @@ void CGxDeviceOpenGl::ITexMarkAsUpdated(CGxTex* texId, uint32_t tmu) {
             this->BindTexture(texId, tmu);
         }
 
-        uint32_t faceCount = texId->m_target == GxTex_CubeMap ? 6 : 1;
+        uint32_t faceCount = texId->m_target == GxTex_CubeMap ? GxTexCubeFaces_Last : 1;
 
         for (uint32_t face = 0; face < faceCount; face++) {
             uint32_t mipWidth = width;
@@ -4400,7 +4402,7 @@ void CGxDeviceOpenGl::ITexMarkAsUpdated(CGxTex* texId, uint32_t tmu) {
 // VERIFY: 8215407b manual
 // OFFSET: 0x0069E120
 void CGxDeviceOpenGl::ITexMarkAsUpdated(CGxTex* texId) {
-    this->ITexMarkAsUpdated(texId, 0xFFFFFFFF);
+    this->ITexMarkAsUpdated(texId, kNullTmu);
 }
 
 // VERIFY: 468f21f9 auto

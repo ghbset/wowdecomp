@@ -77,7 +77,7 @@ void CLightning::Reset() {
     if (this->m_chainEffects->m_flags & 0x400) {
         this->m_wavePhase = this->m_chainEffects->m_wavePhase;
     } else {
-        this->m_wavePhase = CRandom::ufloat_(s_rndSeed) * 6.2831855f;
+        this->m_wavePhase = CRandom::ufloat_(s_rndSeed) * TWO_PI;
     }
 
     this->m_arcAngle = (this->m_chainEffects->m_maxArcAngle - this->m_chainEffects->m_minArcAngle) * CRandom::ufloat_(s_rndSeed) + this->m_chainEffects->m_minArcAngle;

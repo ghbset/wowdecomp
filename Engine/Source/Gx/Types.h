@@ -39,6 +39,14 @@ enum EGxBlend {
     GxBlends_Last = 12,
 };
 
+enum EGxCmp : int32_t {
+    GxCmp_LEqual = 0,
+    GxCmp_Equal = 1,
+    GxCmp_GEqual = 2,
+    GxCmp_Less = 3,
+    GxCmps_Last = 4,
+};
+
 enum EGxTexFormat {
     GxTex_Unknown = 0,
     GxTex_Abgr8888 = 1,
@@ -126,11 +134,21 @@ enum EGxWM {
     GxWM_KillFocus = 4,
 };
 
+enum EGxTexCubeFace : uint32_t {
+    GxTex_PositiveX = 0,
+    GxTex_NegativeX = 1,
+    GxTex_PositiveY = 2,
+    GxTex_NegativeY = 3,
+    GxTex_PositiveZ = 4,
+    GxTex_NegativeZ = 5,
+    GxTexCubeFaces_Last = 6,
+};
+
 enum EGxTexGen {
     GxTexGen_Disabled = 0,
     GxTexGen_ObjectLinear = 1,
-    GxTexGen_EyeLinear = 2,
-    GxTexGen_Unk3 = 3,
+    GxTexGen_World = 2,
+    GxTexGen_View = 3,
     GxTexGen_ReflectionMap = 4,
     GxTexGen_Normal = 5,
     GxTexGen_SphereMap = 6,

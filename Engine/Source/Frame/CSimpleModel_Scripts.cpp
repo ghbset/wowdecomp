@@ -416,7 +416,7 @@ static int32_t Script_ReplaceIconTexture(lua_State* L) {
     CSimpleModel* model = static_cast<CSimpleModel*>(FrameScript_GetObjectThis(L, CSimpleModel::GetObjectType()));
 
     if (lua_isstring(L, 2)) {
-        model->ReplaceTexture(14, lua_tolstring(L, 2, nullptr));
+        model->ReplaceTexture(M2TEX_ITEM_ICON, lua_tolstring(L, 2, nullptr));
         return 0;
     }
 

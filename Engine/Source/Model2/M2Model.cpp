@@ -2422,7 +2422,7 @@ void M2AnimateTrack<M2CompQuat, C4Quaternion>(CM2Model* model, M2ModelBone* bone
         float ratio;
         model->FindKey(&bone->m_sequence, track, modelTrack.m_currentKey, key1, ratio);
 
-        if (!track.m_trackType) {
+        if (track.m_trackType == M2TRACK_NONE) {
             M2CompQuat& key = keys[modelTrack.m_currentKey];
             modelTrack.m_currentValue.x = key.m_values[0] * 0.000030518044f - 1.0f;
             modelTrack.m_currentValue.y = key.m_values[1] * 0.000030518044f - 1.0f;
@@ -2447,7 +2447,7 @@ void M2AnimateTrack<M2CompQuat, C4Quaternion>(CM2Model* model, M2ModelBone* bone
     } else {
         modelTrack.m_currentValue = defaultValue;
 
-        if (!track.m_trackType) {
+        if (track.m_trackType == M2TRACK_NONE) {
             return;
         }
     }
@@ -3296,7 +3296,7 @@ void M2AnimateTrack<C4Quaternion, C4Quaternion>(CM2Model* model, M2ModelBone* bo
         float ratio;
         model->FindKey(&bone->m_sequence, track, modelTrack.m_currentKey, key1, ratio);
 
-        if (!track.m_trackType) {
+        if (track.m_trackType == M2TRACK_NONE) {
             modelTrack.m_currentValue = keys[modelTrack.m_currentKey];
             return;
         }
@@ -3305,7 +3305,7 @@ void M2AnimateTrack<C4Quaternion, C4Quaternion>(CM2Model* model, M2ModelBone* bo
     } else {
         modelTrack.m_currentValue = defaultValue;
 
-        if (!track.m_trackType) {
+        if (track.m_trackType == M2TRACK_NONE) {
             return;
         }
     }
@@ -3340,7 +3340,7 @@ void M2AnimateTrack<fixed16, float>(CM2Model* model, M2ModelBone* bone, const M2
         float ratio;
         model->FindKey(&bone->m_sequence, track, modelTrack.m_currentKey, key1, ratio);
 
-        if (!track.m_trackType) {
+        if (track.m_trackType == M2TRACK_NONE) {
             modelTrack.m_currentValue = keys[modelTrack.m_currentKey].m_value * 0.000030518509f;
             return;
         }
@@ -3350,7 +3350,7 @@ void M2AnimateTrack<fixed16, float>(CM2Model* model, M2ModelBone* bone, const M2
     } else {
         modelTrack.m_currentValue = defaultValue;
 
-        if (!track.m_trackType) {
+        if (track.m_trackType == M2TRACK_NONE) {
             return;
         }
     }
@@ -3386,7 +3386,7 @@ void M2AnimateTrack<C3Vector, C3Vector>(CM2Model* model, M2ModelBone* bone, cons
         float ratio;
         model->FindKey(&bone->m_sequence, track, modelTrack.m_currentKey, key1, ratio);
 
-        if (!track.m_trackType) {
+        if (track.m_trackType == M2TRACK_NONE) {
             modelTrack.m_currentValue = keys[modelTrack.m_currentKey];
             return;
         }
@@ -3399,7 +3399,7 @@ void M2AnimateTrack<C3Vector, C3Vector>(CM2Model* model, M2ModelBone* bone, cons
     } else {
         modelTrack.m_currentValue = defaultValue;
 
-        if (!track.m_trackType) {
+        if (track.m_trackType == M2TRACK_NONE) {
             return;
         }
     }
@@ -3441,7 +3441,7 @@ void M2AnimateTrack<uint8_t, uint8_t>(CM2Model* model, M2ModelBone* bone, const 
     if (keys.m_count) {
         model->FindKey(&bone->m_sequence, track, modelTrack.m_currentKey, key1, ratio);
 
-        if (!track.m_trackType) {
+        if (track.m_trackType == M2TRACK_NONE) {
             modelTrack.m_currentValue = keys[modelTrack.m_currentKey];
             return;
         }
@@ -3450,7 +3450,7 @@ void M2AnimateTrack<uint8_t, uint8_t>(CM2Model* model, M2ModelBone* bone, const 
     } else {
         modelTrack.m_currentValue = defaultValue;
 
-        if (!track.m_trackType) {
+        if (track.m_trackType == M2TRACK_NONE) {
             return;
         }
     }
@@ -3476,7 +3476,7 @@ void M2AnimateTrack<float, float>(CM2Model* model, M2ModelBone* bone, const M2Tr
     if (keys.m_count) {
         model->FindKey(&bone->m_sequence, track, modelTrack.m_currentKey, key1, ratio);
 
-        if (!track.m_trackType) {
+        if (track.m_trackType == M2TRACK_NONE) {
             modelTrack.m_currentValue = keys[modelTrack.m_currentKey];
             return;
         }
@@ -3486,7 +3486,7 @@ void M2AnimateTrack<float, float>(CM2Model* model, M2ModelBone* bone, const M2Tr
     } else {
         modelTrack.m_currentValue = defaultValue;
 
-        if (!track.m_trackType) {
+        if (track.m_trackType == M2TRACK_NONE) {
             return;
         }
     }
@@ -3520,7 +3520,7 @@ void M2AnimateSplineTrack<M2SplineKey<C3Vector>, C3Vector>(CM2Model* model, M2Mo
     if (keys.m_count) {
         model->FindKey(&bone->m_sequence, track, modelTrack.m_currentKey, key1, ratio);
 
-        if (!track.m_trackType) {
+        if (track.m_trackType == M2TRACK_NONE) {
             modelTrack.m_currentValue = keys[modelTrack.m_currentKey].m_value;
             return;
         }
@@ -3529,14 +3529,14 @@ void M2AnimateSplineTrack<M2SplineKey<C3Vector>, C3Vector>(CM2Model* model, M2Mo
         M2SplineKey<C3Vector>& k1 = keys[key1];
 
         switch (track.m_trackType) {
-            case 1: {
+            case M2TRACK_LINEAR: {
                 modelTrack.m_currentValue.x = (k1.m_value.x - k0.m_value.x) * ratio + k0.m_value.x;
                 modelTrack.m_currentValue.y = (k1.m_value.y - k0.m_value.y) * ratio + k0.m_value.y;
                 modelTrack.m_currentValue.z = ratio * (k1.m_value.z - k0.m_value.z) + k0.m_value.z;
                 break;
             }
 
-            case 2: {
+            case M2TRACK_BEZIER: {
                 float r2 = ratio * ratio;
                 float r3 = ratio * ratio * ratio;
                 float b0 = ratio * ratio * 3.0f - r3 - ratio * 3.0f + 1.0f;
@@ -3548,7 +3548,7 @@ void M2AnimateSplineTrack<M2SplineKey<C3Vector>, C3Vector>(CM2Model* model, M2Mo
                 break;
             }
 
-            case 3: {
+            case M2TRACK_HERMITE: {
                 float r2 = ratio * ratio;
                 float r2x3 = ratio * ratio * 3.0f;
                 float r3 = ratio * ratio * ratio;
@@ -3565,7 +3565,7 @@ void M2AnimateSplineTrack<M2SplineKey<C3Vector>, C3Vector>(CM2Model* model, M2Mo
     } else {
         modelTrack.m_currentValue = defaultValue;
 
-        if (!track.m_trackType) {
+        if (track.m_trackType == M2TRACK_NONE) {
             return;
         }
     }
@@ -3580,7 +3580,7 @@ void M2AnimateSplineTrack<M2SplineKey<C3Vector>, C3Vector>(CM2Model* model, M2Mo
             M2SplineKey<C3Vector>& k0 = blendKeys[modelTrack.m_secondaryKey];
             M2SplineKey<C3Vector>& k1 = blendKeys[key1];
 
-            if (track.m_trackType == 2) {
+            if (track.m_trackType == M2TRACK_BEZIER) {
                 float r2 = ratio * ratio;
                 float r3 = ratio * ratio * ratio;
                 float b0 = ratio * ratio * 3.0f - r3 - ratio * 3.0f + 1.0f;
@@ -3589,7 +3589,7 @@ void M2AnimateSplineTrack<M2SplineKey<C3Vector>, C3Vector>(CM2Model* model, M2Mo
                 blend.x = k1.m_value.x * r3 + k0.m_value.x * b0 + b1 * k0.m_outTan.x + b2 * k1.m_inTan.x;
                 blend.y = k1.m_inTan.y * b2 + k0.m_outTan.y * b1 + k0.m_value.y * b0 + k1.m_value.y * r3;
                 blend.z = r3 * k1.m_value.z + (b0 * k0.m_value.z + b1 * k0.m_outTan.z + b2 * k1.m_inTan.z);
-            } else if (track.m_trackType == 3) {
+            } else if (track.m_trackType == M2TRACK_HERMITE) {
                 float r2 = ratio * ratio;
                 float r2x3 = ratio * ratio * 3.0f;
                 float r3 = ratio * ratio * ratio;
@@ -3628,7 +3628,7 @@ void M2AnimateSplineTrack<M2SplineKey<float>, float>(CM2Model* model, M2ModelBon
     if (keys.m_count) {
         model->FindKey(&bone->m_sequence, track, modelTrack.m_currentKey, key1, ratio);
 
-        if (!track.m_trackType) {
+        if (track.m_trackType == M2TRACK_NONE) {
             modelTrack.m_currentValue = keys[modelTrack.m_currentKey].m_value;
             return;
         }
@@ -3637,18 +3637,18 @@ void M2AnimateSplineTrack<M2SplineKey<float>, float>(CM2Model* model, M2ModelBon
         M2SplineKey<float>& k1 = keys[key1];
 
         switch (track.m_trackType) {
-            case 1: {
+            case M2TRACK_LINEAR: {
                 modelTrack.m_currentValue = k0.m_value + (k1.m_value - k0.m_value) * ratio;
                 break;
             }
 
-            case 2: {
+            case M2TRACK_BEZIER: {
                 float r3 = ratio * ratio * ratio;
                 modelTrack.m_currentValue = r3 * k1.m_value + (r3 * 3.0f - ratio * ratio * 6.0f + ratio * 3.0f) * k0.m_outTan + (3.0f * (ratio * ratio) - r3 * 3.0f) * k1.m_inTan + (3.0f * (ratio * ratio) - r3 - ratio * 3.0f + 1.0f) * k0.m_value;
                 break;
             }
 
-            case 3: {
+            case M2TRACK_HERMITE: {
                 float r3 = ratio * ratio * ratio;
                 modelTrack.m_currentValue = (ratio + r3 - 2.0f * (ratio * ratio)) * k0.m_outTan + (r3 - ratio * ratio) * k1.m_inTan + (r3 * 2.0f - ratio * ratio * 3.0f + 1.0f) * k0.m_value + (ratio * ratio * 3.0f - r3 * 2.0f) * k1.m_value;
                 break;
@@ -3657,7 +3657,7 @@ void M2AnimateSplineTrack<M2SplineKey<float>, float>(CM2Model* model, M2ModelBon
     } else {
         modelTrack.m_currentValue = defaultValue;
 
-        if (!track.m_trackType) {
+        if (track.m_trackType == M2TRACK_NONE) {
             return;
         }
     }
@@ -3672,10 +3672,10 @@ void M2AnimateSplineTrack<M2SplineKey<float>, float>(CM2Model* model, M2ModelBon
             M2SplineKey<float>& k0 = blendKeys[modelTrack.m_secondaryKey];
             M2SplineKey<float>& k1 = blendKeys[key1];
 
-            if (track.m_trackType == 2) {
+            if (track.m_trackType == M2TRACK_BEZIER) {
                 float r3 = ratio * ratio * ratio;
                 blend = r3 * k1.m_value + (r3 * 3.0f - ratio * ratio * 6.0f + ratio * 3.0f) * k0.m_outTan + (3.0f * (ratio * ratio) - r3 * 3.0f) * k1.m_inTan + (3.0f * (ratio * ratio) - r3 - ratio * 3.0f + 1.0f) * k0.m_value;
-            } else if (track.m_trackType == 3) {
+            } else if (track.m_trackType == M2TRACK_HERMITE) {
                 float r3 = ratio * ratio * ratio;
                 blend = (ratio + r3 - 2.0f * (ratio * ratio)) * k0.m_outTan + (r3 - ratio * ratio) * k1.m_inTan + (r3 * 2.0f - ratio * ratio * 3.0f + 1.0f) * k0.m_value + (ratio * ratio * 3.0f - r3 * 2.0f) * k1.m_value;
             } else {
@@ -3701,7 +3701,7 @@ void M2AnimateTrack<uint16_t, uint16_t>(CM2Model* model, M2ModelBone* bone, cons
     if (keys.m_count) {
         model->FindKey(&bone->m_sequence, track, modelTrack.m_currentKey, key1, ratio);
 
-        if (!track.m_trackType) {
+        if (track.m_trackType == M2TRACK_NONE) {
             modelTrack.m_currentValue = keys[modelTrack.m_currentKey];
             return;
         }
@@ -3710,7 +3710,7 @@ void M2AnimateTrack<uint16_t, uint16_t>(CM2Model* model, M2ModelBone* bone, cons
     } else {
         modelTrack.m_currentValue = defaultValue;
 
-        if (!track.m_trackType) {
+        if (track.m_trackType == M2TRACK_NONE) {
             return;
         }
     }
@@ -7426,41 +7426,41 @@ int32_t CM2Model::InitializeLoaded() {
 
             CParticleMat material;
             material.m_flags = 7;
-            material.m_blendMode = 0;
+            material.m_blendMode = GxBlend_Opaque;
 
             switch (particleData->m_blendMode) {
-                case 0:
-                    material.m_blendMode = 0;
+                case M2PARTICLEBLEND_OPAQUE:
+                    material.m_blendMode = GxBlend_Opaque;
                     material.m_flags |= 4;
                     break;
 
-                case 1:
-                    material.m_blendMode = 1;
+                case M2PARTICLEBLEND_ALPHA_KEY:
+                    material.m_blendMode = GxBlend_AlphaKey;
                     material.m_flags |= 4;
                     break;
 
-                case 2:
-                    material.m_blendMode = 2;
+                case M2PARTICLEBLEND_ALPHA:
+                    material.m_blendMode = GxBlend_Alpha;
                     material.m_flags &= ~4u;
                     break;
 
-                case 3:
-                    material.m_blendMode = 10;
+                case M2PARTICLEBLEND_NO_ALPHA_ADD:
+                    material.m_blendMode = GxBlend_NoAlphaAdd;
                     material.m_flags &= ~4u;
                     break;
 
-                case 4:
-                    material.m_blendMode = 3;
+                case M2PARTICLEBLEND_ADD:
+                    material.m_blendMode = GxBlend_Add;
                     material.m_flags &= ~4u;
                     break;
 
-                case 5:
-                    material.m_blendMode = 4;
+                case M2PARTICLEBLEND_MOD:
+                    material.m_blendMode = GxBlend_Mod;
                     material.m_flags &= ~4u;
                     break;
 
-                case 6:
-                    material.m_blendMode = 5;
+                case M2PARTICLEBLEND_MOD2X:
+                    material.m_blendMode = GxBlend_Mod2x;
                     material.m_flags &= ~4u;
                     break;
             }
@@ -7767,7 +7767,7 @@ void CM2Model::GatherModelBatchesShadowMap(CModelBatchList& untextured, CModelBa
         M2Data* data = this->m_shared->m_data;
         M2Material* material = &data->m_materials[batch->m_materialIndex];
 
-        if ((material->m_flags & 0x40) || (!(material->m_flags & 0x80) && material->m_blendMode > 1)) {
+        if ((material->m_flags & 0x40) || (!(material->m_flags & 0x80) && material->m_blendMode > M2BLEND_ALPHA_KEY)) {
             continue;
         }
 

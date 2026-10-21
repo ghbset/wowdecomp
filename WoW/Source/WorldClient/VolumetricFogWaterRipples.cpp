@@ -164,7 +164,7 @@ void CaptureWaterContacts(const float centre[3], WaterContactFrame& out) {
         }
     }
     for (CGObject_C* object = manager->m_visibleObjects.Head(); object; object = manager->m_visibleObjects.Next(object)) {
-        if (!object->m_obj || !(object->m_obj->m_type & TYPEMASK_UNIT)) {
+        if (!object->m_obj || !(object->m_obj->m_type & TYPE_UNIT)) {
             continue;
         }
         const CGUnit_C* unit = static_cast<const CGUnit_C*>(object);

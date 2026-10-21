@@ -76,7 +76,7 @@ void CGContainerInfo::LeaveWorld() {
             continue;
         }
 
-        CGContainer_C* container = static_cast<CGContainer_C*>(ClntObjMgrObjectPtr(CGContainerInfo::m_containers[i], TYPEMASK_CONTAINER, __FILE__, __LINE__));
+        CGContainer_C* container = static_cast<CGContainer_C*>(ClntObjMgrObjectPtr(CGContainerInfo::m_containers[i], TYPE_CONTAINER, __FILE__, __LINE__));
 
         if (!container) {
             continue;
@@ -129,7 +129,7 @@ WOWGUID GetBagAtIndex(uint32_t index) {
 // VERIFY: 8542c504 manual
 // OFFSET: 0x005D7380
 bool CGContainerInfo::GetLuaBagAndSlot(lua_State* L, CGBag_C** bag, int32_t* slot, int32_t* bank) {
-    CGPlayer_C* player = static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(ClntObjMgrGetActivePlayer(), TYPEMASK_PLAYER, __FILE__, __LINE__));
+    CGPlayer_C* player = static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(ClntObjMgrGetActivePlayer(), TYPE_PLAYER, __FILE__, __LINE__));
 
     if (!player) {
         return false;
@@ -142,7 +142,7 @@ bool CGContainerInfo::GetLuaBagAndSlot(lua_State* L, CGBag_C** bag, int32_t* slo
 
     if (index >= 0) {
         if (index < 11) {
-            CGContainer_C* container = static_cast<CGContainer_C*>(ClntObjMgrObjectPtr(GetBagAtIndex(index), TYPEMASK_CONTAINER, __FILE__, __LINE__));
+            CGContainer_C* container = static_cast<CGContainer_C*>(ClntObjMgrObjectPtr(GetBagAtIndex(index), TYPE_CONTAINER, __FILE__, __LINE__));
 
             if (container) {
                 *bag = container->GetBag();
@@ -219,7 +219,7 @@ void CGContainerInfo::UpdateContents(WOWGUID guid) {
 // VERIFY: 86768ce2 manual
 // OFFSET: 0x005D7320
 void CGContainerInfo::UpdateItem(WOWGUID guid) {
-    CGItem_C* item = static_cast<CGItem_C*>(ClntObjMgrObjectPtr(guid, TYPEMASK_ITEM, __FILE__, __LINE__));
+    CGItem_C* item = static_cast<CGItem_C*>(ClntObjMgrObjectPtr(guid, TYPE_ITEM, __FILE__, __LINE__));
 
     if (item && item->m_item->m_itemFieldOwner == ClntObjMgrGetActivePlayer()) {
         CGContainerInfo::UpdateContents(item->m_item->m_itemFieldContained);
@@ -263,7 +263,7 @@ static void MultiCastBarItemStatsCallback(int32_t id, const WOWGUID& guid, void*
 // VERIFY: 733aa4e0 auto
 // OFFSET: 0x005D9600
 int32_t UpdateContainerContents(WOWGUID guid, uint32_t fieldOffset, uint32_t fieldSize, const void* oldValue, void* param) {
-    CGContainer_C* container = static_cast<CGContainer_C*>(ClntObjMgrObjectPtr(guid, TYPEMASK_CONTAINER, __FILE__, __LINE__));
+    CGContainer_C* container = static_cast<CGContainer_C*>(ClntObjMgrObjectPtr(guid, TYPE_CONTAINER, __FILE__, __LINE__));
 
     if (!container) {
         return 1;
@@ -273,8 +273,8 @@ int32_t UpdateContainerContents(WOWGUID guid, uint32_t fieldOffset, uint32_t fie
     CGBag_C* bag = container->GetBag();
     WOWGUID newGuid = slot < static_cast<uint32_t>(bag->m_numSlots) ? bag->m_slots[slot] : WOWGUID();
     const WOWGUID& oldGuid = *static_cast<const WOWGUID*>(oldValue);
-    CGItem_C* oldItem = static_cast<CGItem_C*>(ClntObjMgrObjectPtr(oldGuid, TYPEMASK_ITEM, __FILE__, __LINE__));
-    CGItem_C* newItem = static_cast<CGItem_C*>(ClntObjMgrObjectPtr(newGuid, TYPEMASK_ITEM, __FILE__, __LINE__));
+    CGItem_C* oldItem = static_cast<CGItem_C*>(ClntObjMgrObjectPtr(oldGuid, TYPE_ITEM, __FILE__, __LINE__));
+    CGItem_C* newItem = static_cast<CGItem_C*>(ClntObjMgrObjectPtr(newGuid, TYPE_ITEM, __FILE__, __LINE__));
 
     if (oldGuid != newGuid) {
         if (oldItem) {
@@ -317,7 +317,7 @@ int32_t UpdateContainerContents(WOWGUID guid, uint32_t fieldOffset, uint32_t fie
 // VERIFY: d73cd982 manual
 // OFFSET: 0x005D9790
 int32_t UpdateInvContents(WOWGUID guid, uint32_t fieldOffset, uint32_t fieldSize, const void* oldValue, void* param) {
-    CGPlayer_C* player = static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(guid, TYPEMASK_PLAYER, __FILE__, __LINE__));
+    CGPlayer_C* player = static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(guid, TYPE_PLAYER, __FILE__, __LINE__));
 
     if (!player) {
         return 1;
@@ -326,8 +326,8 @@ int32_t UpdateInvContents(WOWGUID guid, uint32_t fieldOffset, uint32_t fieldSize
     uint32_t slot = (fieldOffset - offsetof(CGPlayerLocalData, m_playerFieldInvSlotHead)) / sizeof(WOWGUID);
     WOWGUID newGuid = slot < static_cast<uint32_t>(player->m_bag.m_numSlots) ? player->m_bag.m_slots[slot] : WOWGUID();
     const WOWGUID& oldGuid = *static_cast<const WOWGUID*>(oldValue);
-    CGItem_C* oldItem = static_cast<CGItem_C*>(ClntObjMgrObjectPtr(oldGuid, TYPEMASK_ITEM, __FILE__, __LINE__));
-    CGItem_C* newItem = static_cast<CGItem_C*>(ClntObjMgrObjectPtr(newGuid, TYPEMASK_ITEM, __FILE__, __LINE__));
+    CGItem_C* oldItem = static_cast<CGItem_C*>(ClntObjMgrObjectPtr(oldGuid, TYPE_ITEM, __FILE__, __LINE__));
+    CGItem_C* newItem = static_cast<CGItem_C*>(ClntObjMgrObjectPtr(newGuid, TYPE_ITEM, __FILE__, __LINE__));
 
     if (oldGuid != newGuid) {
         if (oldItem) {
@@ -374,7 +374,7 @@ int32_t UpdateInvContents(WOWGUID guid, uint32_t fieldOffset, uint32_t fieldSize
 // VERIFY: 6dd08087 manual
 // OFFSET: 0x005D9960
 void CGContainerInfo::UpdateContainers() {
-    CGPlayer_C* player = static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(ClntObjMgrGetActivePlayer(), TYPEMASK_PLAYER, __FILE__, __LINE__));
+    CGPlayer_C* player = static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(ClntObjMgrGetActivePlayer(), TYPE_PLAYER, __FILE__, __LINE__));
 
     if (!player) {
         return;
@@ -389,7 +389,7 @@ void CGContainerInfo::UpdateContainers() {
         }
 
         if (CGContainerInfo::m_containers[i]) {
-            CGContainer_C* old = static_cast<CGContainer_C*>(ClntObjMgrObjectPtr(CGContainerInfo::m_containers[i], TYPEMASK_CONTAINER, __FILE__, __LINE__));
+            CGContainer_C* old = static_cast<CGContainer_C*>(ClntObjMgrObjectPtr(CGContainerInfo::m_containers[i], TYPE_CONTAINER, __FILE__, __LINE__));
 
             if (old && old->GetBag()) {
                 int32_t count = old->GetBag()->m_numSlots;
@@ -405,7 +405,7 @@ void CGContainerInfo::UpdateContainers() {
         CGContainerInfo::m_containers[i] = guid;
 
         if (guid) {
-            CGContainer_C* container = static_cast<CGContainer_C*>(ClntObjMgrObjectPtr(guid, TYPEMASK_CONTAINER, __FILE__, __LINE__));
+            CGContainer_C* container = static_cast<CGContainer_C*>(ClntObjMgrObjectPtr(guid, TYPE_CONTAINER, __FILE__, __LINE__));
 
             if (container && container->GetBag()) {
                 int32_t count = container->GetBag()->m_numSlots;
@@ -423,7 +423,7 @@ void CGContainerInfo::UpdateContainers() {
 // VERIFY: 4c8ee089 manual
 // OFFSET: 0x005D9B40
 int32_t InvUpdateHandler(WOWGUID guid, uint32_t fieldOffset, uint32_t fieldSize, const void* oldValue, void* param) {
-    CGPlayer_C* player = static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(guid, TYPEMASK_PLAYER, __FILE__, __LINE__));
+    CGPlayer_C* player = static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(guid, TYPE_PLAYER, __FILE__, __LINE__));
 
     if (!player) {
         return 1;
@@ -432,9 +432,9 @@ int32_t InvUpdateHandler(WOWGUID guid, uint32_t fieldOffset, uint32_t fieldSize,
     uint32_t slot = (fieldOffset - offsetof(CGPlayerLocalData, m_playerFieldInvSlotHead)) / sizeof(WOWGUID);
 
     if (slot < static_cast<uint32_t>(player->m_bag.m_numSlots) && player->m_bag.m_slots[slot]) {
-        CGItem_C* item = static_cast<CGItem_C*>(ClntObjMgrObjectPtr(player->m_bag.m_slots[slot], TYPEMASK_ITEM, __FILE__, __LINE__));
+        CGItem_C* item = static_cast<CGItem_C*>(ClntObjMgrObjectPtr(player->m_bag.m_slots[slot], TYPE_ITEM, __FILE__, __LINE__));
 
-        if (item && (item->m_obj->m_type & TYPEMASK_CONTAINER)) {
+        if (item && (item->m_obj->m_type & TYPE_CONTAINER)) {
             CGBag_C* bag = item->GetBag();
 
             if (bag) {

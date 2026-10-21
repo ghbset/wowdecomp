@@ -13,6 +13,12 @@
 #include "Engine/Source/Tempest/C44Matrix.h"
 #include "Engine/Source/Tempest/CRect.h"
 
+static const float DEFAULT_DIST = 100.0f;
+static const float DEFAULT_FARZ = 5000.0f;
+static const float DEFAULT_NEARZ = 8.0f;
+static const float DEFAULT_FOV = 1.5707964f;
+static const float DEFAULT_SCREEN_FRUSTUM_LENGTH = 500.0f;
+
 // STATIC: 0x00B4A304
 static float s_inv2Pi = 1.0f / 6.2831855f;
 
@@ -90,10 +96,10 @@ void CameraSetupScreenProjection(const CRect& rect, const C2Vector& offset, floa
     C44Matrix projection;
 
     if (forceOrtho || !g_theGxDevicePtr->StereoEnabled()) {
-        GxuXformCreateOrtho(left, right, bottom, top, -500.0f, 500.0f, projection);
+        GxuXformCreateOrtho(left, right, bottom, top, -DEFAULT_SCREEN_FRUSTUM_LENGTH, DEFAULT_SCREEN_FRUSTUM_LENGTH, projection);
         projection.Scale(C3Vector(1.0f, 1.0f, -1.0f));
     } else {
-        GxuXformCreateOrthoDepth(left, right, bottom, top, -500.0f, 500.0f, projection);
+        GxuXformCreateOrthoDepth(left, right, bottom, top, -DEFAULT_SCREEN_FRUSTUM_LENGTH, DEFAULT_SCREEN_FRUSTUM_LENGTH, projection);
     }
 
     CGxCaps& caps = g_theGxDevicePtr->Caps();
@@ -210,7 +216,7 @@ CDataMgr::CDataMgr(uint32_t count) {
 
 // VERIFY: a7d7446b manual
 // OFFSET: 0x004BF770
-CCamera::CCamera() : CDataMgr(9), m_position(C3Vector(100.0f, 0.0f, 0.0f)), m_target(C3Vector(0.0f, 0.0f, 0.0f)), m_distance(100.0f), m_zFar(5000.0f), m_zNear(8.0f), m_aoa(0.0f), m_fov(1.5707964f), m_roll(0.0f), m_rotation(0.0f) {
+CCamera::CCamera() : CDataMgr(9), m_position(C3Vector(DEFAULT_DIST, 0.0f, 0.0f)), m_target(C3Vector(0.0f, 0.0f, 0.0f)), m_distance(DEFAULT_DIST), m_zFar(DEFAULT_FARZ), m_zNear(DEFAULT_NEARZ), m_aoa(0.0f), m_fov(DEFAULT_FOV), m_roll(0.0f), m_rotation(0.0f) {
     this->AddManaged(&this->m_position, 7, 0);
     this->AddManaged(&this->m_target, 8, 0);
     this->AddManaged(&this->m_distance, 1, 0);

@@ -1,4 +1,5 @@
 #include "MapDoodadDef.h"
+#include "WoW/Source/WorldClient/WorldLightingConstants.h"
 #include "Engine/Source/Model2/M2Data.h"
 #include "Engine/Source/Model2/M2Light.h"
 #include "Engine/Source/Model2/M2Model.h"
@@ -324,8 +325,8 @@ bool CMapDoodadDef::QueryInteriorLighting(CMapObjDef* mapObjDef, int32_t groupNu
     }
 
     CImVector limit;
-    *reinterpret_cast<uint32_t*>(&limit) = 0xA8;
-    this->AdjustLightmap(&color, &this->m_m2DiffuseColor, limit, &this->m_m2AmbientColor, 96);
+    *reinterpret_cast<uint32_t*>(&limit) = MIN_INTERIOR_DIRCOLOR;
+    this->AdjustLightmap(&color, &this->m_m2DiffuseColor, limit, &this->m_m2AmbientColor, MAX_AMBIENT);
 
     if (!flag) {
         this->m_staticFlags &= ~0x1000;

@@ -1,5 +1,6 @@
 #include "World.h"
 #include "WoW/Source/WorldClient/TreeLeaves.h"   // TREELEAVES
+#include "WoW/Source/WorldClient/WorldConstants.h"
 #include <cstdlib>
 #include <new>
 #include <algorithm>
@@ -103,6 +104,11 @@
 #include <cstring>
 #include "WoW/Source/Object/ObjectClient/Object_C.h"
 #include "WoW/Source/Game/GameClient/ProjectTex.h"
+
+static const float dirLightScaleAmount = 0.5f;
+
+static const int32_t MAX_SOUND_EXT_LEVEL = 9999;
+static const int32_t MIN_SOUND_EXT_LEVEL = 2;
 
 // STATIC: 0x00ADEE48
 static const char* s_zonePaths[11] = {
@@ -581,7 +587,7 @@ void DayNight::FindAndAddZoneLight(const C3Vector* position) {
         return;
     }
 
-    C2Vector point(-(position->y - 17066.666f), -(position->x - 17066.666f));
+    C2Vector point(-(position->y - HALF_WORLD_SIZE), -(position->x - HALF_WORLD_SIZE));
 
     for (uint32_t i = 0; i < sizeof(s_zones) / sizeof(s_zones[0]); i++) {
         const Zone& zone = s_zones[i];
@@ -661,10 +667,10 @@ int32_t World::QueryLiquidStatus(C3Vector* pos, int32_t* liquidType, float* heig
 // OFFSET: 0x0077F390
 int32_t World::QueryLiquidSounds(CMapEntity* entity, float radius, TSGrowableArray<World::LiquidQueryResult>& results) {
     if (entity->m_staticFlags & 0x1) {
-        uint32_t distance = 9999;
+        uint32_t distance = MAX_SOUND_EXT_LEVEL;
         entity->QueryLiquidSounds(results, &distance);
 
-        if (distance < 2) {
+        if (distance < MIN_SOUND_EXT_LEVEL) {
             CMap::QueryLiquidSounds(&entity->m_position, radius, results);
         }
 
@@ -739,7 +745,7 @@ void CWorld::UpdateTextureCacheBudget() {
 // VERIFY: 27c4601b manual
 // OFFSET: 0x0077FB90
 int32_t World::QueryCameraFog(SMOFog* fog, CMapObjDef** mapObjDef, uint8_t* found, TSGrowableArray<uint32_t>** groups, float* distance) {
-    CGPlayer_C* player = static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(ClntObjMgrGetActivePlayer(), TYPEMASK_PLAYER, __FILE__, __LINE__));
+    CGPlayer_C* player = static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(ClntObjMgrGetActivePlayer(), TYPE_PLAYER, __FILE__, __LINE__));
 
     if (player && (player->m_player->m_playerFlags & 0x10)) {
         return 0;
@@ -1214,9 +1220,9 @@ void World::PrepareAreaOfInterest(const C3Vector& position) {
     CWorld::s_objectAreaOfInterest.b = C3Vector(position.x - farClip, position.y - farClip, position.z - farClip);
     CWorld::s_objectAreaOfInterest.t = C3Vector(position.x + farClip, position.y + farClip, position.z + farClip);
 
-    int32_t radius = 1 - static_cast<int32_t>(streamDistance * -0.03f);
-    int32_t chunkX = static_cast<int32_t>(-(position.x - 17066.666f) * 0.03f);
-    int32_t chunkY = static_cast<int32_t>(-(position.y - 17066.666f) * 0.03f);
+    int32_t radius = 1 - static_cast<int32_t>(streamDistance * -OO_COORD_TO_CHUNK);
+    int32_t chunkX = static_cast<int32_t>(-(position.x - HALF_WORLD_SIZE) * OO_COORD_TO_CHUNK);
+    int32_t chunkY = static_cast<int32_t>(-(position.y - HALF_WORLD_SIZE) * OO_COORD_TO_CHUNK);
 
     if (SFile::IsTrial()) {
         StreamingSetAreaOfInterest(chunkY, chunkX);
@@ -1594,7 +1600,7 @@ void CWorld::Update(C3Vector* camPos, C3Vector* camTarget, C3Vector* position) {
 
     World::s_weather->Update();
 
-    CGPlayer_C* player = static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(ClntObjMgrGetActivePlayer(), TYPEMASK_PLAYER, __FILE__, __LINE__));
+    CGPlayer_C* player = static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(ClntObjMgrGetActivePlayer(), TYPE_PLAYER, __FILE__, __LINE__));
 
     if (player && !s_disableAreaAmbient) {
         uint32_t areaId;
@@ -1790,8 +1796,8 @@ bool World::IsValidPosition(const C3Vector& position, float margin) {
 // OFFSET: 0x00406DE0
 bool World::IsValidPosition(float x, float y, float z, float margin) {
     if (_finite(x) && _finite(y) && _finite(z)) {
-        float v4 = -(y - 17066.666f);
-        float v5 = -(x - 17066.666f);
+        float v4 = -(y - HALF_WORLD_SIZE);
+        float v5 = -(x - HALF_WORLD_SIZE);
 
         if (margin > v4) {
             return 0;
@@ -2266,7 +2272,7 @@ void CWorldScene::AddMapObjDefGroup(CMapObjDef* mapObjDef, CMapObjDefGroup* mapO
     int32_t bucket = 0;
 
     if (dist > 0.0f) {
-        bucket = CMath::fint_(dist * 0.03f - 0.5f);
+        bucket = CMath::fint_(dist * CBDIVISOR - 0.5f);
 
         if (bucket >= 64) {
             return;
@@ -2294,7 +2300,7 @@ void CWorldScene::ComputeExteriorSortDistances() {
         float dist = x * CWorldScene::camPlaneXY.n.x + y * CWorldScene::camPlaneXY.n.y + z * CWorldScene::camPlaneXY.n.z + CWorldScene::camPlaneXY.d;
 
         if (dist > 0.0f) {
-            bucket = CMath::fint_(dist * 0.03f - 0.5f);
+            bucket = CMath::fint_(dist * CBDIVISOR - 0.5f);
 
             if (bucket >= 64) {
                 return;
@@ -2312,7 +2318,7 @@ void CWorldScene::AddMapChunkToRenderList(CMapChunk* mapChunk, C3Vector* pos) {
     int32_t bucket = 0;
     float distance = pos->y * CWorldScene::camPlaneXY.n.y + pos->z * CWorldScene::camPlaneXY.n.z + pos->x * CWorldScene::camPlaneXY.n.x + CWorldScene::camPlaneXY.d;
 
-    if (distance <= 0.0f || (bucket = CMath::fint_(distance * 0.029999999f - 0.5f)) < 64) {
+    if (distance <= 0.0f || (bucket = CMath::fint_(distance * CBDIVISOR - 0.5f)) < 64) {
         CWorldScene::sortTable.m_table[bucket].m_mapChunkList.LinkToTail(mapChunk);
     }
 }
@@ -2324,7 +2330,7 @@ void CWorldScene::AddToDistanceBucket(CChunkLiquid* liquid, const C3Vector& pos)
     float distance = pos.y * CWorldScene::camPlaneXY.n.y + pos.z * CWorldScene::camPlaneXY.n.z + pos.x * CWorldScene::camPlaneXY.n.x + CWorldScene::camPlaneXY.d;
 
     if (distance > 0.0f) {
-        float scaled = distance * 0.03f;
+        float scaled = distance * CBDIVISOR;
         bucket = CMath::fint_(scaled - 0.5f);
 
         // BACKLOG F2: stock dropped liquid past bucket 63 (2133 yd); clamp so far water draws out to farclip
@@ -2740,7 +2746,7 @@ void CWorldScene::PrepareLiquidInstances() {
                 const LiquidTypeRec* typeRec = g_liquidTypeDB.GetRecord(liquidType);
 
                 if (!typeRec) {
-                    SysMsgPrintf(STATUS_ERROR, 2, "WMO: Liquid type [%d] not found, defaulting to water!", liquidType);
+                    SysMsgPrintf(SYSMSG_ERROR, 2, "WMO: Liquid type [%d] not found, defaulting to water!", liquidType);
                     liquidType = 1;
                     typeRec = g_liquidTypeDB.GetRecord(liquidType);
                 }
@@ -2905,10 +2911,10 @@ void CWorldScene::Update(C3Vector* camPos, C3Vector* camTarget) {
     CWorldScene::s_viewProjW.w = CWorldScene::s_viewProjMatrix.d3;
 
     CWorldScene::boundingBox = CAaBox::Bounding(CWorldScene::s_frustumCorners, 8);
-    CWorldScene::s_frustumChunkRect.minX = CMath::fint_(-(CWorldScene::boundingBox.t.y - 17066.666f) * 0.029999999f - 0.5f);
-    CWorldScene::s_frustumChunkRect.minY = CMath::fint_(-(CWorldScene::boundingBox.t.x - 17066.666f) * 0.029999999f - 0.5f);
-    CWorldScene::s_frustumChunkRect.maxX = CMath::fint_(-(CWorldScene::boundingBox.b.y - 17066.666f) * 0.029999999f - 0.5f);
-    CWorldScene::s_frustumChunkRect.maxY = CMath::fint_(-(CWorldScene::boundingBox.b.x - 17066.666f) * 0.029999999f - 0.5f);
+    CWorldScene::s_frustumChunkRect.minX = CMath::fint_(-(CWorldScene::boundingBox.t.y - HALF_WORLD_SIZE) * OO_COORD_TO_CHUNK - 0.5f);
+    CWorldScene::s_frustumChunkRect.minY = CMath::fint_(-(CWorldScene::boundingBox.t.x - HALF_WORLD_SIZE) * OO_COORD_TO_CHUNK - 0.5f);
+    CWorldScene::s_frustumChunkRect.maxX = CMath::fint_(-(CWorldScene::boundingBox.b.y - HALF_WORLD_SIZE) * OO_COORD_TO_CHUNK - 0.5f);
+    CWorldScene::s_frustumChunkRect.maxY = CMath::fint_(-(CWorldScene::boundingBox.b.x - HALF_WORLD_SIZE) * OO_COORD_TO_CHUNK - 0.5f);
 
     CWorldScene::frustumIndex = 0;
     CWorldScene::frustumStack[0].CalcPlanesFromCorners(CWorldScene::s_frustumCorners);
@@ -3794,12 +3800,12 @@ void CWorldScene::RenderChunks() {
 
         if (CMap::enableSpecularTerrain) {
             GxRsSet(GxRs_MatSpecular, static_cast<int32_t>(0xFFFFFFFF));
-            GxRsSet(GxRs_MatSpecularExp, 20.0f);
+            GxRsSet(GxRs_MatSpecularExp, TERRAIN_SPEC_EXP);
         }
 
         for (int32_t i = 0; i < 5; i++) {
             GxRsSet(static_cast<EGxRenderState>(GxRs_TextureCoord0 + i), i);
-            GxRsSet(static_cast<EGxRenderState>(GxRs_TexGen0 + i), GxTexGen_EyeLinear);
+            GxRsSet(static_cast<EGxRenderState>(GxRs_TexGen0 + i), GxTexGen_World);
             GxRsSet(static_cast<EGxRenderState>(GxRs_TextureShader0 + i), 1);
         }
     }
@@ -3906,7 +3912,7 @@ void CWorldScene::AddDoodadDefs(TSList<CMapBaseObjLink, TSGetExplicitLink<CMapBa
         float dist = doodadDef->m_sphere.c.y * CWorldScene::camPlaneXY.n.y + doodadDef->m_sphere.c.z * CWorldScene::camPlaneXY.n.z + doodadDef->m_sphere.c.x * CWorldScene::camPlaneXY.n.x + CWorldScene::camPlaneXY.d;
 
         if (dist > 0.0f) {
-            bucket = CMath::fint_(dist * 0.03f - 0.5f);
+            bucket = CMath::fint_(dist * CBDIVISOR - 0.5f);
 
             if (bucket >= 64) {
                 continue;
@@ -4075,7 +4081,7 @@ void CWorldScene::CullChunks(CSortEntry* entry, uint32_t index) {
                         int32_t bucket = 0;
                         float distance = CWorldScene::DistanceToCamPlaneXY(&corner);
 
-                        if (distance <= 0.0f || (bucket = CMath::fint_(distance * 0.029999999f - 0.5f)) < 64) {
+                        if (distance <= 0.0f || (bucket = CMath::fint_(distance * CBDIVISOR - 0.5f)) < 64) {
                             CWorldScene::sortTable.m_table[bucket].m_holedChunkList.LinkToTail(chunk);
                         }
                     }
@@ -4346,7 +4352,7 @@ void CWorldScene::AddEntityToSortTable(CMapEntity* entity) {
     float distance = corner.y * CWorldScene::camPlaneXY.n.y + corner.z * CWorldScene::camPlaneXY.n.z + corner.x * CWorldScene::camPlaneXY.n.x + CWorldScene::camPlaneXY.d;
 
     if (distance > 0.0f) {
-        bucket = static_cast<int32_t>(distance * 0.029999999f);
+        bucket = static_cast<int32_t>(distance * CBDIVISOR);
 
         if (bucket >= 64) {
             return;
@@ -4443,7 +4449,7 @@ void CMap::UpdateEntity(CMapEntity* entity) {
         entity->m_targetDiffuseLightScale = 2.5f;
     } else {
         entity->m_staticFlags |= 0x8;
-        entity->m_targetDiffuseLightScale = 0.5f;
+        entity->m_targetDiffuseLightScale = dirLightScaleAmount;
     }
 }
 
@@ -4484,7 +4490,7 @@ void CWorldScene::RenderEntitys() {
         CM2Model* model = entity->m_model;
 
         if (model && model->IsLoaded(0, 0) && !(entity->m_staticFlags & 0x4)) {
-            CGUnit_C* unit = static_cast<CGUnit_C*>(ClntObjMgrObjectPtr(WOWGUID{ entity->m_funcParam64 }, TYPEMASK_UNIT, __FILE__, __LINE__));
+            CGUnit_C* unit = static_cast<CGUnit_C*>(ClntObjMgrObjectPtr(WOWGUID{ entity->m_funcParam64 }, TYPE_UNIT, __FILE__, __LINE__));
 
             if (!unit) {
                 if (entity->m_staticFlags & 0x800) {
@@ -4494,7 +4500,7 @@ void CWorldScene::RenderEntitys() {
                     CWorldScene::RequestModelStreaming(model, &info.m_bounds);
                 }
             } else {
-                if ((entity->m_staticFlags & 0x800) && unit->m_unit->m_unitFieldBytes1[0] != 9) {
+                if ((entity->m_staticFlags & 0x800) && unit->m_unit->m_unitFieldBytes1[0] != UNIT_SUBMERGED) {
                     CAaBox standBox = unit->GetStandBox();
                     CWorldScene::RequestModelStreaming(model, &standBox);
                 }
@@ -4543,7 +4549,7 @@ uint32_t World::TriDataToFacetData(void* unused, FacetData* facets, WOWGUID guid
             float lengthSq = facet->plane.n.z * facet->plane.n.z + facet->plane.n.y * facet->plane.n.y + facet->plane.n.x * facet->plane.n.x;
 
             if (lengthSq == 0.0f) {
-                SysMsgPrintf(STATUS_ERROR, 2, "Found degenerate triangle -- data needs to be fixed\n");
+                SysMsgPrintf(SYSMSG_ERROR, 2, "Found degenerate triangle -- data needs to be fixed\n");
                 facet->plane.n.x = 0.0f;
                 facet->plane.n.y = 0.0f;
                 facet->plane.n.z = 1.0f;
@@ -5120,7 +5126,7 @@ void World::UpdateObjectFadeouts() {
 
         if (elapsed <= 2000 && model->CanUpdateNonReadyTextures()) {
             if (fadeout->m_transportGuid) {
-                CGObject_C* transport = ClntObjMgrObjectPtr(fadeout->m_transportGuid, TYPEMASK_GAMEOBJECT, __FILE__, __LINE__);
+                CGObject_C* transport = ClntObjMgrObjectPtr(fadeout->m_transportGuid, TYPE_GAMEOBJECT, __FILE__, __LINE__);
 
                 if (transport) {
                     model->SetWorldTransform(fadeout->m_localTransform * transport->GetMatrix());
@@ -5234,7 +5240,7 @@ void CGObject_C::PrepareToFadeInt(CMapEntity* entity, float alpha, uint64_t tran
     fadeout->m_alpha = alpha;
 
     if (transportGuid) {
-        CGObject_C* transport = ClntObjMgrObjectPtr(WOWGUID{ transportGuid }, TYPEMASK_GAMEOBJECT, __FILE__, __LINE__);
+        CGObject_C* transport = ClntObjMgrObjectPtr(WOWGUID{ transportGuid }, TYPE_GAMEOBJECT, __FILE__, __LINE__);
 
         if (transport) {
             fadeout->m_transportGuid.m_guid = transportGuid;

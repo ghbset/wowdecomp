@@ -780,7 +780,7 @@ int32_t SendBugOpcode(uint32_t suggestion, const char* text) {
                 SStrPack(info, line, sizeof(info));
 
                 if (CGGameUI::m_lockedTarget) {
-                    CGUnit_C* target = static_cast<CGUnit_C*>(ClntObjMgrObjectPtr(CGGameUI::m_lockedTarget, TYPEMASK_UNIT, __FILE__, __LINE__));
+                    CGUnit_C* target = static_cast<CGUnit_C*>(ClntObjMgrObjectPtr(CGGameUI::m_lockedTarget, TYPE_UNIT, __FILE__, __LINE__));
 
                     if (target) {
                         SStrPrintf(line, sizeof(line), "Target:\t%s\n", target->GetUnitName(nullptr, 1));

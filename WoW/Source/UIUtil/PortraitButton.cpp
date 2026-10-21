@@ -176,7 +176,7 @@ void UpdatePendingPortraits() {
     for (PORTRAITREQUEST* request = s_pendingPortraits.Head(); !s_pendingPortraits.IsEnd(request); request = next) {
         next = s_pendingPortraits.RawNext(request);
         WOWGUID guid = request->m_guid;
-        CGUnit_C* unit = static_cast<CGUnit_C*>(ClntObjMgrObjectPtr(guid, TYPEMASK_UNIT, __FILE__, __LINE__));
+        CGUnit_C* unit = static_cast<CGUnit_C*>(ClntObjMgrObjectPtr(guid, TYPE_UNIT, __FILE__, __LINE__));
 
         if (!unit) {
             s_freePortraits.LinkToTail(request);
@@ -524,7 +524,7 @@ void RenderPortraitTexture(CSimpleTexture* texture, CGUnit_C* unit) {
         return;
     }
 
-    if (unit->m_obj->m_type & TYPEMASK_PLAYER) {
+    if (unit->m_obj->m_type & TYPE_PLAYER) {
         WOWGUID guid = unit->m_obj->m_guid;
         PLAYERPORTRAIT* portrait = s_playerPortraits.Ptr(static_cast<uint32_t>(guid.m_guid), CHashKeyGUID(guid.m_guid));
 
@@ -649,7 +649,7 @@ void RenderPortraitTexture(CSimpleTexture* texture, CGUnit_C* unit) {
 
     PORTRAITCACHE* cache;
 
-    if (unit->m_obj->m_type & TYPEMASK_PLAYER) {
+    if (unit->m_obj->m_type & TYPE_PLAYER) {
         WOWGUID guid = unit->m_obj->m_guid;
         PLAYERPORTRAIT* portrait = s_playerPortraits.Ptr(static_cast<uint32_t>(guid.m_guid), CHashKeyGUID(guid.m_guid));
 
@@ -814,7 +814,7 @@ void RenderPortraitTexture(CSimpleTexture* texture, CGUnit_C* unit) {
     model->Release();
     scene->Release();
 
-    if (unit->m_obj->m_type & TYPEMASK_PLAYER) {
+    if (unit->m_obj->m_type & TYPE_PLAYER) {
         PortraitCachePurge(&s_playerPortraitCache, 40, 0);
     } else {
         PortraitCachePurge(&s_unitPortraitCache, 8, 0);

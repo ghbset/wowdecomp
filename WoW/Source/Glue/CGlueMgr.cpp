@@ -832,9 +832,9 @@ void CGlueMgr::UpdateCurrentScreen(const char* screen) {
     SStrCopy(CGlueMgr::m_currentScreen, screen, sizeof(CGlueMgr::m_currentScreen));
 
     if (!SStrCmpI(CGlueMgr::m_currentScreen, "charselect", STORM_MAX_STR)) {
-        EventRegisterEx(EVENT_ID_IDLE, CCharacterSelection::Idle, nullptr, 0.0f);
+        EventRegisterEx(EVENT_ID_IDLE, CCharacterSelection::Idle, nullptr, EVENT_PRIORITY_NORMAL);
     } else if (!SStrCmpI(CGlueMgr::m_currentScreen, "charcreate", STORM_MAX_STR)) {
-        EventRegisterEx(EVENT_ID_IDLE, CCharacterCreation::Idle, nullptr, 0.0f);
+        EventRegisterEx(EVENT_ID_IDLE, CCharacterCreation::Idle, nullptr, EVENT_PRIORITY_NORMAL);
     }
 }
 
@@ -1068,7 +1068,7 @@ void CGlueMgr::Initialize() {
     FrameXML_RegisterFactory("ModelFFX", CSimpleModelFFX::Create, false);
     CGlueMgr::Resume();
     CRealmList::Initialize();
-    EventRegisterEx(EVENT_ID_IDLE, CGlueMgr::Idle, nullptr, 0.0f);
+    EventRegisterEx(EVENT_ID_IDLE, CGlueMgr::Idle, nullptr, EVENT_PRIORITY_NORMAL);
     CGLCD::Initialize();
     CKBPage::Initialize();
     CKBSystem::Initialize();
