@@ -11,6 +11,7 @@ people). The run wipes vertex/ and pixel/ first: the tree is always one run's ou
 """
 import argparse
 import collections
+import copy
 import hashlib
 import os
 import shutil
@@ -140,6 +141,7 @@ def main(argv):
     blocks = []
     index_lines = []
     companions = collections.OrderedDict()    # md5 of the text -> [meta, [names], status, log]
+    aliases = set()
     for md5, rec in selected.items():
         rec.names = names[md5]
         em = Emitter(rec)
@@ -170,6 +172,13 @@ def main(argv):
             if companions[comp_md5][2] == 'failed':
                 comp_md5 = None
         blocks.append(manifest_block(em, rec, '%s/%s.spv' % (rec.kind, md5), comp_md5))
+        alias = getattr(rec, 'alias', None)
+        if alias and alias not in by_md5 and alias not in aliases:
+            # gxNormalBuffer: the same module under the md5 of the normal-injected bytes (D3D9 normal pack).
+            aliases.add(alias)
+            twin = copy.copy(rec)
+            twin.md5, twin.names = alias, []
+            blocks.append(manifest_block(em, twin, '%s/%s.spv' % (rec.kind, md5), comp_md5))
         for n in rec.names:
             if ':' in n:
                 extra = (' '.join('s%d:%s' % kv for kv in sorted(em.samplers.items())) or '-') \

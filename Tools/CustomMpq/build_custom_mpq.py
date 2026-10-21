@@ -20,6 +20,9 @@ Contents:
                           built from ShaderSrc/*.hlsl by ShaderSrc/build_shaders.py (VFog*: volumetric
                           fog, docs/VFOG_PORT.md), plus the stock Terrain2/3[_pcf] patched by
                           ShaderSrc/terrain_fade.py (gfxShadowFade; generated, not committed). Tools/VulkanShaders translates the ps_3_0 ones with the client's.
+  Shaders\\...            gxNormalBuffer's world shaders writing the view-space normal to oC1 (vs/ps_3_0 for D3D9,
+                          vs/ps_4_0 for D3D11), Tools/CustomMpq/Normals from ShaderSrc/normal_pack.py (generated,
+                          not committed; packed above our shaders; without it D3D9/D3D11 light from depth normals).
   VFog\\...               every file in Tools/CustomMpq/VFog (fogdata.bin: the Classic/Forever fog layers,
                           coa-vfog data/fogdata.bin, read by VolumetricFogData.cpp; waterdata.bin: the Forever
                           water presets, FFT tiles and foam masks, coa-vfog data/waterdata.bin, read by
@@ -174,6 +177,16 @@ def main(argv):
         del files[n]
         sm4.pop(n, None)
     files.update(ours)
+    # gxNormalBuffer (ShaderSrc/normal_pack.py, generated): above ours and the stock SM4 pack
+    normals = folder_files('Shaders', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Normals'))
+    if not normals:
+        print('warning: no Tools/CustomMpq/Normals (run ShaderSrc/normal_pack.py): D3D9/D3D11 get no normal buffer')
+    replaced = {n.lower() for n in normals}
+    for n in [n for n in files if n.lower() in replaced]:
+        del files[n]
+        sm4.pop(n, None)
+        ours.pop(n, None)
+    files.update(normals)
     vfog = folder_files('VFog', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'VFog'))
     files.update(vfog)
     ui = folder_files('Interface', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Interface'))
@@ -184,9 +197,9 @@ def main(argv):
     bad = [n for n in files if back.get(n) != files[n]]
     if bad:
         sys.exit('verify failed for %d file(s), first %s' % (len(bad), bad[0]))
-    print('%s: %d file(s) (%d Vulkan, %d D3D11, %d textures, %d own shaders, %d vfog data, %d interface), %d bytes, verified' %
-          (a.out, len(back), len(files) - len(sm4) - len(textures) - len(ours) - len(vfog) - len(ui), len(sm4),
-           len(textures), len(ours), len(vfog), len(ui), os.path.getsize(a.out)))
+    print('%s: %d file(s) (%d Vulkan, %d D3D11, %d textures, %d own shaders, %d normal shaders, %d vfog data, %d interface), %d bytes, verified' %
+          (a.out, len(back), len(files) - len(sm4) - len(textures) - len(ours) - len(normals) - len(vfog) - len(ui), len(sm4),
+           len(textures), len(ours), len(normals), len(vfog), len(ui), os.path.getsize(a.out)))
     return 0
 
 

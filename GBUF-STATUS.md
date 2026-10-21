@@ -63,7 +63,10 @@ One rewrite of the stock SM3 bytecode feeds all three backends, so no world shad
 - Translator: `bls/archive.py` decodes `normals.rewrite_record(...)` (the md5 stays that of the bytes the client
   loads); `bls/emitter.py` emits `layout(location = 1) out vec4 oC1` and the manifest line `flag normal_out`.
   `normals.inject` skips a record that already has `dcl_texcoord7` (so translating a client whose custom.MPQ carries
-  the D3D9 normal pack does not inject twice). Full translation of the user's client (`/root/tswow-server/tswow-client`,
+  the D3D9 normal pack does not inject twice). Every injected record is listed twice in the manifest: under the md5
+  of the bytes the client loads and under the md5 of the injected bytes (`Record.alias`, a second `record` block
+  with no names, same .spv), so Vulkan finds its modules whether or not custom.MPQ carries the D3D9/D3D11 normal
+  pack. Checked: 3183 records (limit 4096); every one of the 2615 records in the normal pack has a manifest entry. Full translation of the user's client (`/root/tswow-server/tswow-client`,
   read only): 1655 records, all validated, 757 pixel records `normal_out`.
 - Runtime (search `GBUFFER` under `Engine/Source/Gx/CGxDeviceVulkan`):
   - `Frame/Targets.cpp`: `CreateNormalImages` (after `CreateMsImages`, with the scene): RGBA8 `s.normal` (+ `s.msNormal`
@@ -86,15 +89,39 @@ One rewrite of the stock SM3 bytecode feeds all three backends, so no world shad
   then `python3 -I Tools/CustomMpq/build_custom_mpq.py --client <client> --out <client>/Data/custom.MPQ`
   (also needs the generated terrain_fade shaders), then the patcher publish. NOT done (no publish from this branch).
 
-### D3D11 (`CGxDeviceD3d11`): shaders DONE (translation verified), runtime TODO
-- `shader-xlate/sm3hlsl.py` already maps oC1 -> SV_Target1 and TEXCOORD7 -> tc7; `xlate.py one` on injected records
-  (diffuse_t1, terrain, combiners_opaque, terrain3, mapobjdiffuse) -> ok + spirv ok. To ship: run `xlate.py batch` on the
-  `normals.py pack` output instead of the stock dir (`/root/d3d11-port/shader-xlate`, outside this repo).
-- Runtime left: `CGxDeviceD3d11.cpp:1238` / `:1297` / `:1313` `OMSetRenderTargets(1, ...)` -> 2 RTVs when RT0 is the
-  back buffer and gxNormalBuffer; R8G8B8A8 texture + RTV + SRV (MSAA: ResolveSubresource on read). Blend desc
-  (`:2150`, `:2924`): `IndependentBlendEnable = TRUE`, `RenderTarget[1].RenderTargetWriteMask` 0xF only for oC1 shaders
-  with Opaque/AlphaKey blend (it is part of the hashed blend desc). Clear RT1 to 0 with `ClearRenderTargetView` each frame.
-  `m_writesNormal` from the DXBC OSGN (SV_Target1). Unbind RT1 (or snapshot) in `DeviceNormalBuffer`.
+### D3D11 (`CGxDeviceD3d11`): DONE (code), untested in game
+`CGxDeviceD3d11.cpp`, search `GBUFFER`:
+- `IOMSetTargets()` replaces the three `OMSetRenderTargets(1, m_curRtv, m_curDsv)` sites (IBindRenderTargets,
+  DeviceRestoreDepthSurface, DeviceResolveDepthBuffer): RT1 = `INormalRtv()` when RT0 is the back buffer,
+  gxNormalBuffer is on and the target has not been sampled this frame.
+- `INormalRtv()`: `m_normalTex`, a render-target `GxTex_Argb8888` CGxTex of the back buffer's size (its RTV when
+  single-sampled); MSAA: `m_normalMs` + `m_normalMsRtv` at the back buffer's sample count. Recreated on resize /
+  device loss; cleared to 0 when made. Released with the back buffer.
+- Blend: `IndependentBlendEnable = TRUE`, `RenderTarget[1]` = opaque with mask 0; IStateSync sets its mask to 0xF
+  only for a pixel shader with `m_writesNormal` and blend <= AlphaKey and a colour mask (part of the hashed desc).
+- `m_writesNormal`: `DxbcWritesTarget1` (OSGN has SV_Target register 1), set in IShaderCreate. Checked on the pack.
+- `DeviceNormalBuffer()`: first call a frame unbinds RT1 (`m_normalSampled`) and resolves MSAA into the CGxTex;
+  returns it. ScenePresent clears the target, drops it from any PS slot, rebinds RT1.
+  ponytail: opaque draws after the first lighting pass of a frame write no normal (fine while lights / sun / SSAO
+  all run after the opaque world).
+- Shaders: the SM4 pack comes from `normal_pack.py` (below), through custom.MPQ.
+
+### D3D9 / D3D11 shader pack (`Tools/CustomMpq/ShaderSrc/normal_pack.py`): DONE, not shipped
+- Input: shader-xlate's `stock/{vs,ps}_3_0` (SHA1SUMS-checked), with ours of the same name taken instead
+  (terrain_fade's Terrain2/3[_pcf], so run `terrain_fade.py` first). Every `normals.wanted` family is rewritten
+  (vs_3_0 / ps_3_0) and compiled by shader-xlate's `compile_one` (+ `pcf_slots`) to vs_4_0 / ps_4_0.
+- Output: `Tools/CustomMpq/Normals/{Vertex,Pixel}/{vs,ps}_{3,4}_0/*.bls` (gitignored: stock-derived). 44 ps + 20 vs
+  families, 2615 SM3 records, all compile. Two runs gave byte-identical output (sha1 of every file).
+- `build_custom_mpq.py` packs `Normals` as `Shaders\...` above ours and the stock SM4 pack (a warning, not a refusal,
+  when it is missing: D3D9/D3D11 then light from depth). Test build (scratch, not shipped): 5307 files, 128 normal shaders.
+- **Ship (not done):**
+  ```
+  python3 -I Tools/CustomMpq/ShaderSrc/terrain_fade.py
+  python3 -I Tools/CustomMpq/ShaderSrc/normal_pack.py
+  python3 -I Tools/VulkanShaders/translate_shaders.py --client <client> --deploy
+  python3 -I Tools/CustomMpq/build_custom_mpq.py --client <client> --out <client>/Data/custom.MPQ
+  ```
+  then the patcher publish of Data/custom.MPQ (+ Wow32.exe / Wow64.exe from this branch).
 
 ## Not done yet
 - SSAO is DONE (LegionSsao PASS 0 uses `GBufferNormal`; host `BindNormalBuffer()` before `DrawToTarget(ao[0], ...)`
@@ -103,7 +130,8 @@ One rewrite of the stock SM3 bytecode feeds all three backends, so no world shad
   cCausticSun: move vf_gbuffer's register or the caustic's), add sampler 4 to its `build_shaders.py` mask, rebuild with
   `python3 -I Tools/CustomMpq/ShaderSrc/build_shaders.py <names>` (needs wine + /root/wxl-depth/tools fxc).
 - LegionLights still pays for the 4 depth taps when the normal buffer answers (move them into the fallback branch if it shows).
-- In-game verification on every backend; the D3D9 normal pack.
+- In-game verification on every backend; shipping custom.MPQ with the normal pack (commands above).
+- `CGxDeviceD3d9Ex` (gxApi D3D9Ex): still returns nullptr (fallback).
 
 ## Builds
 - Dirs: `/root/wowdecomp-xbuild/wt-gbuf-x64`, `/root/wowdecomp-xbuild/wt-gbuf-x86` (configured like build-both.sh).

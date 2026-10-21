@@ -141,7 +141,7 @@ def resolve(inv):
 
 
 class Record(object):
-    __slots__ = ('kind', 'profile', 'name', 'perm', 'code', 'md5', 'sh', 'names', 'hdr')
+    __slots__ = ('kind', 'profile', 'name', 'perm', 'code', 'md5', 'sh', 'names', 'hdr', 'alias')
 
     @property
     def key(self):
@@ -180,8 +180,11 @@ def enumerate_records(datadir):
             r.hdr = (rec['a'], rec['b'], rec['c'], rec['d'])
             try:
                 # gxNormalBuffer: world records also write their view-space normal (normals.py); the md5
-                # stays the stock record's, which is what the device looks the module up by.
-                r.sh = ir.decode(normals.rewrite_record(name, 'vs' if kind == 'vertex' else 'ps', r.code))
+                # stays that of the bytes the client loads, and `alias` is the rewritten bytes' md5 (what a
+                # client loads with the D3D9 normal pack in custom.MPQ), listed as a second record.
+                code = normals.rewrite_record(name, 'vs' if kind == 'vertex' else 'ps', r.code)
+                r.alias = hashlib.md5(code).hexdigest() if code != r.code else None
+                r.sh = ir.decode(code)
             except ValueError:
                 r.sh = None       # an SM1 stream: not translated
             out.append(r)
