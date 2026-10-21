@@ -467,7 +467,9 @@ int32_t SI2::PlaySoundFile(const char* filename, int32_t group) {
     SESound localSound;
     SESound* sound = group == 5 ? &s_scriptMusic.m_sound : &localSound;
 
-    sound->Create2D(filename, group != 4, nullptr, nullptr, false, false, 0, group != 5 ? 128 : 100, 0xFFFFFFFF);
+    // FORK FIX (Badgermilk0 4f7e6a58): last three args were shifted; 0x4C91BF passes reverb 128/100, priority -1,
+    // decodeBufferSize 0 (a 4 GB decode buffer failed every PlayMusic/PlaySoundFile stream)
+    sound->Create2D(filename, group != 4, nullptr, nullptr, false, false, group != 5 ? 128 : 100, -1, 0);
     sound->SetChannelGroup(SI2::s_channelGroupNames[group], true);
 
     SI2SoundUserData* userData = new (SMemAlloc(sizeof(SI2SoundUserData), __FILE__, __LINE__, 0)) SI2SoundUserData();
