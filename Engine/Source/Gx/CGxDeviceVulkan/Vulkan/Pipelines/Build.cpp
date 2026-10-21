@@ -314,7 +314,7 @@ namespace
     {
         if (const manifest::Record* r = manifest::At(record)) return manifest::FirstName(*r);
         static const char* kVertex[]   = { "FixedFunction", "Ui", "FixedFunctionSemantic", "Translated" };
-        static const char* kFragment[] = { "FixedFunction", "Ui", "Desaturate", "FixedFunctionTranslated", "Translated" };
+        static const char* kFragment[] = { "FixedFunction", "Ui", "Desaturate", "FixedFunctionTranslated", "Translated", "Msdf" };
         if (vertex) return program < kVertexPrograms ? kVertex[program] : "?";
         return program < kFragmentPrograms ? kFragment[program] : "?";
     }

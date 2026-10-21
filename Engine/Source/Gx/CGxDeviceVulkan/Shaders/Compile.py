@@ -25,6 +25,7 @@ OUTPUTS = [
         ("Ui.vert", "kUiVert"),
         ("Ui.frag", "kUiFrag"),
         ("Desaturate.frag", "kDesaturateFrag"),
+        ("Msdf.frag", "kMsdfFrag"),
         ("FfSem.vert", "kFfSemVert"),
         ("FfTranslated.frag", "kFfTranslatedFrag"),
     ]),
