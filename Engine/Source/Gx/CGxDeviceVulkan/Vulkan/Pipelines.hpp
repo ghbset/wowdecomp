@@ -18,6 +18,7 @@ namespace gxvk::vk::manifest { struct Record; }
 //     fragment  FixedFunction  D3D9's texture stages 0 and 1 as the engine configures them, then the alpha test
 //               Ui             the engine's "UI" pixel shader: texture * vertex colour, alpha test
 //               Desaturate     the engine's "Desaturate" pixel shader: the texture's luminance * colour
+//               Msdf           the MSDF font shader (Gxu "UI_MSDF"): reads pixel c0 from the set-1 slice
 //
 //   The translated (Tools/VulkanShaders: the client's own DX9 shaders), in the translated interface --
 //   vertex inputs and varyings at fixed locations per semantic, the constant registers in a uniform
@@ -69,6 +70,7 @@ namespace gxvk::vk::pipelines
         Desaturate    = 2,
         FixedFunctionTranslated = 3,
         Translated    = 4,
+        Msdf          = 5,
         Count
     };
 

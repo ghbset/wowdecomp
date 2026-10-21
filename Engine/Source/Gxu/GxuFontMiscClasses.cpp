@@ -9,6 +9,7 @@
 #include "Engine/Source/Gx/Gx.h"
 #include "Engine/Source/Gxu/GxuFontFont.h"
 #include "Engine/Source/Gxu/GxuFont.h"
+#include "Engine/Source/Gxu/GxuFontMsdf.h"
 #include "Engine/Source/Gxu/GxuFontUtil.h"
 #include "Engine/Source/Services/Texture.h"
 #include "Engine/Source/Storm/H/storm.h"
@@ -61,6 +62,7 @@ void GLYPHBITMAPDATA::CopyFrom(GLYPHBITMAPDATA* source) {
 GLYPHBITMAPDATA::GLYPHBITMAPDATA() {
     this->m_data = nullptr;
     this->m_dataSize = 0;
+    this->m_isMsdf = 0;
     this->m_textureCoords.minY = 0.0f;
     this->m_textureCoords.minX = 0.0f;
     this->m_textureCoords.maxY = 0.0f;
@@ -79,17 +81,19 @@ GLYPHBITMAPDATA::~GLYPHBITMAPDATA() {
 
 // VERIFY: d966ef03 manual
 // OFFSET: 0x006C4380
-void CHARCODEDESC::GenerateTextureCoords(uint32_t rowNumber, uint32_t cellHeight) {
-    int32_t top = rowNumber * cellHeight;
+void CHARCODEDESC::GenerateTextureCoords(uint32_t rowNumber, uint32_t cellHeight, uint32_t atlasSize) {
+    uint32_t rowStride = (this->m_bitmapData.m_isMsdf || atlasSize == MSDF_ATLAS_SIZE) ? (cellHeight + 4) : cellHeight;
+    int32_t top = rowNumber * rowStride;
     float left = this->m_glyphStartPixel;
+    float invAtlasSize = 1.0f / static_cast<float>(atlasSize);
 
     CRect coords;
-    coords.minY = top * ONEOVERTEXSIZE;
-    coords.minX = left * ONEOVERTEXSIZE;
-    coords.maxY = (top + cellHeight) * ONEOVERTEXSIZE;
+    coords.minY = top * invAtlasSize;
+    coords.minX = left * invAtlasSize;
+    coords.maxY = (top + cellHeight) * invAtlasSize;
 
     float right = left + this->m_bitmapData.m_glyphCellWidth;
-    coords.maxX = ONEOVERTEXSIZE * right;
+    coords.maxX = invAtlasSize * right;
 
     this->m_bitmapData.m_textureCoords = coords;
 }
@@ -286,6 +290,9 @@ CGxVertexPCT* BATCHEDRENDERFONTDESC::UnlockVertexPtrAndRender(CGxBuf*& buf, int3
     return reinterpret_cast<CGxVertexPCT*>(GxBufLock(buf));
 }
 
+// Whether CGxStringBatch::RenderBatch bound the font shaders (else the fixed function draws).
+static bool s_fontShaders;
+
 // VERIFY: 7e6d9f88 manual
 // OFFSET: 0x006C4AD0
 void BATCHEDRENDERFONTDESC::RenderBatch() {
@@ -316,6 +323,22 @@ void BATCHEDRENDERFONTDESC::RenderBatch() {
 
         if (!gxTex) {
             continue;
+        }
+
+        // An MSDF page (TesterWoWDev/wowdecomp) draws through its own pixel shader, c0 = (outline
+        // width, font pixel size); through the stock shader or the fixed function it would read as
+        // garbage, so without the shader path the page is skipped (MsdfActive keeps that from happening).
+        if (this->m_face->m_textureCache[texturePage].m_isMsdfCache) {
+            if (!s_fontShaders || !g_fontMsdfPixelShader || !g_fontMsdfPixelShader->Valid()) {
+                continue;
+            }
+
+            float outlineWidth = (this->m_face->m_fontFlags & 8) ? 2.0f : (this->m_face->m_fontFlags & 1) ? 1.0f : 0.0f;
+            float params[4] = { outlineWidth, static_cast<float>(this->m_face->m_pixelSize), 0.0f, 0.0f };
+            GxRsSet(GxRs_PixelShader, g_fontMsdfPixelShader);
+            GxShaderConstantsSet(GxSh_Pixel, 0, params, 1);
+        } else if (s_fontShaders) {
+            GxRsSet(GxRs_PixelShader, g_fontPixelShader);
         }
 
         g_theGxDevicePtr->RsSet(GxRs_Texture0, gxTex);
@@ -378,7 +401,7 @@ TEXTLINETEXTURE* TEXTLINETEXTURE::NewTextLineTexture() {
 
 // VERIFY: be22d63b manual
 // OFFSET: 0x006C4F80
-void TEXTURECACHEROW::EvictGlyph(CHARCODEDESC* desc) {
+void TEXTURECACHEROW::EvictGlyph(CHARCODEDESC* desc, uint32_t atlasSize) {
     uint32_t needed = desc->m_bitmapData.m_glyphCellWidth;
 
     CHARCODEDESC* glyph = this->m_glyphlist.Head();
@@ -388,10 +411,11 @@ void TEXTURECACHEROW::EvictGlyph(CHARCODEDESC* desc) {
     }
 
     uint32_t freed = 0;
+    uint32_t maxPixel = atlasSize - 1;
 
     while (freed < needed) {
         CHARCODEDESC* next = this->m_glyphlist.Next(desc);
-        uint32_t gap = next ? next->m_glyphStartPixel - desc->m_glyphEndPixel - 1 : 255 - desc->m_glyphEndPixel;
+        uint32_t gap = next ? (next->m_glyphStartPixel > desc->m_glyphEndPixel ? next->m_glyphStartPixel - desc->m_glyphEndPixel - 1 : 0) : (maxPixel > desc->m_glyphEndPixel ? maxPixel - desc->m_glyphEndPixel : 0);
         freed += desc->m_glyphEndPixel - desc->m_glyphStartPixel + 1 + gap;
 
         desc = this->m_glyphlist.DeleteNode(desc);
@@ -407,11 +431,11 @@ void TEXTURECACHEROW::EvictGlyph(CHARCODEDESC* desc) {
     }
 
     CHARCODEDESC* head = this->m_glyphlist.Head();
-    this->m_widestFreeSlot = head ? head->GapToPrevious() : 0;
+    this->m_widestFreeSlot = head ? head->GapToPrevious() : atlasSize;
 
     for (glyph = this->m_glyphlist.Head(); glyph; glyph = this->m_glyphlist.Next(glyph)) {
         CHARCODEDESC* next = this->m_glyphlist.Next(glyph);
-        uint32_t gap = next ? next->m_glyphStartPixel - glyph->m_glyphEndPixel - 1 : 255 - glyph->m_glyphEndPixel;
+        uint32_t gap = next ? (next->m_glyphStartPixel > glyph->m_glyphEndPixel ? next->m_glyphStartPixel - glyph->m_glyphEndPixel - 1 : 0) : (maxPixel > glyph->m_glyphEndPixel ? maxPixel - glyph->m_glyphEndPixel : 0);
 
         if (gap > this->m_widestFreeSlot) {
             this->m_widestFreeSlot = gap;
@@ -421,10 +445,12 @@ void TEXTURECACHEROW::EvictGlyph(CHARCODEDESC* desc) {
 
 // VERIFY: 2ccd62da manual
 // OFFSET: 0x006C5120
-CHARCODEDESC* TEXTURECACHEROW::CreateNewDesc(GLYPHBITMAPDATA* data, uint32_t rowNumber, uint32_t cellHeight) {
+CHARCODEDESC* TEXTURECACHEROW::CreateNewDesc(GLYPHBITMAPDATA* data, uint32_t rowNumber, uint32_t cellHeight, uint32_t atlasSize) {
     uint32_t width = data->m_glyphCellWidth;
+    uint32_t gapMargin = (data->m_isMsdf || atlasSize == MSDF_ATLAS_SIZE) ? 4 : 0;
+    uint32_t needed = width + gapMargin;
 
-    if (this->m_widestFreeSlot < width) {
+    if (this->m_widestFreeSlot < needed) {
         return nullptr;
     }
 
@@ -433,33 +459,35 @@ CHARCODEDESC* TEXTURECACHEROW::CreateNewDesc(GLYPHBITMAPDATA* data, uint32_t row
     if (!head) {
         CHARCODEDESC* desc = new (__FILE__, __LINE__) CHARCODEDESC;
         this->m_glyphlist.LinkToTail(desc);
-        this->m_widestFreeSlot -= width;
-        desc->m_glyphStartPixel = 0;
-        desc->m_glyphEndPixel = width - 1;
+        desc->m_glyphStartPixel = gapMargin;
+        desc->m_glyphEndPixel = gapMargin + width - 1;
         desc->m_rowNumber = rowNumber;
         desc->m_bitmapData.CopyFrom(data);
-        desc->GenerateTextureCoords(rowNumber, cellHeight);
+        desc->GenerateTextureCoords(rowNumber, cellHeight, atlasSize);
+
+        uint32_t maxPixel = atlasSize - 1;
+        this->m_widestFreeSlot = maxPixel > desc->m_glyphEndPixel ? maxPixel - desc->m_glyphEndPixel : 0;
 
         return desc;
     }
 
-    this->m_widestFreeSlot = head->GapToPrevious();
-
-    if (this->m_widestFreeSlot >= width) {
+    uint32_t leadingGap = head->GapToPrevious();
+    if (leadingGap >= needed + gapMargin) {
         CHARCODEDESC* desc = new (__FILE__, __LINE__) CHARCODEDESC;
         this->m_glyphlist.LinkNode(desc, 2, head);
-        desc->m_glyphEndPixel = head->m_glyphStartPixel - 1;
-        desc->m_glyphStartPixel = desc->m_glyphEndPixel - width + 1;
+        desc->m_glyphStartPixel = gapMargin;
+        desc->m_glyphEndPixel = gapMargin + width - 1;
         desc->m_rowNumber = rowNumber;
         desc->m_bitmapData.CopyFrom(data);
-        desc->GenerateTextureCoords(rowNumber, cellHeight);
+        desc->GenerateTextureCoords(rowNumber, cellHeight, atlasSize);
 
         CHARCODEDESC* first = this->m_glyphlist.Head();
-        this->m_widestFreeSlot = first ? first->GapToPrevious() : 0;
+        this->m_widestFreeSlot = first ? first->GapToPrevious() : atlasSize;
 
+        uint32_t maxPixel = atlasSize - 1;
         for (CHARCODEDESC* glyph = this->m_glyphlist.Head(); glyph; glyph = this->m_glyphlist.Next(glyph)) {
             CHARCODEDESC* next = this->m_glyphlist.Next(glyph);
-            uint32_t gap = next ? next->m_glyphStartPixel - glyph->m_glyphEndPixel - 1 : 255 - glyph->m_glyphEndPixel;
+            uint32_t gap = next ? (next->m_glyphStartPixel > glyph->m_glyphEndPixel ? next->m_glyphStartPixel - glyph->m_glyphEndPixel - 1 : 0) : (maxPixel > glyph->m_glyphEndPixel ? maxPixel - glyph->m_glyphEndPixel : 0);
 
             if (gap > this->m_widestFreeSlot) {
                 this->m_widestFreeSlot = gap;
@@ -471,23 +499,24 @@ CHARCODEDESC* TEXTURECACHEROW::CreateNewDesc(GLYPHBITMAPDATA* data, uint32_t row
 
     CHARCODEDESC* desc = nullptr;
     int32_t inserted = 0;
+    uint32_t maxPixel = atlasSize - 1;
 
     for (CHARCODEDESC* glyph = head; glyph; ) {
         CHARCODEDESC* next = this->m_glyphlist.Next(glyph);
-        uint32_t gap = next ? next->m_glyphStartPixel - glyph->m_glyphEndPixel - 1 : 255 - glyph->m_glyphEndPixel;
+        uint32_t gap = next ? (next->m_glyphStartPixel > glyph->m_glyphEndPixel ? next->m_glyphStartPixel - glyph->m_glyphEndPixel - 1 : 0) : (maxPixel > glyph->m_glyphEndPixel ? maxPixel - glyph->m_glyphEndPixel : 0);
 
         if (inserted) {
             if (gap > this->m_widestFreeSlot) {
                 this->m_widestFreeSlot = gap;
             }
-        } else if (gap >= width) {
+        } else if (gap >= needed) {
             desc = new (__FILE__, __LINE__) CHARCODEDESC;
             this->m_glyphlist.LinkNode(desc, 1, glyph);
-            desc->m_glyphStartPixel = glyph->m_glyphEndPixel + 1;
-            desc->m_glyphEndPixel = glyph->m_glyphEndPixel + width;
+            desc->m_glyphStartPixel = glyph->m_glyphEndPixel + 1 + gapMargin;
+            desc->m_glyphEndPixel = desc->m_glyphStartPixel + width - 1;
             desc->m_rowNumber = rowNumber;
             desc->m_bitmapData.CopyFrom(data);
-            desc->GenerateTextureCoords(rowNumber, cellHeight);
+            desc->GenerateTextureCoords(rowNumber, cellHeight, atlasSize);
             inserted = 1;
         } else if (!next) {
             return nullptr;
@@ -546,7 +575,9 @@ void CGxStringBatch::RenderBatch() {
         }
     }
 
-    if (vertexShader && vertexShader->Valid() && g_fontPixelShader && g_fontPixelShader->Valid()) {
+    s_fontShaders = vertexShader && vertexShader->Valid() && g_fontPixelShader && g_fontPixelShader->Valid();
+
+    if (s_fontShaders) {
         C44Matrix viewProj;
         GxRsSet(GxRs_VertexShader, vertexShader);
         GxRsSet(GxRs_PixelShader, g_fontPixelShader);

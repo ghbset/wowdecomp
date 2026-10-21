@@ -40,6 +40,7 @@ namespace {
     Program g_uiVertex   = { pipelines::VertexProgram::Ui, pipelines::FragmentProgram::FixedFunction, nullptr };
     Program g_uiPixel    = { pipelines::VertexProgram::FixedFunction, pipelines::FragmentProgram::Ui, nullptr };
     Program g_desaturate = { pipelines::VertexProgram::FixedFunction, pipelines::FragmentProgram::Desaturate, nullptr };
+    Program g_msdf       = { pipelines::VertexProgram::FixedFunction, pipelines::FragmentProgram::Msdf, nullptr };
 
     Program* g_translated      = nullptr;   ///< one per manifest record, made at first need
     uint32_t g_translatedCount = 0;
@@ -79,6 +80,11 @@ namespace {
 
             if (!SStrCmpI(name, "Desaturate", STORM_MAX_STR)) {
                 return &g_desaturate;
+            }
+
+            // GxuFontCreateMsdfPixelShader's shader (no code on this device).
+            if (!SStrCmpI(name, "UI_MSDF", STORM_MAX_STR)) {
+                return &g_msdf;
             }
         }
 

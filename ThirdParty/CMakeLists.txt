@@ -204,3 +204,52 @@ if (WIN32)
             ${CMAKE_SOURCE_DIR}
     )
 endif ()
+
+add_library(msdfgen STATIC
+    msdfgen/core/contour-combiners.cpp
+    msdfgen/core/Contour.cpp
+    msdfgen/core/convergent-curve-ordering.cpp
+    msdfgen/core/DistanceMapping.cpp
+    msdfgen/core/edge-coloring.cpp
+    msdfgen/core/edge-segments.cpp
+    msdfgen/core/edge-selectors.cpp
+    msdfgen/core/EdgeHolder.cpp
+    msdfgen/core/equation-solver.cpp
+    msdfgen/core/export-svg.cpp
+    msdfgen/core/msdf-error-correction.cpp
+    msdfgen/core/MSDFErrorCorrection.cpp
+    msdfgen/core/msdfgen.cpp
+    msdfgen/core/Projection.cpp
+    msdfgen/core/rasterization.cpp
+    msdfgen/core/render-sdf.cpp
+    msdfgen/core/save-bmp.cpp
+    msdfgen/core/save-fl32.cpp
+    msdfgen/core/save-rgba.cpp
+    msdfgen/core/save-tiff.cpp
+    msdfgen/core/Scanline.cpp
+    msdfgen/core/sdf-error-estimation.cpp
+    msdfgen/core/shape-description.cpp
+    msdfgen/core/Shape.cpp
+    msdfgen/ext/import-font.cpp
+    msdfgen/ext/resolve-shape-geometry.cpp
+)
+
+target_include_directories(msdfgen
+    PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/msdfgen
+        ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+target_compile_definitions(msdfgen
+    PUBLIC
+        MSDFGEN_PUBLIC=
+        MSDFGEN_DISABLE_VARIABLE_FONTS=1
+    PRIVATE
+        MSDFGEN_DISABLE_SVG=1
+        MSDFGEN_DISABLE_PNG=1
+)
+
+target_link_libraries(msdfgen
+    PRIVATE
+        freetype
+)

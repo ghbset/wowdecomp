@@ -203,7 +203,8 @@ namespace gxvk::vk::pipelines
         const bool translated = TranslatedFamily(draw.vertex) || TranslatedFamily(draw.fragment);
         // The fixed-function pixel program reads its fog from the slice too, the fixed-function
         // vertex program its texgen matrices.
-        const bool needsRegs = translated || draw.fragment == FragmentProgram::FixedFunction || draw.vertex == VertexProgram::FixedFunction;
+        // The MSDF font program reads its outline width and font size from pixel c0 there.
+        const bool needsRegs = translated || draw.fragment == FragmentProgram::FixedFunction || draw.fragment == FragmentProgram::Msdf || draw.vertex == VertexProgram::FixedFunction;
         uint32_t samplerMask = 1u;
         uint32_t cubeMask    = 0;
         if (draw.fragment == FragmentProgram::Translated && draw.fragmentRecord)
