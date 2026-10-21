@@ -117,14 +117,15 @@ bool CGxFont::GetGlyphData(GLYPHBITMAPDATA* data, uint32_t code) {
     }
 
     // Try MSDF path first
-    if (this->m_useMsdf && g_msdfEnabled) {
+    if (this->m_useMsdf) {
         if (MsdfGenerateGlyph(face, this->m_pixelSize, code, this->m_baseline, data, padding)) {
             return true;
         }
-        // Fall back to bitmap if MSDF generation fails
+        // Fall back to a bitmap glyph if MSDF generation fails; it lands in an MSDF page, whose
+        // paste reads 8-bit coverage only, so never monochrome (1 bit) there.
     }
 
-    return IGxuFontGlyphRenderGlyph(face, this->m_pixelSize, code, this->m_baseline, data, this->m_fontFlags & 2, padding);
+    return IGxuFontGlyphRenderGlyph(face, this->m_pixelSize, code, this->m_baseline, data, (this->m_fontFlags & 2) && !this->m_useMsdf, padding);
 }
 
 // VERIFY: 3597e899 auto
@@ -193,6 +194,10 @@ void CGxFont::ClearGlyphs() {
     this->m_activeCharacters.Clear();
     this->m_activeCharacterCache.Clear();
     this->m_kernInfo.Clear();
+
+    // MSDF or stock glyphs, decided here while every cache page is gone: a page holds one kind
+    // only, so the mode changes only with all glyphs cleared (CVar gxMsdfFonts, screen size).
+    this->m_useMsdf = MsdfActive();
 }
 
 // VERIFY: 9be95581 manual
@@ -208,7 +213,7 @@ void CGxFont::HandleScreenSizeChange() {
 
 // VERIFY: 4ab2e948 manual
 // OFFSET: 0x006C39A0
-CGxFont::CGxFont() : m_cellHeight(0), m_pixelsPerUnit(0.0f), m_useMsdf(1) {
+CGxFont::CGxFont() : m_cellHeight(0), m_pixelsPerUnit(0.0f), m_useMsdf(0) {
 }
 
 // VERIFY: b72018df manual

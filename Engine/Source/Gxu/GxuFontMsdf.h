@@ -13,7 +13,7 @@ static constexpr uint32_t MSDF_GLYPH_SIZE = 48;           // Glyph cell size in 
 static constexpr double   MSDF_PIXEL_RANGE = 3.0;         // SDF range in pixels
 static constexpr float    MSDF_INV_ATLAS_SIZE = 1.0f / 512.0f;
 
-// Global MSDF enable flag (toggled by CVar)
+// Global MSDF enable flag (CVar gxMsdfFonts)
 extern uint8_t g_msdfEnabled;
 
 // Initialize / shutdown the MSDF subsystem
@@ -35,7 +35,11 @@ bool MsdfGenerateGlyph(FT_Face face, uint32_t pixelSize, uint32_t code, uint32_t
 float MsdfComputeScreenPxRange(uint32_t renderedPixelSize);
 
 class CGxShader;
-// Create the MSDF pixel shader from embedded HLSL (compiling via D3DCompile if available, with static bytecode fallback)
+// Create the MSDF pixel shader ("UI_MSDF") for the current device's API, or null where none exists.
 CGxShader* GxuFontCreateMsdfPixelShader();
+
+// Whether new glyphs are made as MSDF: the CVar gxMsdfFonts on, and the MSDF and the font's UI
+// shaders valid on this device. Read when a font's glyphs are cleared (CGxFont::ClearGlyphs).
+bool MsdfActive();
 
 #endif

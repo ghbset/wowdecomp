@@ -290,6 +290,9 @@ CGxVertexPCT* BATCHEDRENDERFONTDESC::UnlockVertexPtrAndRender(CGxBuf*& buf, int3
     return reinterpret_cast<CGxVertexPCT*>(GxBufLock(buf));
 }
 
+// Whether CGxStringBatch::RenderBatch bound the font shaders (else the fixed function draws).
+static bool s_fontShaders;
+
 // VERIFY: 7e6d9f88 manual
 // OFFSET: 0x006C4AD0
 void BATCHEDRENDERFONTDESC::RenderBatch() {
@@ -320,6 +323,22 @@ void BATCHEDRENDERFONTDESC::RenderBatch() {
 
         if (!gxTex) {
             continue;
+        }
+
+        // An MSDF page (TesterWoWDev/wowdecomp) draws through its own pixel shader, c0 = (outline
+        // width, font pixel size); through the stock shader or the fixed function it would read as
+        // garbage, so without the shader path the page is skipped (MsdfActive keeps that from happening).
+        if (this->m_face->m_textureCache[texturePage].m_isMsdfCache) {
+            if (!s_fontShaders || !g_fontMsdfPixelShader || !g_fontMsdfPixelShader->Valid()) {
+                continue;
+            }
+
+            float outlineWidth = (this->m_face->m_fontFlags & 8) ? 2.0f : (this->m_face->m_fontFlags & 1) ? 1.0f : 0.0f;
+            float params[4] = { outlineWidth, static_cast<float>(this->m_face->m_pixelSize), 0.0f, 0.0f };
+            GxRsSet(GxRs_PixelShader, g_fontMsdfPixelShader);
+            GxShaderConstantsSet(GxSh_Pixel, 0, params, 1);
+        } else if (s_fontShaders) {
+            GxRsSet(GxRs_PixelShader, g_fontPixelShader);
         }
 
         g_theGxDevicePtr->RsSet(GxRs_Texture0, gxTex);
@@ -556,7 +575,9 @@ void CGxStringBatch::RenderBatch() {
         }
     }
 
-    if (vertexShader && vertexShader->Valid() && g_fontPixelShader && g_fontPixelShader->Valid()) {
+    s_fontShaders = vertexShader && vertexShader->Valid() && g_fontPixelShader && g_fontPixelShader->Valid();
+
+    if (s_fontShaders) {
         C44Matrix viewProj;
         GxRsSet(GxRs_VertexShader, vertexShader);
         GxRsSet(GxRs_PixelShader, g_fontPixelShader);
@@ -572,28 +593,6 @@ void CGxStringBatch::RenderBatch() {
         if (!desc->m_strings.Head()) {
             desc = this->m_fontBatch.DeleteNode(desc);
             continue;
-        }
-
-        if (vertexShader && vertexShader->Valid()) {
-            CGxShader* ps = (desc->m_face && desc->m_face->m_useMsdf && g_msdfEnabled && g_fontMsdfPixelShader && g_fontMsdfPixelShader->Valid())
-                ? g_fontMsdfPixelShader
-                : g_fontPixelShader;
-            if (ps && ps->Valid()) {
-                GxRsSet(GxRs_PixelShader, ps);
-                if (ps == g_fontMsdfPixelShader) {
-                    float outlineWidth = 0.0f;
-                    if (desc->m_face) {
-                        if (desc->m_face->m_fontFlags & 8) {
-                            outlineWidth = 2.0f;
-                        } else if (desc->m_face->m_fontFlags & 1) {
-                            outlineWidth = 1.0f;
-                        }
-                    }
-                    float fontSize = desc->m_face ? static_cast<float>(desc->m_face->m_pixelSize) : 12.0f;
-                    float params[4] = { outlineWidth, fontSize, 0.0f, 0.0f };
-                    GxShaderConstantsSet(GxSh_Pixel, 0, params, 1);
-                }
-            }
         }
 
         desc->RenderBatch();

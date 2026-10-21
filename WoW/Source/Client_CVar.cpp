@@ -514,12 +514,13 @@ bool FontMsdfCallback(CVar* var, const char* oldValue, const char* value, void* 
         return true;
     }
 
+    // Takes effect at once: every font drops its glyphs (re-choosing MSDF or stock in
+    // ClearGlyphs) and rebuilds its strings, as on a screen size change. /reload if any text lags.
     uint8_t enabled = SStrToInt(value) != 0;
     if (g_msdfEnabled != enabled) {
         g_msdfEnabled = enabled;
         for (CGxFont* face = g_fonts.Head(); face; face = g_fonts.Next(face)) {
-            face->ClearGlyphs();
-            face->UpdateDimensions();
+            face->HandleScreenSizeChange();
         }
     }
 

@@ -493,12 +493,8 @@ void TEXTURECACHE::MsdfTextureCallback(EGxTexCommand command, uint32_t width, ui
 // VERIFY: 0f656a97 auto
 // OFFSET: 0x006CA050
 void TEXTURECACHE::CreateTexture(int32_t filter) {
-    bool isMsdf = (this->m_theFace && this->m_theFace->m_useMsdf && g_msdfEnabled) || this->m_isMsdfCache;
-    this->m_isMsdfCache = isMsdf ? 1 : 0;
-    uint32_t atlasSize = isMsdf ? MSDF_ATLAS_SIZE : 256;
-    this->m_atlasSize = atlasSize;
-
-    if (isMsdf) {
+    // Initialize (called first) chose the kind from the face.
+    if (this->m_isMsdfCache) {
         CGxTexFlags flags(GxTex_Linear, 0, 0, 0, 0, 0, 1, 0, 0, 0);
         this->m_texture = TextureCreate(MSDF_ATLAS_SIZE, MSDF_ATLAS_SIZE, GxTex_Argb8888, GxTex_Argb8888, flags, this, TEXTURECACHE::MsdfTextureCallback, "GxuFontMSDF", 0);
     } else {
@@ -511,7 +507,7 @@ void TEXTURECACHE::CreateTexture(int32_t filter) {
 // OFFSET: 0x006CA130
 void TEXTURECACHE::Initialize(CGxFont* face, uint32_t cellHeight) {
     this->m_theFace = face;
-    this->m_isMsdfCache = face && face->m_useMsdf && g_msdfEnabled;
+    this->m_isMsdfCache = face && face->m_useMsdf;
     uint32_t atlasSize = this->m_isMsdfCache ? MSDF_ATLAS_SIZE : 256;
     this->m_atlasSize = atlasSize;
     if (cellHeight == 0) {
