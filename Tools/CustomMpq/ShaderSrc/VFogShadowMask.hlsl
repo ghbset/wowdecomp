@@ -14,6 +14,7 @@
 // start, 1 / span, on, 0), c65-c67 band 0 rows, c68-c70 unit rows, c71 (band 0 on, unit on).
 #include "vf_common.hlsli"
 #include "vf_shadow.hlsli"
+#include "vf_gbuffer.hlsli"
 
 float4 cMaskLight : register(c10);
 float4 cMaskAmbient : register(c11);
@@ -75,6 +76,7 @@ float4 main(float2 viewportUv : TEXCOORD0) : COLOR0
     float3 dy = Nearer(p, ViewAt(pixel + float2(0, 1)), ViewAt(pixel - float2(0, 1)));
     float3 n = cross(dx, dy);
     n *= dot(n, p) > 0 ? -1 : 1;    // toward the camera
+    n = GBufferNormal(pixel, p, normalize(n));
     float ndl = saturate(dot(normalize(ViewToWorldDirection(n)), cMaskLight.xyz));
 
     float cascade = ReceiverShadow(p, InterleavedGradientNoise(pixel));

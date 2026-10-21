@@ -21,6 +21,8 @@ class CGxShader : public TSHashObject<CGxShader, HASHKEY_STRI> {
     /* 0044 */ int16_t unk_0044;
     /* 0046 */ int16_t unk_0046;
     /* 0048 */ TSGrowableArray<uint8_t> m_code;
+    // GBUFFER (not 12340): this pixel shader writes oC1, the view-space normal (Tools/VulkanShaders/bls/normals.py).
+    bool m_writesNormal = false;
 
     virtual void Load(SFileImpl* file);
 

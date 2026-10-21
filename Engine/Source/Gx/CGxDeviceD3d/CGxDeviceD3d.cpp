@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -824,6 +825,9 @@ void CGxDeviceD3d::IShaderCreatePixel(CGxShader* shader) {
     if (shader->m_code.Count() && this->m_d3dDevice->CreatePixelShader(reinterpret_cast<const DWORD*>(shader->m_code.m_data), &pixelShader) == D3D_OK) {
         shader->m_apiSpecific = pixelShader;
         shader->m_valid = 1;
+        // GBUFFER: `mov oC1, r#` (normals.py), the only oC1 write any of our shaders makes.
+        const uint32_t* tok = reinterpret_cast<const uint32_t*>(shader->m_code.m_data);
+        shader->m_writesNormal = std::find(tok, tok + shader->m_code.Count() / 4, 0x800F0801u) != tok + shader->m_code.Count() / 4;
     }
 }
 
@@ -2039,6 +2043,7 @@ void CGxDeviceD3d::IStateSync() {
         this->IStateSyncXforms();
     }
 
+    this->INormalSync();
     this->IStateSyncEnables();
     this->IStateSyncClipPlanes();
     this->IStateSyncScissorRect();
@@ -2692,6 +2697,7 @@ void CGxDeviceD3d::IReleaseD3dResources(int32_t freeTextures) {
     }
 
     this->IReleaseSceneDepth();
+    this->INormalRelease();
 
     if (this->m_defDepthStencilSurface) {
         this->m_defDepthStencilSurface->Release();
@@ -3254,6 +3260,7 @@ void CGxDeviceD3d::ScenePresent() {
     if (this->m_context) {
         int32_t scrShotClick = this->m_scrShotClick;
         this->m_sceneDepthFresh = false;    // VFOG
+        this->m_normalCleared = false;      // GBUFFER
 
         CGxDevice::ScenePresent();
         this->ISceneEnd();
@@ -3366,6 +3373,7 @@ void CGxDeviceD3d::IStateSetD3DDefaults() {
 
     this->m_d3dDevice->GetRenderTarget(0, &this->m_defColorSurface);
     this->ICreateSceneDepth();
+    this->INormalCreate();
     this->m_d3dDevice->GetDepthStencilSurface(&this->m_defDepthSurface);
     this->InitLights();
     this->m_ambientOnlyMode = 0;
@@ -3443,6 +3451,11 @@ void CGxDeviceD3d::SceneClear(uint32_t mask, CImVector color) {
 
     if (this->m_viewportDirty) {
         this->IXformSetViewport();
+    }
+
+    if (this->m_normalBound) {      // GBUFFER: Clear would fill RT1 with the clear colour too
+        this->m_d3dDevice->SetRenderTarget(1, nullptr);
+        this->m_normalBound = false;
     }
 
     this->m_d3dDevice->Clear(0, nullptr, flags, D3DCOLOR_ARGB(color.a, color.r, color.g, color.b), 1.0f, 0);
@@ -3776,6 +3789,10 @@ void CGxDeviceD3d::DeviceSetRenderTarget(EGxBuffer buffer, CGxTex* texture, uint
         depthSurface = static_cast<LPDIRECT3DSURFACE9>(this->m_textureTarget[GxBuffers_Depth].m_apiSpecific);
     }
 
+    if (this->m_normalBound && colorSurface != this->m_defColorSurface) {     // GBUFFER: RT1 is back-buffer size
+        this->m_d3dDevice->SetRenderTarget(1, nullptr);
+        this->m_normalBound = false;
+    }
     this->m_d3dDevice->SetRenderTarget(0, colorSurface);
     this->m_d3dDevice->SetDepthStencilSurface(depthSurface);
 
@@ -3783,6 +3800,105 @@ void CGxDeviceD3d::DeviceSetRenderTarget(EGxBuffer buffer, CGxTex* texture, uint
 
     this->m_viewportDirty = 1;
     this->m_scissorRectDirty = 1;
+}
+
+// GBUFFER: not in 12340. GBUF-STATUS.md. Needs 2 MRTs, independent write masks and blending with MRT bound (else
+// binding RT1 would turn blending off for every transparent draw).
+void CGxDeviceD3d::INormalCreate() {
+    D3DSURFACE_DESC desc;
+    const DWORD misc = D3DPMISCCAPS_INDEPENDENTWRITEMASKS | D3DPMISCCAPS_MRTPOSTPIXELSHADERBLENDING;
+    if (this->m_normalTexture || !this->m_defColorSurface || FAILED(this->m_defColorSurface->GetDesc(&desc))
+        || this->m_d3dCaps.NumSimultaneousRTs < 2 || (this->m_d3dCaps.PrimitiveMiscCaps & misc) != misc) {
+        return;
+    }
+    if (FAILED(this->m_d3dDevice->CreateTexture(desc.Width, desc.Height, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &this->m_normalTexture, nullptr))) {
+        this->m_normalTexture = nullptr;
+        return;
+    }
+    // MSAA back buffer: RT1 must match its sample count; resolved into the texture when read.
+    HRESULT hr = desc.MultiSampleType == D3DMULTISAMPLE_NONE
+        ? this->m_normalTexture->GetSurfaceLevel(0, &this->m_normalSurface)
+        : this->m_d3dDevice->CreateRenderTarget(desc.Width, desc.Height, D3DFMT_A8R8G8B8, desc.MultiSampleType, desc.MultiSampleQuality, FALSE, &this->m_normalSurface, nullptr);
+    if (FAILED(hr)) {
+        this->m_normalSurface = nullptr;
+        this->INormalRelease();
+    }
+}
+
+void CGxDeviceD3d::INormalRelease() {
+    if (this->m_normalBound && this->m_d3dDevice) {
+        this->m_d3dDevice->SetRenderTarget(1, nullptr);
+    }
+    this->m_normalBound = false;
+    this->m_normalCleared = false;
+    this->m_normalWriteMask = 0xFFFFFFFF;
+    if (this->m_normalTex) {
+        this->m_normalTex->m_apiSpecificData = nullptr;
+    }
+    if (this->m_normalSurface) {
+        this->m_normalSurface->Release();
+        this->m_normalSurface = nullptr;
+    }
+    if (this->m_normalTexture) {
+        this->m_normalTexture->Release();
+        this->m_normalTexture = nullptr;
+    }
+}
+
+// Every draw (IStateSync): RT1 bound and written only for an oC1 shader drawing opaque or alpha-keyed onto the back
+// buffer with colour writes on; every other draw keeps it bound with its write mask 0 (no rebind churn).
+void CGxDeviceD3d::INormalSync() {
+    if (!this->m_normalSurface) {
+        return;
+    }
+    const CGxShader* ps = static_cast<const CGxShader*>(this->m_appRenderStates[GxRs_PixelShader].m_value.m_data.p);
+    const int32_t blend = this->m_appRenderStates[GxRs_BlendingMode].m_value.m_data.i[0];
+    const bool write = CGxDevice::s_normalBuffer && ps && ps->m_writesNormal && (blend == GxBlend_Opaque || blend == GxBlend_AlphaKey)
+        && this->m_appRenderStates[GxRs_ColorWrite].m_value.m_data.i[0] != 0 && !this->m_textureTarget[GxBuffers_Color].m_apiSpecific;
+    if (write && !this->m_normalBound) {
+        if (!this->m_normalCleared) {
+            this->m_d3dDevice->ColorFill(this->m_normalSurface, nullptr, 0);
+            this->m_normalCleared = true;
+        }
+        this->m_d3dDevice->SetRenderTarget(1, this->m_normalSurface);
+        this->m_normalBound = true;
+    }
+    const DWORD mask = write ? 0xF : 0;
+    if (this->m_normalBound && mask != this->m_normalWriteMask) {
+        this->m_d3dDevice->SetRenderState(D3DRS_COLORWRITEENABLE1, mask);
+        this->m_normalWriteMask = mask;
+    }
+}
+
+CGxTex* CGxDeviceD3d::DeviceNormalBuffer() {
+    if (!this->m_context || !this->m_normalSurface || !this->m_normalCleared || !CGxDevice::s_normalBuffer) {
+        return nullptr;
+    }
+    if (this->m_normalBound) {      // sampled next: not a target meanwhile; the next oC1 draw binds it again
+        this->m_d3dDevice->SetRenderTarget(1, nullptr);
+        this->m_normalBound = false;
+    }
+    LPDIRECT3DSURFACE9 level0 = nullptr;
+    if (SUCCEEDED(this->m_normalTexture->GetSurfaceLevel(0, &level0))) {
+        if (level0 != this->m_normalSurface) {
+            this->m_d3dDevice->StretchRect(this->m_normalSurface, nullptr, level0, nullptr, D3DTEXF_NONE);
+        }
+        level0->Release();
+    }
+    D3DSURFACE_DESC desc;
+    this->m_normalTexture->GetLevelDesc(0, &desc);
+    if (!this->m_normalTex) {
+        CGxTexFlags flags(GxTex_Nearest);
+        flags.m_renderTarget = 1;
+        this->m_normalTex = new CGxTex(GxTex_2d, desc.Width, desc.Height, 0, GxTex_Argb8888, GxTex_Argb8888, flags, nullptr, nullptr, "GxNormalBuffer");
+    }
+    CGxTex* texture = this->m_normalTex;
+    texture->m_width = desc.Width;
+    texture->m_height = desc.Height;
+    texture->m_apiSpecificData = this->m_normalTexture;
+    texture->m_needsCreation = 0;
+    texture->m_needsUpdate = 0;
+    return texture;
 }
 
 // VFOG: INTZ/RESZ scene depth, shared with the other D3D9 backend (D3d9SceneDepth.h).

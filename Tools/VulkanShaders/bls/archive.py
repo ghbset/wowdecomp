@@ -18,6 +18,7 @@ import struct
 import sys
 
 from . import dx9ir as ir
+from . import normals
 from . import mpq_extract as mq
 
 BS = chr(92)
@@ -178,7 +179,9 @@ def enumerate_records(datadir):
             r.md5 = hashlib.md5(r.code).hexdigest()
             r.hdr = (rec['a'], rec['b'], rec['c'], rec['d'])
             try:
-                r.sh = ir.decode(r.code)
+                # gxNormalBuffer: world records also write their view-space normal (normals.py); the md5
+                # stays the stock record's, which is what the device looks the module up by.
+                r.sh = ir.decode(normals.rewrite_record(name, 'vs' if kind == 'vertex' else 'ps', r.code))
             except ValueError:
                 r.sh = None       # an SM1 stream: not translated
             out.append(r)

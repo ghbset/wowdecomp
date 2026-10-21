@@ -251,6 +251,18 @@ class CGxDeviceD3d : public CGxDevice {
     bool m_sceneDepthResz = false;  // MSAA: INTZ is not bound; DeviceCopySceneDepth fills it from the MSAA depth by RESZ
     bool m_sceneDepthFresh = false; // RESZ: INTZ still matches the depth (no depth-writing draw, depth clear or present since)
     CGxTex* m_sceneDepthTex;
+    // GBUFFER (not 12340): DeviceNormalBuffer. m_normalSurface is RT1 (the texture's level 0, or a multisampled
+    // surface StretchRect-resolved into m_normalTexture); bound only while RT0 is the back buffer, written only by
+    // opaque/alpha-key draws of oC1 shaders (D3DRS_COLORWRITEENABLE1), ColorFilled to 0 at the first write a frame.
+    LPDIRECT3DTEXTURE9 m_normalTexture = nullptr;
+    LPDIRECT3DSURFACE9 m_normalSurface = nullptr;
+    CGxTex* m_normalTex = nullptr;
+    bool m_normalBound = false;
+    bool m_normalCleared = false;   // this frame
+    DWORD m_normalWriteMask = 0xFFFFFFFF;
+    void INormalCreate();
+    void INormalRelease();
+    void INormalSync();
 
     virtual void ITexMarkAsUpdated(CGxTex* texId);
     virtual void IRsSendToHw(EGxRenderState which);
@@ -276,6 +288,7 @@ class CGxDeviceD3d : public CGxDevice {
     virtual CGxTex* DeviceCopySceneDepth(bool* transient = nullptr);
     virtual void DeviceSceneDepthBound(bool bound);
     virtual bool DeviceSceneDepthIsCopy() { return m_sceneDepthResz; }
+    virtual CGxTex* DeviceNormalBuffer();
     virtual void DeviceCopyTex(CGxTex* source, uint32_t sourcePlane, CGxTex* dest, uint32_t destPlane);
     virtual void DeviceOverride(EGxOverride override, uint32_t value);
     virtual void CapsWindowSize(CRect& rect);

@@ -8,6 +8,7 @@
 // TEXCOORD0 = world-viewport uv. s0 scene depth. c0-c3 vf_common (c3.z = lightMaxDist), c10 (strength, 1 / fade
 // span, fade start, 0), then 3 registers a light from c11: view position + 1 / radius^2, colour, attenuation c/l/q.
 #include "vf_common.hlsli"
+#include "vf_gbuffer.hlsli"
 
 static const int kLights = 16;
 float4 cLightControl : register(c10);
@@ -40,7 +41,7 @@ float4 main(float2 viewportUv : TEXCOORD0) : COLOR0
     float3 dy = Nearer(p, ViewAt(pixel + float2(0, 1)), ViewAt(pixel - float2(0, 1)));
     float3 n = cross(dx, dy);
     n *= dot(n, p) > 0 ? -1 : 1;    // toward the camera
-    n = normalize(n);
+    n = GBufferNormal(pixel, p, normalize(n));
 
     // Literal register indices only (no relative addressing for the translators); unused slots carry colour 0.
     float3 light = 0;

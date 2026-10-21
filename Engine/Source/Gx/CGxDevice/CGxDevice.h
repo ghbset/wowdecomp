@@ -255,6 +255,13 @@ class CGxDevice {
     // VFOG: true where DeviceCopySceneDepth returns a snapshot that later draws do not change (D3D9 RESZ, D3D11,
     // Vulkan); false where it is the live depth-stencil (D3D9 INTZ), which the caller must copy to keep.
     virtual bool DeviceSceneDepthIsCopy() { return false; }
+    // GBUFFER: not in 12340. The world's view-space normals (RGBA8, rgb = n * 0.5 + 0.5, a = 1 where a world shader
+    // wrote one, 0 elsewhere), back-buffer size, written as a second render target by the opaque draws whose pixel
+    // shader writes oC1 (CGxShader::m_writesNormal), cleared each frame. Bind it through GxRs_TextureN (point filter);
+    // the backend unbinds it as a target first. nullptr: off (CVar gxNormalBuffer, s_normalBuffer), unsupported, or
+    // nothing written this frame. GBUF-STATUS.md.
+    virtual CGxTex* DeviceNormalBuffer() { return nullptr; }
+    static bool s_normalBuffer;
     // LEGION: not in 12340 (7.3.5 SetDepthUser 0x006C4343, its users counted at 0x013CCDDC). One bit per scene-depth
     // consumer, set from its CVar state each frame; while none is set every DeviceCopySceneDepth returns nullptr
     // (transient), so no copy runs. A new consumer adds a bit here and one SetDepthUser call. docs/LEGION_PORT.md.

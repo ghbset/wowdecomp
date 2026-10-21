@@ -82,15 +82,15 @@ SHADERS = {
     # Cata ProcMagma lava/slime over the stock vsLiquidMagma (backlog #10, liquidProcMagma)
     'LiquidProcMagma': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 1, 2, 3), 0, 'LiquidProcMagma', {}),
     # shadowMask (Legion survey 2.7): the land's sun shadow over the opaque world, a multiply; s5/s6 cascades, s7 land
-    'VFogShadowMask': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 5, 6, 7, 8, 9), 0, 'VFogShadowMask', {}),
+    'VFogShadowMask': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 4, 5, 6, 7, 8, 9), 0, 'VFogShadowMask', {}),
     # Legion lights (lightMode, docs/LEGION_PORT.md): the frame's M2 point lights on the surfaces, colour += colour * light
-    'LegionLights': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0), 0, 'LegionLights', {}),
+    'LegionLights': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 4), 0, 'LegionLights', {}),
     # Legion FFX post (docs/LEGION_PORT.md): colour shift only, FXAA low + colour shift, FXAA high + colour shift
     'LegionPost0': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0), 0, 'LegionPost', {'FXAA_STEPS': 0}),
     'LegionPost1': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0), 0, 'LegionPost', {'FXAA_STEPS': 5}),
     'LegionPost2': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0), 0, 'LegionPost', {'FXAA_STEPS': 12}),
     # Legion SSAO (docs/LEGION_PORT.md): AO, 4x4 box blur, depth-weighted blur, apply (multiply)
-    'LegionSsao': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0), 0, 'LegionSsao', {'PASS': 0}),
+    'LegionSsao': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 4), 0, 'LegionSsao', {'PASS': 0}),
     'LegionSsaoBox': ('ps_3_0', TEXCOORD0, COLOR0, samplers(1), 0, 'LegionSsao', {'PASS': 1}),
     'LegionSsaoBilateral': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 1), 0, 'LegionSsao', {'PASS': 2}),
     'LegionSsaoApply': ('ps_3_0', TEXCOORD0, COLOR0, samplers(1), 0, 'LegionSsao', {'PASS': 3}),
