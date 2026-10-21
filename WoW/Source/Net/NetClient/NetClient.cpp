@@ -863,6 +863,12 @@ void NetClient::HandleRedirectClient(WowConnection* connection, CDataStore* msg)
     msg->GetData(proof, sizeof(proof));
 
     if (memcmp(&digest, proof, sizeof(proof)) || !msg->IsRead() || msg->m_read > msg->m_size) {
+        // FORK FIX (RosemyneH 25b44e3d): the exe leaves the connection allocated above set, so the next
+        // redirect is refused as already in progress; release it
+        this->m_redirectConnection->SetResponse(nullptr, false);
+        this->m_redirectConnection->Disconnect();
+        this->m_redirectConnection->Release();
+        this->m_redirectConnection = nullptr;
         connection->Disconnect();
     } else {
         this->m_redirectConnection->Connect(address, port, -1);
