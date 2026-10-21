@@ -93,6 +93,9 @@ CVar* g_buffDurationsCVar;
 // STATIC: 0x00BD093C
 CVar* g_rotateMinimapCVar;
 
+// CUSTOM: minimap blip refresh interval (ms), see CGMinimapFrame::Render
+CVar* g_minimapBlipIntervalCVar;
+
 // STATIC: 0x00BD0940
 CVar* g_minimapZoomCVar;
 
@@ -475,6 +478,8 @@ void CGGameUI::RegisterGameCVars() {
     g_showTargetCastbarCVar = CVar::Register("showTargetCastbar", "Show the spell your current target is casting", 0x10, "1", nullptr, CATEGORY_GAME, false, nullptr, false);
     g_showVKeyCastbarCVar = CVar::Register("showVKeyCastbar", "If the V key display is up for your current target, show the enemy cast bar with the target's health bar in the game field", 0x10, "1", nullptr, CATEGORY_GAME, false, nullptr, false);
     g_rotateMinimapCVar = CVar::Register("rotateMinimap", "Whether to rotate the entire minimap instead of the player arrow", 0x10, "0", nullptr, CATEGORY_GAME, false, nullptr, false);
+    // CUSTOM: the exe rebuilds minimap blips once per second; 0 = every frame
+    g_minimapBlipIntervalCVar = CVar::Register("minimapBlipInterval", "Milliseconds between minimap blip position updates (0 = every frame)", 0x10, "0", nullptr, CATEGORY_GAME, false, nullptr, false);
     g_minimapZoomCVar = CVar::Register("minimapZoom", "The current outdoor minimap zoom level", 0x20, "3", nullptr, CATEGORY_GAME, false, nullptr, false);
     g_minimapInsideZoomCVar = CVar::Register("minimapInsideZoom", "The current indoor minimap zoom level", 0x20, "3", nullptr, CATEGORY_GAME, false, nullptr, false);
     g_minimapPortalMaxCVar = CVar::Register("minimapPortalMax", "Max Number of Portals to traverse for minimap", 0x20, "99", nullptr, CATEGORY_GAME, false, nullptr, false);

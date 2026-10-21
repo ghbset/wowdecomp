@@ -1998,7 +1998,8 @@ void CGMinimapFrame::Render() {
     }
 
     uint32_t lastUpdate = this->m_lastUpdateTime;
-    bool expired = OsGetAsyncTimeMs() - lastUpdate >= 1000;
+    // CUSTOM: interval from minimapBlipInterval (exe: fixed 1000 ms)
+    bool expired = OsGetAsyncTimeMs() - lastUpdate >= static_cast<uint32_t>(g_minimapBlipIntervalCVar->m_intValue);
 
     if (updated || s_rotateMinimap != g_rotateMinimapCVar->m_intValue || !lastUpdate || expired) {
         uint32_t now = OsGetAsyncTimeMs();
