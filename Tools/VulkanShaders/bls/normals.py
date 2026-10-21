@@ -154,6 +154,8 @@ def inject(code, kind_hint=None):
     toks = list(_TOKS)
     end = next(i for i in range(len(toks) - 1, 0, -1) if toks[i] == 0x0000FFFF)
     head = _header_end(sh)
+    if 0x80070005 in toks[:head]:     # dcl_texcoord7 already there: injected before (custom.MPQ's pack)
+        return None
     if sh.kind == 'vs':
         o = _max_index(sh, ir.RT_OUTPUT) + 1
         if o > 11:
@@ -244,6 +246,9 @@ def main(argv):
                     r = inject(code)
                 except Refused as e:
                     stats.setdefault(name, []).append('refused:' + str(e))
+                    return code
+                if r is None:       # already injected (or SM2)
+                    stats.setdefault(name, []).append('kept')
                     return code
                 stats.setdefault(name, []).append('normal' if r[1] else 'zero')
                 ir.decode(r[0])     # must decode back

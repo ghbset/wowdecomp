@@ -35,9 +35,9 @@ namespace gxvk::vk::frame::detail
      * makes the pass's writes visible to the fragment shaders and transfers that sample or copy the
      * target afterwards.
      */
-    static bool CreatePass(VkFormat colour, bool clearColour, bool clearDepth, VkRenderPass& out)
+    static bool CreatePass(VkFormat colour, bool clearColour, bool clearDepth, bool normal, VkRenderPass& out)
     {
-        VkAttachmentDescription a[2] = {};
+        VkAttachmentDescription a[3] = {};
         a[0].format         = colour;
         a[0].samples        = VK_SAMPLE_COUNT_1_BIT;
         a[0].loadOp         = clearColour ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
@@ -54,13 +54,22 @@ namespace gxvk::vk::frame::detail
         a[1].stencilStoreOp = HasStencil(s.depthFormat) ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
         a[1].initialLayout  = clearDepth ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
         a[1].finalLayout    = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        // GBUFFER: the normal target, always LOADed (BeginPass zeroes it once a frame), resting as an attachment.
+        a[2].format         = kNormalFormat;
+        a[2].samples        = VK_SAMPLE_COUNT_1_BIT;
+        a[2].loadOp         = VK_ATTACHMENT_LOAD_OP_LOAD;
+        a[2].storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+        a[2].stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        a[2].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        a[2].initialLayout  = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        a[2].finalLayout    = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
-        VkAttachmentReference colourRef = { 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+        VkAttachmentReference colourRef[2] = { { 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL }, { 2, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL } };
         VkAttachmentReference depthRef  = { 1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
         VkSubpassDescription sub = {};
         sub.pipelineBindPoint       = VK_PIPELINE_BIND_POINT_GRAPHICS;
-        sub.colorAttachmentCount    = 1;
-        sub.pColorAttachments       = &colourRef;
+        sub.colorAttachmentCount    = normal ? 2u : 1u;
+        sub.pColorAttachments       = colourRef;
         sub.pDepthStencilAttachment = &depthRef;
 
         VkSubpassDependency dep[2] = {};
@@ -82,7 +91,7 @@ namespace gxvk::vk::frame::detail
 
         VkRenderPassCreateInfo info = {};
         info.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-        info.attachmentCount = 2;
+        info.attachmentCount = normal ? 3u : 2u;
         info.pAttachments    = a;
         info.subpassCount    = 1;
         info.pSubpasses      = &sub;
@@ -105,10 +114,10 @@ namespace gxvk::vk::frame::detail
      * into the single-sample depth buffer of the scene's size (3) -- so every copy, read-back, vfog
      * depth snapshot and the present pass read single-sample images as without MSAA.
      */
-    static bool CreatePassMs(VkFormat colour, uint32_t samples, bool clearColour, bool clearDepth, VkRenderPass& out)
+    static bool CreatePassMs(VkFormat colour, uint32_t samples, bool clearColour, bool clearDepth, bool normal, VkRenderPass& out)
     {
         const VkSampleCountFlagBits n = static_cast<VkSampleCountFlagBits>(samples);
-        VkAttachmentDescription2 a[4] = {};
+        VkAttachmentDescription2 a[6] = {};
         for (VkAttachmentDescription2& x : a)
         {
             x.sType          = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2;
@@ -139,17 +148,29 @@ namespace gxvk::vk::frame::detail
         a[3].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         a[3].finalLayout   = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
         a[3].stencilStoreOp = HasStencil(s.depthFormat) ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;   // the stencil resolve
+        // GBUFFER: the multisampled normal target (4), LOADed, resolved into the single-sample one (5).
+        a[4].format        = kNormalFormat;
+        a[4].samples       = n;
+        a[4].loadOp        = VK_ATTACHMENT_LOAD_OP_LOAD;
+        a[4].initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        a[4].finalLayout   = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        a[5].format        = kNormalFormat;
+        a[5].samples       = VK_SAMPLE_COUNT_1_BIT;
+        a[5].loadOp        = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        a[5].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        a[5].finalLayout   = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
         const VkImageAspectFlags depthAspect = VK_IMAGE_ASPECT_DEPTH_BIT | (HasStencil(s.depthFormat) ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
-        VkAttachmentReference2 ref[4] = {};
-        const VkImageLayout layouts[4] = { VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                                           VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
-        for (uint32_t i = 0; i < 4; ++i)
+        // In colour / resolve pairs: 0 + 4 the colour attachments, 2 + 5 their resolves.
+        VkAttachmentReference2 ref[6] = {};
+        const uint32_t      order[6]   = { 0, 4, 2, 5, 1, 3 };
+        for (uint32_t i = 0; i < 6; ++i)
         {
+            const bool depthRef = order[i] == 1 || order[i] == 3;
             ref[i].sType      = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2;
-            ref[i].attachment = i;
-            ref[i].layout     = layouts[i];
-            ref[i].aspectMask = (i & 1) ? depthAspect : VK_IMAGE_ASPECT_COLOR_BIT;
+            ref[i].attachment = order[i];
+            ref[i].layout     = depthRef ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            ref[i].aspectMask = depthRef ? depthAspect : VK_IMAGE_ASPECT_COLOR_BIT;
         }
         // SAMPLE_ZERO for depth and stencil alike: required of every 1.2 device, and legal without
         // independentResolve (the two modes are the same). Sample 0 is what D3D11's vfog copy reads.
@@ -157,15 +178,15 @@ namespace gxvk::vk::frame::detail
         resolve.sType                          = VK_STRUCTURE_TYPE_SUBPASS_DESCRIPTION_DEPTH_STENCIL_RESOLVE;
         resolve.depthResolveMode               = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;
         resolve.stencilResolveMode             = depthAspect & VK_IMAGE_ASPECT_STENCIL_BIT ? VK_RESOLVE_MODE_SAMPLE_ZERO_BIT : VK_RESOLVE_MODE_NONE;
-        resolve.pDepthStencilResolveAttachment = &ref[3];
+        resolve.pDepthStencilResolveAttachment = &ref[5];
         VkSubpassDescription2 sub = {};
         sub.sType                   = VK_STRUCTURE_TYPE_SUBPASS_DESCRIPTION_2;
         sub.pNext                   = &resolve;
         sub.pipelineBindPoint       = VK_PIPELINE_BIND_POINT_GRAPHICS;
-        sub.colorAttachmentCount    = 1;
+        sub.colorAttachmentCount    = normal ? 2u : 1u;
         sub.pColorAttachments       = &ref[0];
         sub.pResolveAttachments     = &ref[2];
-        sub.pDepthStencilAttachment = &ref[1];
+        sub.pDepthStencilAttachment = &ref[4];
 
         // The single-sample pass's dependencies; the resolves run in COLOR_ATTACHMENT_OUTPUT, which
         // the outgoing one already waits on.
@@ -189,7 +210,7 @@ namespace gxvk::vk::frame::detail
 
         VkRenderPassCreateInfo2 info = {};
         info.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO_2;
-        info.attachmentCount = 4;
+        info.attachmentCount = normal ? 6u : 4u;
         info.pAttachments    = a;
         info.subpassCount    = 1;
         info.pSubpasses      = &sub;
@@ -206,10 +227,10 @@ namespace gxvk::vk::frame::detail
     }
 
     /// The four pass variants of a colour format and sample count, made on first use.
-    const PassSet* PassesFor(VkFormat colour, uint32_t samples)
+    const PassSet* PassesFor(VkFormat colour, uint32_t samples, bool normal)
     {
         for (uint32_t i = 0; i < s.passCount; ++i)
-            if (s.passes[i].colour == colour && s.passes[i].samples == samples) return &s.passes[i];
+            if (s.passes[i].colour == colour && s.passes[i].samples == samples && s.passes[i].normal == normal) return &s.passes[i];
         if (s.passCount == kMaxPassFormats || s.depthFormat == VK_FORMAT_UNDEFINED)
         {
             Write(Warn, "vulkan: frame: no render pass for colour format %s (%u formats held)", FormatName(colour), s.passCount);
@@ -218,10 +239,11 @@ namespace gxvk::vk::frame::detail
         PassSet& set = s.passes[s.passCount];
         set.colour  = colour;
         set.samples = samples;
+        set.normal  = normal;
         for (uint32_t v = 0; v < 4; ++v)
         {
-            const bool ok = samples > 1 ? CreatePassMs(colour, samples, (v & 1) != 0, (v & 2) != 0, set.pass[v])
-                                        : CreatePass(colour, (v & 1) != 0, (v & 2) != 0, set.pass[v]);
+            const bool ok = samples > 1 ? CreatePassMs(colour, samples, (v & 1) != 0, (v & 2) != 0, normal, set.pass[v])
+                                        : CreatePass(colour, (v & 1) != 0, (v & 2) != 0, normal, set.pass[v]);
             if (!ok)
             {
                 for (uint32_t u = 0; u < v; ++u) s.dapi->DestroyRenderPass(s.device, set.pass[u], nullptr);
@@ -230,7 +252,7 @@ namespace gxvk::vk::frame::detail
             }
         }
         ++s.passCount;
-        Write(Debug, "vulkan: frame: render passes for colour %s over depth %s, %u sample(s)", FormatName(colour), FormatName(s.depthFormat), samples);
+        Write(Debug, "vulkan: frame: render passes for colour %s over depth %s, %u sample(s)%s", FormatName(colour), FormatName(s.depthFormat), samples, normal ? ", normal target" : "");
         return &set;
     }
 
@@ -322,10 +344,32 @@ namespace gxvk::vk::frame::detail
         return true;
     }
 
-    /// The MSAA images; the caller has made the device idle (they go with the scene).
+    /// GBUFFER: the scene's normal target (and its multisampled twin), after CreateMsImages. None
+    /// without independentBlend (the scene's pipelines mask attachment 1 per draw): the passes then
+    /// have one colour attachment, DeviceNormalBuffer answers null and the lighting passes fall back.
+    void CreateNormalImages(const context::Handles& h)
+    {
+        s.normalCleared = false;
+        if (!h.independentBlend) return;
+        const VkImageUsageFlags usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        if (!MakeImage(kNormalFormat, s.scene.extent, 1, usage | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, s.normal)) return;
+        if (s.sceneSamples > 1 && !MakeImage(kNormalFormat, s.scene.extent, s.sceneSamples, usage, s.msNormal))
+        {
+            s.dapi->DestroyImageView(s.device, s.normal.view, nullptr);
+            s.dapi->DestroyImage(s.device, s.normal.image, nullptr);
+            memory::Free(s.normal.block);
+            s.normal = DepthBuffer();
+            return;
+        }
+        s.normal.extent = s.msNormal.extent = s.scene.extent;
+    }
+
+    bool PassNormal(const Target& t) { return !t.image && s.normal.view != VK_NULL_HANDLE; }
+
+    /// The MSAA and normal images; the caller has made the device idle (they go with the scene).
     void DestroyMsImages()
     {
-        for (DepthBuffer* d : { &s.msColour, &s.msDepth })
+        for (DepthBuffer* d : { &s.msColour, &s.msDepth, &s.normal, &s.msNormal })
         {
             if (d->view != VK_NULL_HANDLE) s.dapi->DestroyImageView(s.device, d->view, nullptr);
             if (d->image != VK_NULL_HANDLE) s.dapi->DestroyImage(s.device, d->image, nullptr);
@@ -410,7 +454,8 @@ namespace gxvk::vk::frame::detail
         const uint32_t depth = DepthFor(extent);
         if (depth == UINT32_MAX) return UINT32_MAX;
         const uint32_t samples = t.image ? 1u : s.sceneSamples;
-        const PassSet* passes = PassesFor(format, samples);
+        const bool     normal = PassNormal(t);
+        const PassSet* passes = PassesFor(format, samples, normal);
         if (!passes) return UINT32_MAX;
 
         uint32_t slot = s.fbCount;
@@ -446,13 +491,14 @@ namespace gxvk::vk::frame::detail
             return UINT32_MAX;
         }
         // MSAA: the multisampled pair first, the resolve targets (the scene, its depth) after.
-        const VkImageView single[2] = { fb.view, s.depths[depth].view };
-        const VkImageView multi[4]  = { s.msColour.view, s.msDepth.view, fb.view, s.depths[depth].view };
+        // GBUFFER: the normal target last (MSAA: the multisampled one, then its resolve).
+        const VkImageView single[3] = { fb.view, s.depths[depth].view, s.normal.view };
+        const VkImageView multi[6]  = { s.msColour.view, s.msDepth.view, fb.view, s.depths[depth].view, s.msNormal.view, s.normal.view };
         const VkImageView* attachments = samples > 1 ? multi : single;
         VkFramebufferCreateInfo info = {};
         info.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
         info.renderPass      = passes->pass[0];
-        info.attachmentCount = samples > 1 ? 4u : 2u;
+        info.attachmentCount = (samples > 1 ? 4u : 2u) + (normal ? (samples > 1 ? 2u : 1u) : 0u);
         info.pAttachments    = attachments;
         info.width           = extent.width;
         info.height          = extent.height;

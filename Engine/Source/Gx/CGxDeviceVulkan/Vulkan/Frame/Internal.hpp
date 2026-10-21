@@ -67,6 +67,7 @@ namespace gxvk::vk::frame::detail
 
     /// The scene's colour format: the engine's Argb8888 (its back buffer's).
     constexpr VkFormat kSceneFormat = VK_FORMAT_B8G8R8A8_UNORM;
+    constexpr VkFormat kNormalFormat = VK_FORMAT_R8G8B8A8_UNORM;   ///< GBUFFER: the normal target
 
     /// How long an acquire may block before the frame goes on without an image (a surface in a
     /// fullscreen handoff can hold the acquire for as long as it likes).
@@ -107,6 +108,7 @@ namespace gxvk::vk::frame::detail
     {
         VkFormat     colour  = VK_FORMAT_UNDEFINED;
         uint32_t     samples = 1;   ///< > 1: the MSAA scene's passes (resolve into the scene and its depth)
+        bool         normal  = false;   ///< GBUFFER: the scene's passes, with the normal target as colour attachment 1
         VkRenderPass pass[4] = {};
     };
 
@@ -165,6 +167,9 @@ namespace gxvk::vk::frame::detail
         uint32_t    sceneSamples = 1;                    ///< what the scene's MSAA images below were made with
         DepthBuffer msColour;                            ///< sceneSamples > 1: the scene's multisampled colour
         DepthBuffer msDepth;                             ///< sceneSamples > 1: the scene's multisampled depth
+        DepthBuffer normal;                              ///< GBUFFER: the scene's normal target (RGBA8; MSAA: msNormal's resolve), none without independentBlend
+        DepthBuffer msNormal;                            ///< GBUFFER: sceneSamples > 1: the multisampled normal target
+        bool        normalCleared = false;               ///< GBUFFER: zeroed since the last present (BeginPass)
 
         // --- targets ----------------------------------------------------------------------------------
         VkFormat    depthFormat = VK_FORMAT_UNDEFINED;
@@ -242,9 +247,11 @@ namespace gxvk::vk::frame::detail
 
     // Targets.cpp
     bool ChooseDepthFormat(const context::Handles& h);
-    const PassSet* PassesFor(VkFormat colour, uint32_t samples = 1);
+    const PassSet* PassesFor(VkFormat colour, uint32_t samples = 1, bool normal = false);
+    bool PassNormal(const Target& t);   ///< GBUFFER: a pass on this target carries the normal attachment
     bool CreateMsImages(const context::Handles& h);
     void DestroyMsImages();
+    void CreateNormalImages(const context::Handles& h);
     uint32_t FramebufferFor(const Target& t, VkFormat format, VkExtent2D extent);
     bool TargetView(const Target& t, const texture::Image*& image, VkFormat& format, VkExtent2D& extent);
     void DestroyTargets();

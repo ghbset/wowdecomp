@@ -163,6 +163,38 @@ namespace gxvk::vk::frame
         return true;
     }
 
+    bool CopyNormalFromScene(texture::Image& dst)
+    {
+        // See CopyFromScene: a query pins the pass. normalCleared: a scene pass of this frame zeroed it.
+        if (!s.open || s.queryActive || !s.normalCleared || s.normal.image == VK_NULL_HANDLE || dst.handle == VK_NULL_HANDLE) return false;
+        VkCommandBuffer cmd = OutsideAfterClears();
+        if (!cmd) return false;
+        texture::Image src;
+        src.handle = s.normal.image;
+        src.levels = 1;
+        src.layers = 1;
+        Transition(cmd, src, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                   VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+        const VkImageLayout from = dst.layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ? dst.layout : VK_IMAGE_LAYOUT_UNDEFINED;
+        Transition(cmd, dst, from, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, kReaders, 0, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+        // A blit, not a copy: RGBA8 into the texture's own format (BGRA8 for GxTex_Argb8888), channels kept.
+        VkImageBlit blit = {};
+        blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        blit.srcSubresource.layerCount = 1;
+        blit.srcOffsets[1] = VkOffset3D{ static_cast<int32_t>(s.normal.extent.width), static_cast<int32_t>(s.normal.extent.height), 1 };
+        blit.dstSubresource = blit.srcSubresource;
+        blit.dstOffsets[1] = VkOffset3D{ static_cast<int32_t>(dst.extent.width), static_cast<int32_t>(dst.extent.height), 1 };
+        s.dapi->CmdBlitImage(cmd, s.normal.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst.handle, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_NEAREST);
+        Transition(cmd, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                   VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                   VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+        Transition(cmd, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                   VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, kReaders, VK_ACCESS_SHADER_READ_BIT);
+        dst.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        return true;
+    }
+
     bool ReadScene(const VkRect2D& rect, uint8_t* out)
     {
         if (!out || rect.extent.width == 0 || rect.extent.height == 0 || s.queryActive) return false;   // see CopyFromScene

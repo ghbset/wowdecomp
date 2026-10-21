@@ -228,6 +228,7 @@ namespace
             if (std::strcmp(t[1], "fixed_fog") == 0)         r.fixedFog = true;
             else if (std::strcmp(t[1], "point_size") == 0)   r.pointSize = true;
             else if (std::strcmp(t[1], "point_sprite") == 0) r.pointSprite = true;
+            else if (std::strcmp(t[1], "normal_out") == 0)   r.normalOut = true;
             else return false;
             return true;
         }

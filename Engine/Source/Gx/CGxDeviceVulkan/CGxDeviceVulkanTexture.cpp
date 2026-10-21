@@ -795,6 +795,53 @@ CGxTex* CGxDeviceVulkan::DeviceCopySceneDepth(bool* transient) {
     return tex;
 }
 
+// GBUFFER: not in 12340. CGxDevice::DeviceNormalBuffer: the scene's normal target (colour attachment
+// 1 of the scene's passes, written by translated pixel modules with `flag normal_out`) blitted into a
+// device-owned render-target texture of the scene's size, bound like any texture. Null when it is off
+// (gxNormalBuffer 0), the adapter has no independentBlend, or no scene pass ran this frame.
+namespace {
+    CGxTex*          g_normalTex      = nullptr;
+    CGxDeviceVulkan* g_normalTexOwner = nullptr;
+}
+
+CGxTex* CGxDeviceVulkan::DeviceNormalBuffer() {
+    const texture::Image* scene = frame::Scene();
+
+    if (!this->m_context || !this->m_drawPath || !CGxDevice::s_normalBuffer || !scene) {
+        return nullptr;
+    }
+
+    if (g_normalTexOwner != this) {
+        g_normalTex = nullptr;
+        g_normalTexOwner = this;
+    }
+
+    if (g_normalTex && (g_normalTex->m_width != scene->extent.width || g_normalTex->m_height != scene->extent.height)) {
+        this->TexDestroy(g_normalTex);
+        g_normalTex = nullptr;
+    }
+
+    if (!g_normalTex) {
+        CGxTexFlags flags(GxTex_Nearest);
+        flags.m_renderTarget = 1;
+
+        if (!this->TexCreate(GxTex_2d, scene->extent.width, scene->extent.height, 0, GxTex_Argb8888, GxTex_Argb8888, flags, nullptr, nullptr, "GxNormalBuffer", g_normalTex)) {
+            g_normalTex = nullptr;
+            return nullptr;
+        }
+    }
+
+    texture::Image* image = nullptr;
+    uint32_t layer = 0;
+
+    if (!this->ITargetImage(g_normalTex, image, 0, layer) || !frame::CopyNormalFromScene(*image)) {
+        return nullptr;
+    }
+
+    this->ITexTouch(g_normalTex);
+    return g_normalTex;
+}
+
 // The texture's image, made now if the texture is pending (CGxDeviceD3d::DeviceSetRenderTarget
 // creates the texture it is handed). Null when the texture has none.
 texture::Image* CGxDeviceVulkan::ITexImage(CGxTex* texId) {

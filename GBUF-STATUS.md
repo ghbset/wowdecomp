@@ -59,23 +59,32 @@ One rewrite of the stock SM3 bytecode feeds all three backends, so no world shad
   stock corpus: 68 files written, every record decodes back. NOT YET PACKED/SHIPPED.
 - `CGxDeviceD3d9Ex` (gxApi D3D9Ex) is not done: it returns nullptr (fallback). Port the same 4 functions if wanted.
 
-### Vulkan (`CGxDeviceVulkan`, the default): shaders DONE, runtime TODO
-- Translator: `Tools/VulkanShaders/bls/archive.py` `enumerate_records` decodes `normals.rewrite_record(...)` (the md5 the
-  device looks modules up by stays the stock record's); `bls/emitter.py` now accepts `oC1` (`layout(location = 1) out
-  vec4 oC1`) besides oC0. TEXCOORD7 = varying location 9 (already in VARYING_LOCATION). `Shaders/FfSem.vert` already
-  writes `texcoord7 = 0`. Checked: all 3509 stock-corpus records (injected) emit GLSL that glslang compiles (0 refused).
-  The user's client tree must be re-translated (`translate_shaders.py --client ... --deploy`).
-- Runtime left:
-  1. `Vulkan/Frame/Targets.cpp:62-85`: the scene render pass gets a 2nd colour attachment (R8G8B8A8_UNORM, same sample
-     count; MSAA: resolve attachment or a resolve copy before sampling), cleared to 0 at the pass's load (loadOp CLEAR
-     with clear value 0, independent of the frame's colour clear). Framebuffers + every pass compatible with it.
-  2. `Vulkan/Pipelines/Build.cpp:340-456`: `blending.attachmentCount = 2` for pipelines in that render pass; attachment 1
-     `colorWriteMask = 0xF` only when the pixel module writes oC1 (manifest outputs / GLSL `oC1`) and blend is
-     Opaque/AlphaKey, else 0 (an unwritten location is undefined in Vulkan). It must be part of the pipeline key.
-  3. Mark `CGxShader::m_writesNormal` from the manifest record (CGxDeviceVulkanShader.cpp ~line 94-103).
-  4. `DeviceNormalBuffer()` override: end/split the pass or use the copy pattern of `DeviceCopySceneDepth`
-     (snapshot into a sampled image), return a CGxTex.
-  5. The pipelines of other render passes (UI, offscreen RTs) keep attachmentCount 1.
+### Vulkan (`CGxDeviceVulkan`, the default): DONE (code), untested in game
+- Translator: `bls/archive.py` decodes `normals.rewrite_record(...)` (the md5 stays that of the bytes the client
+  loads); `bls/emitter.py` emits `layout(location = 1) out vec4 oC1` and the manifest line `flag normal_out`.
+  `normals.inject` skips a record that already has `dcl_texcoord7` (so translating a client whose custom.MPQ carries
+  the D3D9 normal pack does not inject twice). Full translation of the user's client (`/root/tswow-server/tswow-client`,
+  read only): 1655 records, all validated, 757 pixel records `normal_out`.
+- Runtime (search `GBUFFER` under `Engine/Source/Gx/CGxDeviceVulkan`):
+  - `Frame/Targets.cpp`: `CreateNormalImages` (after `CreateMsImages`, with the scene): RGBA8 `s.normal` (+ `s.msNormal`
+    at the scene's sample count), only with `independentBlend`. The scene's passes (`PassNormal(target)`, PassSet key
+    `normal`) get it as colour attachment 1: LOAD/STORE, resting in COLOR_ATTACHMENT_OPTIMAL; MSAA: attachment 4
+    (multisampled) resolved into 5 every pass instance. Framebuffers over the scene carry it. Texture targets: unchanged.
+  - `Frame.cpp` `ClearNormal`: zeroed (vkCmdClearColorImage) before the first scene pass after each present.
+  - Pipelines: `Draw::normalTarget` (set in `CGxDeviceVulkanDraw.cpp` before `Record`: 0 no attachment, 1 masked,
+    2 writable when gxNormalBuffer) -> `Key::normal`; `Build.cpp` makes 2 blend attachments, attachment 1 mask 0xF
+    only for a `normal_out` pixel module with blend Opaque/AlphaKey and a colour mask, else 0.
+  - `Manifest.cpp` parses `flag normal_out` (`Record::normalOut`); `CGxShader::m_writesNormal` set from it.
+  - `DeviceNormalBuffer` (CGxDeviceVulkanTexture.cpp): blits `s.normal` (`frame::CopyNormalFromScene`, Readback.cpp)
+    into a render-target `GxTex_Argb8888` CGxTex of the scene's size, recreated on resize. Null when off / no
+    independentBlend / not cleared this frame.
+  - Compatibility: an old exe skips the unknown `flag` line (malformed-line counter) and its 1-attachment passes drop
+    location 1; a new exe with old shaders never writes the target and the passes fall back per pixel.
+- **Deploy (how translated shaders reach the user):** the Vulkan SPIR-V ships inside `Data/custom.MPQ`
+  (release.config.json entry "tswow-client/Data/custom.MPQ"; the exes read `VulkanShaders\` from it). Rebuild it with
+  `python3 -I Tools/VulkanShaders/translate_shaders.py --client <client> --deploy` (writes `<client>/VulkanShaders`),
+  then `python3 -I Tools/CustomMpq/build_custom_mpq.py --client <client> --out <client>/Data/custom.MPQ`
+  (also needs the generated terrain_fade shaders), then the patcher publish. NOT done (no publish from this branch).
 
 ### D3D11 (`CGxDeviceD3d11`): shaders DONE (translation verified), runtime TODO
 - `shader-xlate/sm3hlsl.py` already maps oC1 -> SV_Target1 and TEXCOORD7 -> tc7; `xlate.py one` on injected records

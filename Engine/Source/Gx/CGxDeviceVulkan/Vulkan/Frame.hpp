@@ -115,6 +115,11 @@ namespace gxvk::vk::frame
      */
     bool CopyDepthFromScene(texture::Image& dst);
 
+    /// GBUFFER (CGxDevice::DeviceNormalBuffer): blits the scene's normal target (MSAA: its resolve)
+    /// into `dst` (a colour texture of the scene's extent), outside the pass; `dst` ends in
+    /// SHADER_READ_ONLY_OPTIMAL. False when the scene has no normal target or none was cleared this frame.
+    bool CopyNormalFromScene(texture::Image& dst);
+
     /**
      * Reads a rectangle of the scene back to the host, as B, G, R, A bytes per pixel: submits the
      * frame's work so far, waits for it, copies. The frame is closed afterwards; the next Present()
@@ -165,6 +170,9 @@ namespace gxvk::vk::frame
     /// The sample count of the current target's passes (the pipelines' rasterizationSamples): the
     /// scene's MSAA count, 1 for every texture target.
     uint32_t PassSamples();
+
+    /// GBUFFER: the current target's passes carry the normal target (colour attachment 1).
+    bool PassHasNormal();
 
     /// gxMultisample (1/2/4/8). Takes effect when the scene image is next made -- every format
     /// change rebuilds the swapchain, and with it the scene -- clamped to the adapter's counts.

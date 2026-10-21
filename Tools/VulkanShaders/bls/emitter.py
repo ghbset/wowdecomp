@@ -245,6 +245,7 @@ class Emitter(object):
                 raise Refused('oC%d: multiple render targets' % d.index)
             if d.index == 1:
                 self.uses_oc1 = True     # gxNormalBuffer (normals.py): the normal target, location 1
+                self.flags.add('normal_out')   # the device writes colour attachment 1 for it
                 return 'oC1'
             return 'oC0'
         if rt == ir.RT_DEPTHOUT:

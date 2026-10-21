@@ -370,6 +370,8 @@ void CGxDeviceVulkan::Draw(CGxBatch* batch, int32_t count) {
         frame::DepthWritten();   // VFOG: the next scene-depth copy is taken again
     }
 
+    d.normalTarget = frame::PassHasNormal() ? (CGxDevice::s_normalBuffer ? 2u : 1u) : 0u;   // GBUFFER
+
     if (!pipelines::Record(cmd, frame::RenderPass(), frame::PassGeneration(), frame::PassSamples(), frame::Serial(), frame::Slot(), d)) {
         return;
     }
