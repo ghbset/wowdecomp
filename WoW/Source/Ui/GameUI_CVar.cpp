@@ -96,6 +96,9 @@ CVar* g_rotateMinimapCVar;
 // CUSTOM: minimap blip refresh interval (ms), see CGMinimapFrame::Render
 CVar* g_minimapBlipIntervalCVar;
 
+// CUSTOM: damp the mount gallop on mounted names, see CGUnit_C::GetNamePosition
+CVar* g_nameMountSmoothingCVar;
+
 // STATIC: 0x00BD0940
 CVar* g_minimapZoomCVar;
 
@@ -480,6 +483,8 @@ void CGGameUI::RegisterGameCVars() {
     g_rotateMinimapCVar = CVar::Register("rotateMinimap", "Whether to rotate the entire minimap instead of the player arrow", 0x10, "0", nullptr, CATEGORY_GAME, false, nullptr, false);
     // CUSTOM: the exe rebuilds minimap blips once per second; 0 = every frame
     g_minimapBlipIntervalCVar = CVar::Register("minimapBlipInterval", "Milliseconds between minimap blip position updates (0 = every frame)", 0x10, "0", nullptr, CATEGORY_GAME, false, nullptr, false);
+    // CUSTOM: benilla-style anti-jitter for mounted name positions
+    g_nameMountSmoothingCVar = CVar::Register("nameMountSmoothing", "Damp the mount's gallop on mounted unit names and nameplates", 0x10, "1", nullptr, CATEGORY_GAME, false, nullptr, false);
     g_minimapZoomCVar = CVar::Register("minimapZoom", "The current outdoor minimap zoom level", 0x20, "3", nullptr, CATEGORY_GAME, false, nullptr, false);
     g_minimapInsideZoomCVar = CVar::Register("minimapInsideZoom", "The current indoor minimap zoom level", 0x20, "3", nullptr, CATEGORY_GAME, false, nullptr, false);
     g_minimapPortalMaxCVar = CVar::Register("minimapPortalMax", "Max Number of Portals to traverse for minimap", 0x20, "99", nullptr, CATEGORY_GAME, false, nullptr, false);
