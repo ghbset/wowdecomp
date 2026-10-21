@@ -78,6 +78,12 @@ class CGxDeviceD3d11 : public CGxDevice {
     bool m_resolveValid;    // m_resolveTexture matches the back buffer: no draw, clear or present since the resolve
     bool m_sceneDepthFresh; // VFOG: m_sceneDepthCopy matches the depth: no depth-writing draw, depth clear or present since
     CGxTex* m_sceneDepthCopy; // VFOG: DeviceCopySceneDepth's GxTex_D24X8 (or R32F) snapshot of m_depthTexture
+    // GBUFFER: the normal target (RT1 beside the back buffer): a render-target CGxTex of the back buffer's size, plus a
+    // multisampled twin resolved into it when the back buffer is MSAA. Not bound once sampled, until the next present.
+    CGxTex* m_normalTex = nullptr;
+    ID3D11Texture2D* m_normalMs = nullptr;
+    ID3D11RenderTargetView* m_normalMsRtv = nullptr;
+    bool m_normalSampled = false;
     ID3D11Buffer* m_constantBuffers[2]; // [0] VS b0, [1] PS b0: app register files (s_shadowConstants)
     // What m_constantBuffers hold. Only the dirty range of s_shadowConstants is copied in, as D3D9 uploads only
     // [dirtyMin, dirtyMax]: registers outside it keep their last value instead of the FLT_MAX the frame clear writes.
@@ -149,6 +155,7 @@ class CGxDeviceD3d11 : public CGxDevice {
     virtual void DeviceResolveDepthBuffer(CGxTex* texture);
     virtual CGxTex* DeviceCopySceneDepth(bool* transient = nullptr);
     virtual bool DeviceSceneDepthIsCopy() { return true; }
+    virtual CGxTex* DeviceNormalBuffer();
     virtual void DeviceCopyTex(CGxTex* source, uint32_t sourcePlane, CGxTex* dest, uint32_t destPlane);
     virtual void DeviceOverride(EGxOverride override, uint32_t value);
     virtual void CapsWindowSize(CRect& rect);
@@ -218,6 +225,8 @@ class CGxDeviceD3d11 : public CGxDevice {
     void ISetCaps(const CGxFormat& format);
     void ISetWindowFocus(int32_t focus);
     void IBindRenderTargets();
+    void IOMSetTargets();   // GBUFFER: m_curRtv (+ the normal target on the back buffer) and m_curDsv
+    ID3D11RenderTargetView* INormalRtv();
     void IShaderConstantsFlush();
     void IShaderForget(CGxShader* shader);
     void IStateReset();
