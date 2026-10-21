@@ -86,6 +86,8 @@ extern CVar* g_guildMemberNotifyCVar;
 extern CVar* g_uiScaleCVar;
 extern CVar* g_useUiScaleCVar;
 extern CVar* g_rotateMinimapCVar;
+extern CVar* g_minimapBlipIntervalCVar; // CUSTOM
+extern CVar* g_nameMountSmoothingCVar; // CUSTOM
 extern CVar* g_cvAutoInteract;
 extern CVar* g_autoStandCVar;
 

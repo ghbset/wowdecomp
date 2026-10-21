@@ -1,5 +1,6 @@
 #include "GossipInfo.h"
 #include <cstdint>
+#include <iterator>
 #include "Engine/Source/FrameScript/FrameScript.h"
 #include "Engine/Source/FrameScript/FrameScript_Object.h"
 #include "Engine/Source/lua-5.1/src/lua.h"
@@ -69,8 +70,10 @@ static int32_t Script_GetGossipText(lua_State* L) {
 static int32_t Script_GetGossipOptions(lua_State* L) {
     int32_t count = 0;
 
-    for (GossipOption* option = CGGossipInfo::m_options; option < reinterpret_cast<GossipOption*>(CGGossipInfo::m_gossipText); option++) {
-        if (option && option->m_index >= 0) {
+    // FORK FIX (Badgermilk0 4397f754): the exe bounds the walk by &m_gossipText (32-bit linker adjacency);
+    // on x64 that ran into unrelated memory. Walk the array by its own length.
+    for (GossipOption* option = CGGossipInfo::m_options; option < CGGossipInfo::m_options + std::size(CGGossipInfo::m_options); option++) {
+        if (option->m_index >= 0) {
             lua_checkstack(L, 2);
             lua_pushstring(L, option->m_text);
             lua_pushstring(L, s_gossipTypes[option->m_type]);

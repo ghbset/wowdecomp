@@ -4,6 +4,7 @@
 #include <new>
 #include <typeinfo>
 #include <cstring>
+#include <unordered_map>
 #include "Engine/Source/Base/CDataStore.h"
 #include "Engine/Source/ConsoleBase/ConsoleVar.h"
 #include "Engine/Source/FrameScript/FrameScript.h"
@@ -8173,14 +8174,74 @@ const CGUnitVirtualItem* CGUnit_C::GetVirtualItem(VIRTUAL_MONSTER_SLOT slot, boo
     return &this->m_virtualItem[slot];
 }
 
+// CUSTOM: mounted name anti-jitter (after benilla nameplates.rs). The name keeps ROCK_KEEP of the seat's
+// oscillation about a slow mean of (seat - model root); kept in a side map so CGUnit_C's layout is unchanged.
+namespace {
+    struct NameRockState {
+        C3Vector mean;
+        float stamp;
+    };
+
+    std::unordered_map<uint64_t, NameRockState> s_nameRock;
+
+    constexpr float ROCK_KEEP = 0.7f;
+    constexpr float ROCK_MEAN_RATE = 1.5f; // 1/s
+    constexpr float ROCK_SNAP = 1.0f;      // yd
+
+    C3Vector SmoothMountedName(uint64_t guid, const C3Vector& root, const C3Vector& seat) {
+        C3Vector off = { seat.x - root.x, seat.y - root.y, seat.z - root.z };
+        float now = CWorld::s_elapsedTimeSec;
+        auto it = s_nameRock.find(guid);
+
+        if (it == s_nameRock.end()) {
+            it = s_nameRock.emplace(guid, NameRockState { off, now }).first;
+        } else if (it->second.stamp != now) {
+            // advance once per frame; the function is called up to 3x per frame
+            C3Vector& mean = it->second.mean;
+            float dx = off.x - mean.x, dy = off.y - mean.y, dz = off.z - mean.z;
+
+            if (dx * dx + dy * dy + dz * dz > ROCK_SNAP * ROCK_SNAP) {
+                mean = off;
+            } else {
+                float blend = 1.0f - std::exp(-ROCK_MEAN_RATE * (now - it->second.stamp));
+                mean.x += dx * blend;
+                mean.y += dy * blend;
+                mean.z += dz * blend;
+            }
+
+            it->second.stamp = now;
+        }
+
+        const C3Vector& mean = it->second.mean;
+        return {
+            root.x + mean.x + (off.x - mean.x) * ROCK_KEEP,
+            root.y + mean.y + (off.y - mean.y) * ROCK_KEEP,
+            root.z + mean.z + (off.z - mean.z) * ROCK_KEEP,
+        };
+    }
+}
+
 // VERIFY: 07176a35 auto
 // OFFSET: 0x0071FEF0
 C3Vector CGUnit_C::GetNamePosition() const {
     if (this->m_worldModel->IsLoaded(0, 0)) {
         if (this->m_mountDisplayId > 0 && !(this->m_clientFlags & 0x10000000) && this->m_worldModel->HasAttachment(29)) {
+            // CUSTOM: nameMountSmoothing
+            if (g_nameMountSmoothingCVar && g_nameMountSmoothingCVar->m_intValue) {
+                C3Vector root = const_cast<CGUnit_C*>(this)->GetModelPosition();
+                return SmoothMountedName(this->m_obj->m_guid.m_guid, root, this->m_worldModel->GetAttachmentPosition(29));
+            }
+
             return this->m_worldModel->GetAttachmentPosition(29);
         }
+    }
 
+    // CUSTOM: not mounted (or smoothing off), drop the damping state so a re-mount starts fresh
+    if (!s_nameRock.empty()) {
+        s_nameRock.erase(this->m_obj->m_guid.m_guid);
+    }
+
+    if (this->m_worldModel->IsLoaded(0, 0)) {
         if (this->m_worldModel->HasAttachment(18)) {
             return this->m_worldModel->GetAttachmentPosition(18);
         }
@@ -10329,6 +10390,10 @@ void CGUnit_C::ClearWeaponTrailHandles() {
 // VERIFY: e7c232db manual
 // OFFSET: [0x00734B50, 0x00737BA0]
 CGUnit_C::~CGUnit_C() {
+    if (this->m_obj) {
+        s_nameRock.erase(this->m_obj->m_guid.m_guid); // CUSTOM: nameMountSmoothing state
+    }
+
     while (this->m_missiles) {
         this->m_missiles->DeleteSelf();
     }

@@ -619,7 +619,9 @@ static int32_t Script_GetGuildBankTabInfo(lua_State* L) {
     }
 
     lua_pushnumber(L, CGGuildInfo::GetNumGuildBankTabItemWithdrawalsByRankID(tab, rank));
-    lua_pushnumber(L, CGGuildBankInfo::m_withdrawMoneyRemaining);
+    // FORK FIX (Badgermilk0 2b4496a1): the exe loads this signed (fild at 0x5A69AE), so 0xFFFFFFFF reaches Lua as -1
+    // ("Unlimited"); pushed unsigned it showed as "-2147483648 Stacks"
+    lua_pushnumber(L, static_cast<int32_t>(CGGuildBankInfo::m_withdrawMoneyRemaining));
     return 6;
 }
 

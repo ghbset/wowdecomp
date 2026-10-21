@@ -5884,7 +5884,11 @@ int32_t CGPlayer_C::GetModDamageDoneNeg(int32_t school) const {
 // OFFSET: 0x00578290
 float CGPlayer_C::GetModDamageDonePct(int32_t school) const {
     if (this->m_obj->m_guid == ClntObjMgrGetActivePlayer()) {
-        return this->m_player->m_playerFieldModDamageDonePct[school];
+        // FORK FIX (1825679767 1c2f79dd): the uint32 field holds float bits; bit-cast, don't convert
+        const uint32_t value = this->m_player->m_playerFieldModDamageDonePct[school];
+        float percent;
+        std::memcpy(&percent, &value, sizeof(percent));
+        return percent;
     }
 
     return 0.0f;
@@ -11482,7 +11486,8 @@ void CGPlayer_C::SaveTabard(int32_t emblemStyle, int32_t emblemColor, int32_t bo
 bool CGPlayer_C::LoadGuildTextures(int32_t displayId) {
     ItemDisplayInfoRec rec;
 
-    if (!this->m_characterComponent || !g_itemDisplayInfoDB.GetRecordByIndex(displayId, &rec) || (this->m_characterComponent->m_flags & 0x40)) {
+    // FORK FIX (1825679767 d33e900b): displayId is an ID; the exe (0x6DB53C -> 0x4CFD90) looks it up by ID, not row index
+    if (!this->m_characterComponent || !g_itemDisplayInfoDB.GetRecord(displayId, &rec) || (this->m_characterComponent->m_flags & 0x40)) {
         return false;
     }
 
