@@ -101,6 +101,7 @@ class Emitter(object):
         self.samplers = {}                         # slot -> '2d' | 'cube'
         self.temps = set()
         self.uses_odepth = False
+        self.uses_oc1 = False
         self.uses_vpos = False       # dcl vPos (our custom.MPQ shaders only) -> gl_FragCoord
         self.outregs = collections.OrderedDict()
         self.uses_a0 = False
@@ -240,8 +241,12 @@ class Emitter(object):
             self.uses_a0 = True
             return 'a0'
         if rt == ir.RT_COLOROUT:
-            if d.index != 0:
+            if d.index > 1:
                 raise Refused('oC%d: multiple render targets' % d.index)
+            if d.index == 1:
+                self.uses_oc1 = True     # gxNormalBuffer (normals.py): the normal target, location 1
+                self.flags.add('normal_out')   # the device writes colour attachment 1 for it
+                return 'oC1'
             return 'oC0'
         if rt == ir.RT_DEPTHOUT:
             self.uses_odepth = True     # -> gl_FragDepth (glslang adds DepthReplacing)
@@ -666,6 +671,8 @@ class Emitter(object):
                 P('layout(location = %d) in %s %s;' % (VARYING_LOCATION[sem], t, sem))
             P('')
             P('layout(location = 0) out vec4 oC0;')
+            if self.uses_oc1:
+                P('layout(location = 1) out vec4 oC1;   // gxNormalBuffer: view-space normal * 0.5 + 0.5, a = 1')
             if self.samplers:
                 P('')
                 P('// Combined image samplers, one binding per D3D sampler slot (set 0).')
@@ -717,6 +724,8 @@ class Emitter(object):
                 P('    vec4 %s = vec4(0.0);' % nm)
         else:
             P('    oC0 = vec4(0.0);')
+            if self.uses_oc1:
+                P('    oC1 = vec4(0.0);')
             if self.uses_vpos:
                 P('    vec4 vPos = vec4(gl_FragCoord.xy - 0.5, 0.0, 0.0);   // D3D9 vPos is the pixel corner')
             if self.uses_odepth:

@@ -11,6 +11,7 @@ people). The run wipes vertex/ and pixel/ first: the tree is always one run's ou
 """
 import argparse
 import collections
+import copy
 import hashlib
 import os
 import shutil
@@ -50,6 +51,7 @@ MANIFEST_HEAD = [
     '#                            pixel (ff): blends mix(p[%d].rgb, rgb, fog0) while p[%d].w > 0' % (FOG_ROW, FOG_ROW),
     '# flag point_size            vertex (vs_2_0): writes gl_PointSize from oPts; draw as a point list',
     '# flag point_sprite          pixel (ff): samples stage 0 at gl_PointCoord, reads no texcoord',
+    '# flag normal_out            pixel: writes oC1 (location 1), the view-space normal (gxNormalBuffer)',
     '# companion <md5>            vertex: the `ff` pixel record to bind when the draw has no pixel shader',
     '# md5 = MD5 of the record\'s `size` bytes after its 16-byte .bls record header: the DX9',
     '# token stream from the version token through the END token, no padding (CGxShader::m_code).',
@@ -139,6 +141,7 @@ def main(argv):
     blocks = []
     index_lines = []
     companions = collections.OrderedDict()    # md5 of the text -> [meta, [names], status, log]
+    aliases = set()
     for md5, rec in selected.items():
         rec.names = names[md5]
         em = Emitter(rec)
@@ -169,6 +172,13 @@ def main(argv):
             if companions[comp_md5][2] == 'failed':
                 comp_md5 = None
         blocks.append(manifest_block(em, rec, '%s/%s.spv' % (rec.kind, md5), comp_md5))
+        alias = getattr(rec, 'alias', None)
+        if alias and alias not in by_md5 and alias not in aliases:
+            # gxNormalBuffer: the same module under the md5 of the normal-injected bytes (D3D9 normal pack).
+            aliases.add(alias)
+            twin = copy.copy(rec)
+            twin.md5, twin.names = alias, []
+            blocks.append(manifest_block(em, twin, '%s/%s.spv' % (rec.kind, md5), comp_md5))
         for n in rec.names:
             if ':' in n:
                 extra = (' '.join('s%d:%s' % kv for kv in sorted(em.samplers.items())) or '-') \

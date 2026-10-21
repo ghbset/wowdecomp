@@ -117,6 +117,7 @@ namespace gxvk::vk::frame::detail
             return false;
         }
         CreateMsImages(h);   // MSAA (gxMultisample): single-sampled when they cannot be had
+        CreateNormalImages(h);   // GBUFFER: none when they cannot be had
         if (!present::Rebuild(h.format, h.extent, s.views, count, s.scene.view) && !s.loggedNoPresent)
         {
             s.loggedNoPresent = true;

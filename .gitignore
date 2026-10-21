@@ -415,3 +415,5 @@ CMakeSettings.json
 # gfxShadowFade terrain shaders: patched from the client's (Tools/CustomMpq/ShaderSrc/terrain_fade.py), not versioned
 Tools/CustomMpq/Shaders/Pixel/ps_3_0/terrain*.bls
 Tools/CustomMpq/Shaders/Pixel/ps_4_0/terrain*.bls
+# gxNormalBuffer's D3D9/D3D11 pack: generated from the client's (Tools/CustomMpq/ShaderSrc/normal_pack.py)
+/Tools/CustomMpq/Normals

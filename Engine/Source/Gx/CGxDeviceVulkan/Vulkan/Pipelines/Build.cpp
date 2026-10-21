@@ -453,8 +453,12 @@ namespace
 
         VkPipelineColorBlendStateCreateInfo blending = {};
         blending.sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-        blending.attachmentCount = 1;
-        blending.pAttachments    = &blend;
+        // GBUFFER: the scene's normal target, written unblended or not at all (independentBlend: the
+        // scene has no normal target without it).
+        VkPipelineColorBlendAttachmentState attachments[2] = { blend, {} };
+        attachments[1].colorWriteMask = k.normal == 2 ? 0xFu : 0u;
+        blending.attachmentCount = k.normal ? 2u : 1u;
+        blending.pAttachments    = attachments;
 
         const VkDynamicState dynamics[5] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_DEPTH_BIAS, VK_DYNAMIC_STATE_BLEND_CONSTANTS,
                                              VK_DYNAMIC_STATE_STENCIL_REFERENCE };

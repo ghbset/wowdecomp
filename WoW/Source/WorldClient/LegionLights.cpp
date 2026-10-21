@@ -38,6 +38,7 @@ CVar* s_mode;
 CVar* s_count;
 CVar* s_dist;
 CVar* s_intensity;
+CVar* s_normalBuffer;
 CGxShader* s_shader;    // ponytail: not destroyed at device shutdown (one shader, the device goes with the process)
 
 float Var(CVar* v, float fallback, float lo, float hi) {
@@ -107,6 +108,7 @@ void Draw(const std::vector<Light>& lights, float maxDist, float intensity) {
     SetPs(0, &common[0][0], 4);
     SetPs(kControlRegister, control, 1);
     Bind(0, depth);
+    BindNormalBuffer();
     device->RsSet(GxRs_PixelShader, s_shader);
     device->DeviceSceneDepthBound(false);   // D3D9: s0 is the INTZ depth-stencil the back buffer uses
     // ponytail: every batch over the whole viewport; scissor each to its lights' screen rect if the cost shows.
@@ -136,10 +138,12 @@ void RegisterCVars() {
     s_mode = reg("lightMode", "Lamps and torches light the world around them: 0 = off, 1 = ground and buildings, 2 = also creatures, characters and grass", "0");
     s_count = reg("maxLightCount", "Most lamps that light the world at once, nearest first, 1..128", "32");
     s_dist = reg("maxLightDist", "Distance in yards out to which lamps light the world (fades out over the last quarter), 20..2048", "200");
+    s_normalBuffer = reg("gxNormalBuffer", "The world's models, buildings and ground also write their smooth normals, which the lamps (lightMode), the mountains' shadow (shadowMask) and SSAO light by: 1 = on (default), 0 = rebuild them from the depth (faceted)", "1");
     s_intensity = reg("lightIntensity", "Brightness of the lamp light on the world, 0..4", "1");
 }
 
 void OnWorld(bool solidDone) {
+    CGxDevice::s_normalBuffer = !s_normalBuffer || s_normalBuffer->m_intValue != 0;
     const int mode = s_mode ? s_mode->m_intValue : 0;
     if (!solidDone) {
         CGxDevice::SetDepthUser(CGxDevice::DepthUser_Lights, false);    // set again by Draw

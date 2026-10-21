@@ -11,6 +11,7 @@
 // c0-c3, c8, c99 as vf_common.hlsli (c8 = the AO target). c10 = (radius yd, fade start yd, 1 / fade length, strength)
 // (apply: c10.x = the read shift), c11 = (stock fog start, 1 / span, on, 0).
 #include "vf_common.hlsli"
+#include "vf_gbuffer.hlsli"
 
 float4 cSsao : register(c10);
 float4 cSsaoFog : register(c11);
@@ -65,6 +66,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
     float3 n = normalize(cross(Nearer(p, ViewAt(pixel + float2(1, 0)), ViewAt(pixel - float2(1, 0))),
                                Nearer(p, ViewAt(pixel + float2(0, 1)), ViewAt(pixel - float2(0, 1)))));
     n *= dot(n, p) > 0 ? -1 : 1;    // toward the camera
+    n = GBufferNormal(pixel, p, n);
     float3 t = normalize(cross(n, abs(n.y) < 0.99 ? float3(0, 1, 0) : float3(1, 0, 0)));
     float3 b = cross(n, t);
 

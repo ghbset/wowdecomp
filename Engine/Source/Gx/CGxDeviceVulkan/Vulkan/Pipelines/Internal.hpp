@@ -141,6 +141,7 @@ namespace gxvk::vk::pipelines::detail
         uint32_t     stencil;         ///< Draw::stencil (0: off)
         uint32_t     stencilMasks;    ///< Draw::stencilMasks without the reference (dynamic state), 0 when off
         uint32_t     alphaToCoverage; ///< 0 / 1 (gxAlphaToCoverage, MSAA passes only)
+        uint32_t     normal;          ///< GBUFFER: 0 one colour attachment, 1 a masked normal attachment, 2 a written one
     };
 
     struct Entry

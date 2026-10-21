@@ -157,6 +157,8 @@ CGxShader* Shader(CGxShader*& slot, const char* name);         // the pixel shad
 void DropInvalidShaders(CGxShader** slots, size_t count);       // device restored: a failed create is retried
 void DestroyTex(CGxTex*& tex);
 void Bind(int stage, CGxTex* tex);
+// gxNormalBuffer: the device's normal target on s4 with c9.x = 1, or c9.x = 0 (vf_gbuffer.hlsli rebuilds from depth).
+void BindNormalBuffer();
 // One quad through the fixed-function VS over the Gx viewport [minX..maxX, minY..maxY] of a width x height target,
 // TEXCOORD0 = uv across it with (i + 0.5) / size at pixel centres on every backend.
 void DrawQuad(uint32_t width, uint32_t height, float minX = 0.0f, float maxX = 1.0f, float minY = 0.0f, float maxY = 1.0f);

@@ -1135,6 +1135,8 @@ void CGxDeviceD3d11::IReleaseBackBuffer() {
     }
     SafeRelease(this->m_resolveTexture);
     SafeRelease(this->m_backBufferSrv);
+    SafeRelease(this->m_normalMsRtv);
+    SafeRelease(this->m_normalMs);
 }
 
 // Colour = texture target or back buffer. Depth = depth target, else the back buffer's depth, or for a colour
@@ -1235,7 +1237,114 @@ void CGxDeviceD3d11::IBindRenderTargets() {
         this->m_curRtvSamples = rd.SampleDesc.Count;
     }
 
-    this->m_d3dContext->OMSetRenderTargets(rtv ? 1 : 0, rtv ? &rtv : nullptr, dsv);
+    this->IOMSetTargets();
+}
+
+// GBUFFER: the back buffer gets the normal target as RT1 (written only by oC1 pixel shaders, IStateSync's blend mask).
+void CGxDeviceD3d11::IOMSetTargets() {
+    ID3D11RenderTargetView* rtvs[2] = { this->m_curRtv, nullptr };
+    UINT count = this->m_curRtv ? 1 : 0;
+
+    if (count && this->m_curRtv == this->m_backBufferRtv && CGxDevice::s_normalBuffer && !this->m_normalSampled && (rtvs[1] = this->INormalRtv())) {
+        count = 2;
+    }
+
+    this->m_d3dContext->OMSetRenderTargets(count, count ? rtvs : nullptr, this->m_curDsv);
+}
+
+// GBUFFER: the normal target's RTV, made on first use at the back buffer's size and sample count (cleared to 0).
+ID3D11RenderTargetView* CGxDeviceD3d11::INormalRtv() {
+    if (!this->m_backBuffer) {
+        return nullptr;
+    }
+
+    D3D11_TEXTURE2D_DESC bb;
+    this->m_backBuffer->GetDesc(&bb);
+
+    if (this->m_normalTex && (this->m_normalTex->m_width != bb.Width || this->m_normalTex->m_height != bb.Height)) {
+        this->TexDestroy(this->m_normalTex);
+        this->m_normalTex = nullptr;
+        SafeRelease(this->m_normalMsRtv);
+        SafeRelease(this->m_normalMs);
+    }
+
+    if (!this->m_normalTex) {
+        CGxTexFlags flags(GxTex_Nearest);
+        flags.m_renderTarget = 1;
+        this->TexCreate(GxTex_2d, bb.Width, bb.Height, 0, GxTex_Argb8888, GxTex_Argb8888, flags, nullptr, nullptr, "GxNormalBuffer", this->m_normalTex);
+
+        if (!this->m_normalTex) {
+            return nullptr;
+        }
+    }
+
+    bool fresh = false;
+
+    if (this->m_normalTex->m_needsCreation || !this->m_normalTex->m_apiSpecificData) {
+        this->ITexCreate(this->m_normalTex);
+        SafeRelease(this->m_normalMsRtv);
+        SafeRelease(this->m_normalMs);
+        fresh = true;
+    }
+
+    TexApi* api = static_cast<TexApi*>(this->m_normalTex->m_apiSpecificData);
+
+    if (!api || !api->m_texture || !api->m_rtv[0]) {
+        return nullptr;
+    }
+
+    if (bb.SampleDesc.Count <= 1) {
+        if (fresh) {
+            const float zero[4] = {};
+            this->m_d3dContext->ClearRenderTargetView(api->m_rtv[0], zero);
+        }
+
+        return api->m_rtv[0];
+    }
+
+    if (!this->m_normalMsRtv) {
+        D3D11_TEXTURE2D_DESC desc;
+        api->m_texture->GetDesc(&desc);
+        desc.MipLevels = 1;
+        desc.SampleDesc = bb.SampleDesc;
+        desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+        desc.MiscFlags = 0;
+
+        if (FAILED(this->m_d3dDevice->CreateTexture2D(&desc, nullptr, &this->m_normalMs))
+            || FAILED(this->m_d3dDevice->CreateRenderTargetView(this->m_normalMs, nullptr, &this->m_normalMsRtv))) {
+            SafeRelease(this->m_normalMs);
+            this->m_normalMsRtv = nullptr;
+            return nullptr;
+        }
+
+        const float zero[4] = {};
+        this->m_d3dContext->ClearRenderTargetView(this->m_normalMsRtv, zero);
+    }
+
+    return this->m_normalMsRtv;
+}
+
+// GBUFFER: CGxDevice.h contract. RT1 is unbound until the next present (it is sampled now); MSAA resolves into the CGxTex.
+CGxTex* CGxDeviceD3d11::DeviceNormalBuffer() {
+    if (!this->m_context || !CGxDevice::s_normalBuffer || !this->m_normalTex || !this->m_normalTex->m_apiSpecificData) {
+        return nullptr;
+    }
+
+    TexApi* api = static_cast<TexApi*>(this->m_normalTex->m_apiSpecificData);
+
+    if (!this->m_normalSampled) {
+        // ponytail: opaque draws after the first lighting pass of a frame write no normal; per-pass rebinding if one ever does.
+        this->m_normalSampled = true;
+        this->IOMSetTargets();
+
+        if (this->m_normalMs) {
+            D3D11_TEXTURE2D_DESC desc;
+            api->m_texture->GetDesc(&desc);
+            this->m_d3dContext->ResolveSubresource(api->m_texture, 0, this->m_normalMs, 0, desc.Format);
+        }
+    }
+
+    return this->m_normalTex;
 }
 
 void CGxDeviceD3d11::DeviceSetRenderTarget(EGxBuffer buffer, CGxTex* texture, uint32_t plane) {
@@ -1294,7 +1403,7 @@ void CGxDeviceD3d11::DeviceRestoreDepthSurface() {
     }
 
     this->m_curDsv = this->m_savedDsv;
-    this->m_d3dContext->OMSetRenderTargets(this->m_curRtv ? 1 : 0, this->m_curRtv ? &this->m_curRtv : nullptr, this->m_curDsv);
+    this->IOMSetTargets();
 }
 
 void CGxDeviceD3d11::DeviceResolveDepthBuffer(CGxTex* texture) {
@@ -1310,7 +1419,7 @@ void CGxDeviceD3d11::DeviceResolveDepthBuffer(CGxTex* texture) {
 
     if (api && api->m_dsv) {
         this->m_curDsv = api->m_dsv;
-        this->m_d3dContext->OMSetRenderTargets(this->m_curRtv ? 1 : 0, this->m_curRtv ? &this->m_curRtv : nullptr, this->m_curDsv);
+        this->IOMSetTargets();
     }
 }
 
@@ -1544,6 +1653,28 @@ void CGxDeviceD3d11::ScenePresent() {
             } else {
                 this->m_context = 0;
             }
+        }
+
+        // GBUFFER: the next frame starts with a zeroed normal target bound as RT1 again (and not as a texture).
+        if (this->m_context && this->m_normalTex) {
+            const float zero[4] = {};
+            ID3D11RenderTargetView* rtv = this->INormalRtv();
+            TexApi* api = this->m_normalTex ? static_cast<TexApi*>(this->m_normalTex->m_apiSpecificData) : nullptr;
+
+            if (rtv) {
+                this->m_d3dContext->ClearRenderTargetView(rtv, zero);
+            }
+
+            for (uint32_t i = 0; api && i < 16; i++) {
+                if (this->m_curSrv[i] && this->m_curSrv[i] == api->m_srv) {
+                    ID3D11ShaderResourceView* none = nullptr;
+                    this->m_d3dContext->PSSetShaderResources(i, 1, &none);
+                    this->m_curSrv[i] = nullptr;
+                }
+            }
+
+            this->m_normalSampled = false;
+            this->IOMSetTargets();
         }
     }
 
@@ -2044,6 +2175,31 @@ static uint64_t DxbcInputSignatureHash(const void* code, uint32_t size) {
     return isgn ? Fnv64(isgn, chunkSize) : Fnv64(code, size);
 }
 
+// GBUFFER: the pixel shader's output signature (OSGN) has SV_Target1 (normals.py's oC1, sm3hlsl.py).
+static bool DxbcWritesTarget1(const void* code, uint32_t size) {
+    uint32_t chunkSize;
+    const uint8_t* osgn = DxbcChunk(code, size, "OSGN", chunkSize);
+
+    if (!osgn || chunkSize < 8) {
+        return false;
+    }
+
+    uint32_t count;
+    memcpy(&count, osgn, 4);
+
+    for (uint32_t i = 0; i < count && 8 + (i + 1) * 24 <= chunkSize; i++) {
+        uint32_t element[6];
+        memcpy(element, osgn + 8 + i * 24, sizeof(element));
+
+        // name offset, semantic index, system value, component type, register, mask
+        if (element[4] == 1 && element[0] + 9 <= chunkSize && !memcmp(osgn + element[0], "SV_Target", 9)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 // Bytes of b0 the shader declares (dcl_constantbuffer cb0[n] in SHDR/SHEX; shader-xlate's cbuffers()), so
 // IShaderConstantsFlush maps no more than it reads. Not found: all 4 KB.
 static uint32_t DxbcCb0Bytes(const void* code, uint32_t size) {
@@ -2148,6 +2304,10 @@ void CGxDeviceD3d11::IStateReset() {
     rt.DestBlendAlpha = D3D11_BLEND_ZERO;
     rt.BlendOpAlpha = D3D11_BLEND_OP_ADD;
     rt.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    // GBUFFER: RT1 (the normal target) never blends; its mask is set per draw in IStateSync.
+    this->m_blendDesc.IndependentBlendEnable = TRUE;
+    this->m_blendDesc.RenderTarget[1] = rt;
+    this->m_blendDesc.RenderTarget[1].RenderTargetWriteMask = 0;
 
     memset(&this->m_dsDesc, 0, sizeof(this->m_dsDesc));
     this->m_dsDesc.DepthEnable = TRUE;
@@ -3057,6 +3217,16 @@ void CGxDeviceD3d11::IStateSync() {
         this->m_stateDirty |= Dirty_Blend;
     }
 
+    // GBUFFER: RT1 written by an oC1 pixel shader with an opaque / alpha-key blend only (particles, glass keep the normal under them).
+    const CGxShader* psh = static_cast<const CGxShader*>(this->m_appRenderStates[GxRs_PixelShader].m_value.m_data.p);
+    const UINT8 normalMask = psh && psh->m_writesNormal && this->m_blendDesc.RenderTarget[0].RenderTargetWriteMask
+        && static_cast<uint32_t>(this->m_appRenderStates[GxRs_BlendingMode].m_value.m_data.i[0]) <= GxBlend_AlphaKey ? 0xF : 0;
+
+    if (this->m_blendDesc.RenderTarget[1].RenderTargetWriteMask != normalMask) {
+        this->m_blendDesc.RenderTarget[1].RenderTargetWriteMask = normalMask;
+        this->m_stateDirty |= Dirty_Blend;
+    }
+
     if (this->m_stateDirty & Dirty_Blend) {
         this->m_d3dContext->OMSetBlendState(static_cast<ID3D11BlendState*>(this->IStateGet(State_Blend, &this->m_blendDesc, sizeof(this->m_blendDesc))), this->m_blendFactor, 0xFFFFFFFF);
     }
@@ -3411,6 +3581,7 @@ void CGxDeviceD3d11::IShaderCreate(CGxShader* shader) {
         hr = this->m_d3dDevice->CreateVertexShader(code, size, nullptr, reinterpret_cast<ID3D11VertexShader**>(&shader->m_apiSpecific));
     } else if (shader->m_target == GxSh_Pixel) {
         hr = this->m_d3dDevice->CreatePixelShader(code, size, nullptr, reinterpret_cast<ID3D11PixelShader**>(&shader->m_apiSpecific));
+        shader->m_writesNormal = DxbcWritesTarget1(code, size);   // GBUFFER
     }
 
     if (FAILED(hr)) {

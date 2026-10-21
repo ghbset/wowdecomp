@@ -437,6 +437,13 @@ void Bind(int stage, CGxTex* tex) {
     g_theGxDevicePtr->RsSet(static_cast<EGxRenderState>(GxRs_Texture0 + stage), tex);
 }
 
+void BindNormalBuffer() {
+    CGxTex* normals = g_theGxDevicePtr->DeviceNormalBuffer();
+    const float on[4] = { normals ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f };
+    SetPs(9, on, 1);
+    Bind(4, normals);
+}
+
 // One quad over the Gx viewport [minX..maxX, minY..maxY] (normalised; default the whole target) of width x height
 // pixels, through the fixed-function VS. TEXCOORD0 = uv across that viewport, (x + 0.5) / width with v = 0 on the
 // top row, at every pixel centre on every backend: D3D9 rasterises at integer pixel coordinates, so its uvs carry
@@ -1464,6 +1471,7 @@ bool RenderShadowMask(const FrameInputs& in, float softYards, bool stockFogInCol
     Bind(kShadowStage + 2, land);
     Bind(kShadowStage + 3, band0);
     Bind(kShadowStage + 4, unit);
+    BindNormalBuffer();
     device->RsSet(GxRs_PixelShader, s_shaders.shadowMask);
     device->DeviceSceneDepthBound(false);   // D3D9: s0 is the INTZ depth-stencil the back buffer uses
     DrawQuad(static_cast<uint32_t>(vp.w), static_cast<uint32_t>(vp.h), vp.minX, vp.maxX, vp.minY, vp.maxY);
@@ -1540,6 +1548,7 @@ bool RenderSsao(const FrameInputs& in, int mode, int blur, float distance, float
     SetPs(kSsaoRegister, &ssao[0][0], 2);
     device->DeviceSceneDepthBound(false);   // D3D9: s0 is the INTZ depth-stencil the back buffer uses
     Bind(0, depth);
+    BindNormalBuffer();     // gxNormalBuffer (the AO pass only; stage 4 is unbound by EndPasses)
     DrawToTarget(ao[0], s_shaders.ssao[0]);
     if (blur) {
         Bind(1, ao[0]);

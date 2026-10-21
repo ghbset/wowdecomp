@@ -136,6 +136,47 @@ namespace gxvk::vk::frame::detail
      * for (or what holds nothing yet: a colour image not in its resting layout, a depth buffer no
      * pass has written) and loads the rest.
      */
+    /// GBUFFER: the normal target(s) zeroed (a = 0: "no normal here") ahead of the frame's first scene
+    /// pass, and left in the attachment layout the scene's passes LOAD from.
+    static void ClearNormal(bool msaa)
+    {
+        const VkCommandBuffer cmd = s.slots[s.fi].cmd;
+        VkImageSubresourceRange range = {};
+        range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        range.levelCount = 1;
+        range.layerCount = 1;
+        const VkImage images[2] = { s.normal.image, s.msNormal.image };
+        const uint32_t count = msaa ? 2u : 1u;
+        VkImageMemoryBarrier b[2] = {};
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            b[i].sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            b[i].srcAccessMask       = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+            b[i].dstAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
+            b[i].oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED;
+            b[i].newLayout           = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            b[i].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b[i].image               = images[i];
+            b[i].subresourceRange    = range;
+        }
+        s.dapi->CmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                   0, 0, nullptr, 0, nullptr, count, b);
+        const VkClearColorValue zero = {};
+        for (uint32_t i = 0; i < count; ++i)
+            s.dapi->CmdClearColorImage(cmd, images[i], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &zero, 1, &range);
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            b[i].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            b[i].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            b[i].oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            b[i].newLayout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        }
+        s.dapi->CmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                   0, 0, nullptr, 0, nullptr, count, b);
+        s.normalCleared = true;
+    }
+
     bool BeginPass()
     {
         if (s.passOpen) return true;
@@ -151,8 +192,10 @@ namespace gxvk::vk::frame::detail
         const uint32_t fbi = FramebufferFor(s.target, format, extent);
         if (fbi == UINT32_MAX) return false;
         const bool     msaa   = !s.target.image && s.sceneSamples > 1;
-        const PassSet* passes = PassesFor(format, msaa ? s.sceneSamples : 1u);
+        const bool     normal = PassNormal(s.target);
+        const PassSet* passes = PassesFor(format, msaa ? s.sceneSamples : 1u, normal);
         if (!passes) return false;
+        if (normal && !s.normalCleared) ClearNormal(msaa);
         Framebuffer& fb    = s.fbs[fbi];
         DepthBuffer& depth = s.depths[fb.depth];
         // MSAA: the multisampled pair is what the pass loads; the single-sample depth is only its resolve.
@@ -237,6 +280,7 @@ namespace gxvk::vk::frame::detail
         // RENDERTHREAD: a presented frame goes to the render thread (acquire, present pass, submit,
         // present); the main thread moves on to the other slot. Everything else -- a flush, a
         // read-back, the release -- is submitted here, behind whatever the thread still holds.
+        if (present) s.normalCleared = false;   // GBUFFER: the next frame's first scene pass zeroes it
         if (present && !s.acquired && RtHandOff(s.fi, s.serial, s.rtPresent))
         {
             s.submitted = s.serial;
@@ -420,9 +464,11 @@ namespace gxvk::vk::frame
         }
         else if (!TargetView(s.target, image, format, extent))
             return VK_NULL_HANDLE;
-        const PassSet* passes = PassesFor(format, PassSamples());
+        const PassSet* passes = PassesFor(format, PassSamples(), PassNormal(s.target));
         return passes ? passes->pass[0] : VK_NULL_HANDLE;
     }
+
+    bool PassHasNormal() { return PassNormal(s.target); }
 
     uint32_t PassGeneration() { return s.passGen; }
 
