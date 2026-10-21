@@ -11486,7 +11486,8 @@ void CGPlayer_C::SaveTabard(int32_t emblemStyle, int32_t emblemColor, int32_t bo
 bool CGPlayer_C::LoadGuildTextures(int32_t displayId) {
     ItemDisplayInfoRec rec;
 
-    if (!this->m_characterComponent || !g_itemDisplayInfoDB.GetRecordByIndex(displayId, &rec) || (this->m_characterComponent->m_flags & 0x40)) {
+    // FORK FIX (1825679767 d33e900b): displayId is an ID; the exe (0x6DB53C -> 0x4CFD90) looks it up by ID, not row index
+    if (!this->m_characterComponent || !g_itemDisplayInfoDB.GetRecord(displayId, &rec) || (this->m_characterComponent->m_flags & 0x40)) {
         return false;
     }
 
