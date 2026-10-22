@@ -81,6 +81,7 @@ namespace gxvk::vk::manifest
         bool     pointSize;        ///< `flag point_size`: the vertex module writes gl_PointSize; the draw is a point list
         bool     pointSprite;      ///< `flag point_sprite`: the ff module samples stage 0 at gl_PointCoord
         bool     normalOut;        ///< `flag normal_out`: the pixel module writes oC1, the view-space normal (GBUFFER)
+        bool     litSurface;       ///< `flag lit_surface`: the vertex module writes the lighting surface (GxLighting.h)
         uint16_t firstName;        ///< index of its first name entry, or 0xFFFF
         uint16_t companion;        ///< vertex: index of its `ff` companion record, or kNoRecord
         char     companionMd5[33]; ///< vertex: the `companion` line's md5 as written, "" when none

@@ -1,6 +1,7 @@
 // The uniform ring: the per-frame-slot buffers the translated interface's constant slices are
 // written into, one set-1 descriptor per chunk, a dynamic offset per draw.
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Pipelines/Internal.hpp"
+#include "Engine/Source/Gx/GxLighting.h"
 
 #include <cstring>
 
@@ -8,12 +9,30 @@ namespace
 {
     using namespace gxvk::vk::pipelines::detail;
 
+    /// LIGHTING: the distance between two copies of g_gxLightingGpu in a slot's buffer.
+    uint32_t LightStride()
+    {
+        return (static_cast<uint32_t>(sizeof(GxLightingGpu)) + s.regsAlign - 1) / s.regsAlign * s.regsAlign;
+    }
+
     /// A chunk of the ring: a mapped uniform buffer and its set-1 descriptor over the whole buffer
     /// with the larger slice class as the range; the per-draw dynamic offset selects the slice.
     bool CreateChunk(SlotSets& ss)
     {
         if (ss.regsCount >= kMaxRegsChunks) return false;
         const loader::Device& d = *s.dapi;
+        // LIGHTING: the slot's GxLighting copies, made with its first chunk (every chunk's set points at them).
+        if (ss.light.handle == VK_NULL_HANDLE
+            && (!memory::CreateBuffer(kLightCopies * LightStride(), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, memory::Where::Stream, ss.light) || !ss.light.block.mapped))
+        {
+            memory::DestroyBuffer(ss.light);
+            if (!s.warnedRegs)
+            {
+                s.warnedRegs = true;
+                Write(Error, "vulkan: pipelines: no host-visible GxLighting buffer; draws of the translated shaders are skipped (logged once)");
+            }
+            return false;
+        }
         memory::Buffer& b = ss.regs[ss.regsCount];
         if (!memory::CreateBuffer(kRegsChunkBytes, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, memory::Where::Stream, b) || !b.block.mapped)
         {
@@ -45,17 +64,22 @@ namespace
             }
             return false;
         }
-        VkDescriptorBufferInfo info = {};
-        info.buffer = b.handle;
-        info.offset = 0;
-        info.range  = kSliceBytesMax;
+        // Binding 0 the chunk, binding 1 the slot's GxLighting copies: one write of two descriptors runs on
+        // into the next binding (same type and stages).
+        VkDescriptorBufferInfo info[2] = {};
+        info[0].buffer = b.handle;
+        info[0].offset = 0;
+        info[0].range  = kSliceBytesMax;
+        info[1].buffer = ss.light.handle;
+        info[1].offset = 0;
+        info[1].range  = sizeof(GxLightingGpu);
         VkWriteDescriptorSet write = {};
         write.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         write.dstSet          = set;
         write.dstBinding      = 0;
-        write.descriptorCount = 1;
+        write.descriptorCount = 2;
         write.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
-        write.pBufferInfo     = &info;
+        write.pBufferInfo     = info;
         d.UpdateDescriptorSets(s.device, 1, &write, 0, nullptr);
 
         ss.regsSet[ss.regsCount] = set;
@@ -77,9 +101,10 @@ namespace gxvk::vk::pipelines::detail
      *
      * @param VkDescriptorSet& set : receives the chunk's set-1 descriptor
      * @param uint32& offset : receives the dynamic offset of the slice
+     * @param uint32& lightOffset : receives the dynamic offset of the GxLighting copy (binding 1)
      * @return bool ok : false when the ring is exhausted or could not be made (counted)
      */
-    bool RegsSlice(uint32_t slot, uint64_t serial, const Draw& draw, VkDescriptorSet& set, uint32_t& offset)
+    bool RegsSlice(uint32_t slot, uint64_t serial, const Draw& draw, VkDescriptorSet& set, uint32_t& offset, uint32_t& lightOffset)
     {
         if (slot >= frame::kFramesInFlight || !draw.vertexRegs || !draw.pixelRegs) return false;
         SlotSets& ss = s.slots[slot];
@@ -96,7 +121,26 @@ namespace gxvk::vk::pipelines::detail
             ss.lastSliceBytes = 0;
             ss.lastSliceSet   = VK_NULL_HANDLE;
             ss.lastVertexGen  = 0;
+            ss.lightUsed      = 0;
         }
+
+        // LIGHTING: g_gxLightingGpu as it is now, a new copy whenever its serial changed (and on the frame's
+        // first draw): the draws recorded before keep theirs.
+        if (ss.regsCount == 0 && !CreateChunk(ss))
+        {
+            ++s.stats.regsFull;
+            return false;
+        }
+        if (ss.lightUsed == 0 || ss.lightSerial != g_gxLightingGpuSerial)
+        {
+            // ponytail: past kLightCopies changes in one frame the last copy is rewritten under the draws that read it
+            const uint32_t copy = ss.lightUsed < kLightCopies ? ss.lightUsed++ : kLightCopies - 1;
+            ss.lightOffset = copy * LightStride();
+            std::memcpy(static_cast<uint8_t*>(ss.light.block.mapped) + ss.lightOffset, &g_gxLightingGpu, sizeof(GxLightingGpu));
+            memory::FlushHost(ss.light.block);
+            ss.lightSerial = g_gxLightingGpuSerial;
+        }
+        lightOffset = ss.lightOffset;
 
         // The slice's pieces, compared in place against the last one written (no copy when it is
         // reused, the common case); a new slice is assembled once, in lastSlice, and copied out.
@@ -172,5 +216,7 @@ namespace gxvk::vk::pipelines::detail
         ss.regsCount  = 0;
         ss.regsUsed   = 0;
         ss.regsCursor = 0;
+        memory::DestroyBuffer(ss.light);
+        ss.lightUsed  = 0;
     }
 }

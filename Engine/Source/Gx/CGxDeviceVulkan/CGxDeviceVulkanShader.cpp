@@ -200,6 +200,7 @@ void CGxDeviceVulkan::IShaderCreate(CGxShader* shader) {
 
     shader->m_apiSpecific = program;
     shader->m_writesNormal = program && program->record && program->record->normalOut;   // GBUFFER
+    shader->m_litSurface = program && program->record && program->record->litSurface;   // LIGHTING
 
     if (program) {
         shader->m_valid = 1;

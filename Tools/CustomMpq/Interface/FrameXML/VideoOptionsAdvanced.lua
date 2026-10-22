@@ -243,6 +243,22 @@ table.insert(PAGES, #PAGES, { name = "FSR", parent = "Advanced", title = "FSR Up
 	{ "fsrMode", "check", "FSR 4 upscaling", "Draws the world at a lower resolution and upscales it with AMD FSR 4. Vulkan only.", on = "fsr4", off = "off", restart = true },
 	{ "fsrScale", "slider", "Render scale", "Resolution the world is drawn at before FSR 4 upscales it. 100% turns upscaling off. Vulkan only.", 0.5, 1, 0.01, pct = true },
 })
+-- Shader lighting (WorldLighting.cpp, the lit shader pack): shaderLighting gates every light* feature.
+table.insert(PAGES, #PAGES, { name = "ShaderLighting", parent = "Advanced", title = "Shader Lighting",
+	{ "shaderLighting", "check", "Shader lighting", "Turns on the lighting below. Off, the world is lit the stock way whatever the settings below say. D3D11/Vulkan only." },
+	{ "lightPerPixel", "check", "Per-pixel lighting", "Models, buildings and terrain are lit per pixel instead of per vertex. D3D11/Vulkan only." },
+	{ "lightDynamic", "check", "Dynamic lights", "Torches, braziers, lanterns and the lamps inside buildings light the surfaces around them. D3D11/Vulkan only." },
+	{ "lightDynamicIntensity", "slider", "Dynamic light intensity", "Overall strength of the dynamic lights. D3D11/Vulkan only.", 0, 8, 0.1 },
+	{ "lightDynamicM2", "slider", "Torch and brazier lights", "Strength of the lights carried by models. D3D11/Vulkan only.", 0, 8, 0.1 },
+	{ "lightDynamicWmo", "slider", "Building lights", "Strength of the lamps placed in buildings. D3D11/Vulkan only.", 0, 8, 0.1 },
+	{ "lightDynamicDistance", "slider", "Dynamic light distance (yards)", "How far from the camera dynamic lights are looked for. D3D11/Vulkan only.", 20, 500, 10 },
+	{ "lightFlicker", "slider", "Flame flicker", "How much warm flame lights waver. 0 keeps them steady. D3D11/Vulkan only.", 0, 1, 0.05 },
+	{ "lightWrap", "slider", "Light wrap", "How far dynamic light reaches round the edge of a surface. D3D11/Vulkan only.", 0, 1, 0.05 },
+	{ "lightSpecular", "check", "Specular highlights", "Shiny buildings and models catch highlights from the sun and dynamic lights. D3D11/Vulkan only." },
+	{ "lightSpecularM2", "slider", "Model highlights", "Strength of the highlights on shiny models. D3D11/Vulkan only.", 0, 4, 0.05 },
+	{ "lightSpecularWmo", "slider", "Building highlights", "Strength of the highlights on shiny buildings. D3D11/Vulkan only.", 0, 4, 0.05 },
+	{ "lightSkyAmbient", "slider", "Sky ambient", "Shadowed sides take the sky's colour from above and the ground's from below. 0 turns it off. D3D11/Vulkan only.", 0, 1, 0.05 },
+})
 -- Sky and clouds (SkyClouds.cpp, DayNight.cpp).
 table.insert(PAGES, #PAGES, { name = "Sky", parent = "Advanced", title = "Sky & Clouds",
 	{ "skyClouds", "check", "Volumetric clouds", "Clouds with depth replace the flat stock cloud layer; with the sun crossing the sky it also uses the modern sky colours. All renderers." },

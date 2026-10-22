@@ -23,6 +23,8 @@ class CGxShader : public TSHashObject<CGxShader, HASHKEY_STRI> {
     /* 0048 */ TSGrowableArray<uint8_t> m_code;
     // GBUFFER (not 12340): this pixel shader writes oC1, the view-space normal (Tools/VulkanShaders/bls/normals.py).
     bool m_writesNormal = false;
+    // LIGHTING (not 12340): this vertex shader hands its view-space surface to a lit pixel shader (GxLighting.h)
+    bool m_litSurface = false;
 
     virtual void Load(SFileImpl* file);
 

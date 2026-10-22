@@ -229,6 +229,7 @@ namespace
             else if (std::strcmp(t[1], "point_size") == 0)   r.pointSize = true;
             else if (std::strcmp(t[1], "point_sprite") == 0) r.pointSprite = true;
             else if (std::strcmp(t[1], "normal_out") == 0)   r.normalOut = true;
+            else if (std::strcmp(t[1], "lit_surface") == 0)  r.litSurface = true;
             else return false;
             return true;
         }

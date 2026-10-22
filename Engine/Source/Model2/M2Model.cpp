@@ -5648,6 +5648,22 @@ void CM2Model::AnimateMT(const C44Matrix* view, const C3Vector& diffuse, const C
             light->m_light.m_dirColor.y = light->m_diffuseColorTrack.m_currentValue.y * intensity;
             light->m_light.m_dirColor.z = intensity * light->m_diffuseColorTrack.m_currentValue.z;
         }
+
+        // LIGHTING (Badgermilk0 port, not 12340): the attenuation tracks, which the stock client never reads, are the
+        // radius of the light's dynamic (per-pixel) version (WoW/Source/Ui/WorldLighting.cpp)
+        count = lightData->m_attenuationStart.m_sequenceTimes.m_count;
+
+        if (count > 1 || (count == 1 && lightData->m_attenuationStart.m_sequenceTimes[0].m_count > this->m_uint90)) {
+            float zero = 0.0f;
+            M2AnimateTrack<float, float>(this, &this->m_bones[lightData->m_bone], lightData->m_attenuationStart, light->m_attenuationStartTrack, zero);
+        }
+
+        count = lightData->m_attenuationEnd.m_sequenceTimes.m_count;
+
+        if (count > 1 || (count == 1 && lightData->m_attenuationEnd.m_sequenceTimes[0].m_count > this->m_uint90)) {
+            float zero = 0.0f;
+            M2AnimateTrack<float, float>(this, &this->m_bones[lightData->m_bone], lightData->m_attenuationEnd, light->m_attenuationEndTrack, zero);
+        }
     }
 
     for (uint32_t i = 0; i < data->m_cameras.m_count; i++) {

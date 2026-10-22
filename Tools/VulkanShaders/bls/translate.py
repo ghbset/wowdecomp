@@ -52,6 +52,8 @@ MANIFEST_HEAD = [
     '# flag point_size            vertex (vs_2_0): writes gl_PointSize from oPts; draw as a point list',
     '# flag point_sprite          pixel (ff): samples stage 0 at gl_PointCoord, reads no texcoord',
     '# flag normal_out            pixel: writes oC1 (location 1), the view-space normal (gxNormalBuffer)',
+    '# flag lit_surface           vertex: writes the lighting surface gxN/gxP/gxM/gxF (locations 11..14); the',
+    '#                            device sets misc.y = 1 for its draws (bls/lighting.py, GxLighting.h)',
     '# companion <md5>            vertex: the `ff` pixel record to bind when the draw has no pixel shader',
     '# md5 = MD5 of the record\'s `size` bytes after its 16-byte .bls record header: the DX9',
     '# token stream from the version token through the END token, no padding (CGxShader::m_code).',
@@ -59,6 +61,7 @@ MANIFEST_HEAD = [
     '# Uniform block (set 1, binding 0, std140): { vec4 p[16]; vec4 misc; vec4 v[VCONST]; }',
     '# p[i] at byte 16*i, misc at 256, v[i] at 272 + 16*i; slice = 272 + 16*VCONST bytes.',
     '# Pixel modules declare v[64]; the vertex module\'s vconst sizes the pair\'s slice.',
+    '# Lit modules also declare set 1 binding 1, the GxLighting block (GxLightingGpu, std140).',
     '# A pixel record with pconst > 16 declares { p[16]; misc; v[256]; px[pconst - 16]; }: pixel',
     '# c16.. at byte 4368 + 16*(i - 16), after the full vertex window, so v[] never moves.',
     '# p[%d] = (fogColor.rgb / 255, fogOn ? 1 : 0), written by the device on every draw: no' % FOG_ROW,
@@ -160,7 +163,7 @@ def main(argv):
         # The fixed-function pixel stage a flagged vs_2_0 record is drawn with (no pixel shader
         # exists for it): generated, compiled and folded by the md5 of its own text.
         comp_md5 = None
-        if rec.kind == 'vertex' and em.flags:
+        if rec.kind == 'vertex' and em.flags & {'fixed_fog', 'point_size'}:
             ctext, meta = companion_module(em, rec)
             comp_md5 = hashlib.md5(ctext.encode('utf-8')).hexdigest()
             if comp_md5 not in companions:

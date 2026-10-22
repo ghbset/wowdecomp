@@ -2259,8 +2259,9 @@ static uint64_t DxbcInputSignatureHash(const void* code, uint32_t size) {
     return isgn ? Fnv64(isgn, chunkSize) : Fnv64(code, size);
 }
 
-// GBUFFER: the pixel shader's output signature (OSGN) has SV_Target1 (normals.py's oC1, sm3hlsl.py).
-static bool DxbcWritesTarget1(const void* code, uint32_t size) {
+// The shader's output signature (OSGN) has semantic name + index: SV_Target1 (GBUFFER, normals.py's oC1), TEXCOORD13
+// (LIGHTING: a lit family's gxF, sm3hlsl.py).
+static bool DxbcWritesOutput(const void* code, uint32_t size, const char* name, uint32_t index) {
     uint32_t chunkSize;
     const uint8_t* osgn = DxbcChunk(code, size, "OSGN", chunkSize);
 
@@ -2276,7 +2277,9 @@ static bool DxbcWritesTarget1(const void* code, uint32_t size) {
         memcpy(element, osgn + 8 + i * 24, sizeof(element));
 
         // name offset, semantic index, system value, component type, register, mask
-        if (element[4] == 1 && element[0] + 9 <= chunkSize && !memcmp(osgn + element[0], "SV_Target", 9)) {
+        size_t length = strlen(name) + 1;
+
+        if (element[1] == index && element[0] + length <= chunkSize && !memcmp(osgn + element[0], name, length)) {
             return true;
         }
     }
@@ -2678,6 +2681,9 @@ void CGxDeviceD3d11::IStateSyncDeviceConstants(bool ffVs) {
 
     int32_t alphaRef = this->m_appRenderStates[GxRs_AlphaRef].m_value.m_data.i[0];
     dev[16 * 4] = alphaRef > 0 ? alphaRef * (1.0f / 255.0f) : 0.0f;
+    // LIGHTING: .y 1 = the bound VS writes the lit surface (gxN/gxP/gxM/gxF) the pixel shader may relight with
+    CGxShader* vs = static_cast<CGxShader*>(this->m_appRenderStates[GxRs_VertexShader].m_value.m_data.p);
+    dev[16 * 4 + 1] = !ffVs && vs->m_litSurface ? 1.0f : 0.0f;
 
     uint32_t mask = this->m_appRenderStates[GxRs_ClipPlaneMask].m_value.m_data.u[0] & 0x3F;
 
@@ -2973,6 +2979,9 @@ bool CGxDeviceD3d11::IStateSyncShaders() {
 
     if (cb[0] != this->m_curCb[0]) {
         this->m_d3dContext->VSSetConstantBuffers(0, 1, &cb[0]);
+        // LIGHTING: the lit pixel shaders read the vertex constants at b4 (GxLighting.h), and GxLighting at b3
+        this->m_d3dContext->PSSetConstantBuffers(4, 1, &cb[0]);
+        D3d11LightingBindShaderConstants();
         this->m_curCb[0] = cb[0];
     }
 
@@ -3284,6 +3293,7 @@ void CGxDeviceD3d11::IStateSync() {
     }
 
     bool ffVs = this->IStateSyncShaders();
+    D3d11LightingSyncShaderConstants();   // LIGHTING: g_gxLightingGpu into b3 when it changed
     this->IShaderConstantsFlush();
     this->IStateSyncDeviceConstants(ffVs);
 
@@ -3666,9 +3676,10 @@ void CGxDeviceD3d11::IShaderCreate(CGxShader* shader) {
 
     if (shader->m_target == GxSh_Vertex) {
         hr = this->m_d3dDevice->CreateVertexShader(code, size, nullptr, reinterpret_cast<ID3D11VertexShader**>(&shader->m_apiSpecific));
+        shader->m_litSurface = DxbcWritesOutput(code, size, "TEXCOORD", 13);   // LIGHTING: writes gxF
     } else if (shader->m_target == GxSh_Pixel) {
         hr = this->m_d3dDevice->CreatePixelShader(code, size, nullptr, reinterpret_cast<ID3D11PixelShader**>(&shader->m_apiSpecific));
-        shader->m_writesNormal = DxbcWritesTarget1(code, size);   // GBUFFER
+        shader->m_writesNormal = DxbcWritesOutput(code, size, "SV_Target", 1);   // GBUFFER
     }
 
     if (FAILED(hr)) {

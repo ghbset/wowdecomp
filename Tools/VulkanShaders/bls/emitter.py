@@ -16,7 +16,8 @@ The interface contract every module shares (the device's pipelines are built aga
                   of 4, at most 256) and declares { p[16]; misc; v[256]; px[PCONST - 16] }: c16.. go
                   AFTER the whole 256-row vertex window, so the vertex module's v[] offsets never move
                   and any vertex module still pairs with it. misc.x is the alpha test reference
-                  (alphaRef / 255, 0 = off), misc.z / misc.w the stage-0 colour / alpha op (read by
+                  (alphaRef / 255, 0 = off), misc.y 1 when the bound vertex module carries `flag
+                  lit_surface` (bls/lighting.py), misc.z / misc.w the stage-0 colour / alpha op (read by
                   the generated companion stages only).
   Samplers        a combined image sampler per D3D sampler slot, set 0 binding <slot>.
   Clip space      gl_Position.y is negated in every vertex module (D3D's +y up, Vulkan's +y down);
@@ -33,6 +34,7 @@ import collections
 import math
 
 from . import dx9ir as ir
+from . import lighting
 
 # ---- the interface contract -------------------------------------------------------------------
 VIN_LOCATION = {'position0': 0, 'normal0': 1, 'color0': 2, 'color1': 3, 'texcoord0': 4,
@@ -114,6 +116,10 @@ class Emitter(object):
         self.depth = 1
         self.loopn = 0
         self.ops_used = collections.Counter()
+        self.creads = set()                        # c# read from the uniform window (direct)
+        self.families = lighting.families(getattr(rec, 'names', None) or [], self.vs)
+        self.surface = None                        # lighting: the lit vertex module's surface lines
+        self.litpix = None                         # lighting: (COLOR0, COLOR1) input registers lit per pixel
 
     # -- operands ---------------------------------------------------------------------------------
 
@@ -139,6 +145,7 @@ class Emitter(object):
         if o.index in self.defs:
             return 'c%d' % o.index
         self.cmax = max(self.cmax, o.index)
+        self.creads.add(o.index)
         if self.vs:
             if o.index >= VCONST_LARGE:
                 raise Refused('vertex constant c%d beyond the 256-row window' % o.index)
@@ -629,12 +636,16 @@ class Emitter(object):
                         self.outputs.append(s)
             if 'position0' not in self.outputs:
                 raise Refused('no position output')
+            self.surface = lighting.surface_outputs(self)
+            if self.surface:
+                self.flags.add('lit_surface')
             self.vconst = VCONST_LARGE if (self.relative or self.cmax >= VCONST_SMALL) else VCONST_SMALL
         else:
             self.reads = []
             for nm, s in self.inputs.items():
                 if s not in self.reads:
                     self.reads.append(s)
+            self.litpix = lighting.pixel_colors(self)
             self.vconst = VCONST_SMALL
         self.pconst = PCONST
         if not self.vs and self.cmax >= PCONST:
@@ -664,11 +675,17 @@ class Emitter(object):
                     continue
                 t = VARYING_TYPE.get(sem, 'vec4')
                 P('layout(location = %d) out %s %s;' % (VARYING_LOCATION[sem], t, sem))
+            if self.surface:
+                for nm, loc in lighting.VARYINGS:
+                    P('layout(location = %d) out vec4 %s;   // lighting: the surface' % (loc, nm))
         else:
             P('// Varyings read, by semantic, at the same locations the vertex module writes them.')
             for sem in self.reads:
                 t = VARYING_TYPE.get(sem, 'vec4')
                 P('layout(location = %d) in %s %s;' % (VARYING_LOCATION[sem], t, sem))
+            if self.litpix:
+                for nm, loc in lighting.VARYINGS:
+                    P('layout(location = %d) in vec4 %s;   // lighting: the surface' % (loc, nm))
             P('')
             P('layout(location = 0) out vec4 oC0;')
             if self.uses_oc1:
@@ -711,6 +728,10 @@ class Emitter(object):
                 P('float dx_pow(float x, float y) { return x == 0.0 ? 0.0 : exp2(y * log2(abs(x))); }')
             if 'nrm' in self.helpers:
                 P('vec4 dx_nrm(vec4 v) { return v * inversesqrt(dot(v.xyz, v.xyz)); }')
+        if self.surface or self.litpix:
+            L.extend(lighting.BLOCK.split('\n'))
+            if self.litpix:
+                L.extend(lighting.PIXEL_LIB.split('\n'))
         P('')
         P('void main()')
         P('{')
@@ -739,8 +760,12 @@ class Emitter(object):
                     rhs = sem
                 P('    vec4 %s = %s;' % (nm, rhs))
         P('')
+        if self.litpix:
+            L.extend(lighting.pixel_splice(*self.litpix))
         L.extend(self.body)
         P('')
+        if self.surface:
+            L.extend(self.surface)
         # epilogue
         if self.vs:
             for nm, sems in self.out_sems.items():
@@ -755,6 +780,8 @@ class Emitter(object):
                     else:
                         P('    %s = %s;' % (sem, nm))
         else:
+            if self.litpix:
+                P(lighting.SPEC_ADD)
             P('    // The alpha test (GxRs_AlphaRef) is not in the bytecode: GREATEREQUAL against')
             P('    // misc.x = alphaRef / 255, off when 0; negative: gxAlphaToCoverage (alpha sharpened')
             P('    // to a one-pixel ramp around -misc.x for the coverage mask).')

@@ -75,6 +75,9 @@ class D3d11Lighting final : public IGxLighting {
     void EndWorld() override;
     void ReleaseTargets();
     void ReleaseAll();
+    ID3D11DeviceContext* Context() const {
+        return this->m_device->m_d3dContext;
+    }
 
     private:
     CGxDeviceD3d11* m_device;
@@ -116,6 +119,10 @@ class D3d11Lighting final : public IGxLighting {
 };
 
 D3d11Lighting* s_lighting = nullptr;
+// the lit world shaders' cbuffer GxLighting (b3, GxLighting.h): g_gxLightingGpu, uploaded when its serial moves. Created
+// zeroed with the device (everything off = the stock frame), released with it.
+ID3D11Buffer* s_gpuConstants = nullptr;
+uint32_t s_gpuSerial = 0;
 
 void ReleaseTarget(Target& target) {
     SafeRelease(target.m_srv);
@@ -698,9 +705,51 @@ void D3d11LightingCreate(CGxDeviceD3d11* device) {
 
     s_lighting = new D3d11Lighting(device);
     g_gxLighting = s_lighting;
+
+    SafeRelease(s_gpuConstants);
+    static const GxLightingGpu s_zero = {};
+    D3D11_BUFFER_DESC desc = {};
+    desc.ByteWidth = sizeof(GxLightingGpu);
+    desc.Usage = D3D11_USAGE_DYNAMIC;
+    desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    D3D11_SUBRESOURCE_DATA init = { &s_zero, 0, 0 };
+
+    if (FAILED(device->m_d3dDevice->CreateBuffer(&desc, &init, &s_gpuConstants))) {
+        s_gpuConstants = nullptr;
+        D3d11Log("D3d11Lighting: no GxLighting cbuffer; the lit shaders stay on their stock path");
+    }
+
+    // the first draw uploads whatever the game has (a recreated device starts zeroed)
+    s_gpuSerial = g_gxLightingGpuSerial - 1;
+}
+
+void D3d11LightingSyncShaderConstants() {
+    if (!s_gpuConstants || s_gpuSerial == g_gxLightingGpuSerial) {
+        return;
+    }
+
+    s_gpuSerial = g_gxLightingGpuSerial;
+    ID3D11DeviceContext* ctx = s_lighting->Context();
+    D3D11_MAPPED_SUBRESOURCE mapped;
+
+    if (SUCCEEDED(ctx->Map(s_gpuConstants, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+        memcpy(mapped.pData, &g_gxLightingGpu, sizeof(GxLightingGpu));
+        ctx->Unmap(s_gpuConstants, 0);
+    }
+}
+
+void D3d11LightingBindShaderConstants() {
+    if (s_gpuConstants) {
+        ID3D11DeviceContext* ctx = s_lighting->Context();
+        ctx->VSSetConstantBuffers(3, 1, &s_gpuConstants);
+        ctx->PSSetConstantBuffers(3, 1, &s_gpuConstants);
+    }
 }
 
 void D3d11LightingDestroy() {
+    SafeRelease(s_gpuConstants);
+
     if (s_lighting) {
         s_lighting->ReleaseAll();
     }

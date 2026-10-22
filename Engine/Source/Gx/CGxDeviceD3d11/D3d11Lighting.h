@@ -14,5 +14,7 @@ class CGxDeviceD3d11;
 void D3d11LightingCreate(CGxDeviceD3d11* device);   // sets g_gxLighting
 void D3d11LightingDestroy();                        // device going away: every D3D object, g_gxLighting null
 void D3d11LightingReleaseTargets();                 // the back buffer is about to be released (resize, recreate)
+void D3d11LightingSyncShaderConstants();            // per draw: g_gxLightingGpu into the lit shaders' b3 when its serial moved
+void D3d11LightingBindShaderConstants();            // b3 (GxLighting) on VS and PS, with the device's b0 binds
 
 #endif

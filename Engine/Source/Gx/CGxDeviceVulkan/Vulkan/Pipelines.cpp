@@ -86,7 +86,7 @@ namespace gxvk::vk::pipelines
         // The set-1 sets, one per uniform chunk, for the session.
         VkDescriptorPoolSize size = {};
         size.type            = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
-        size.descriptorCount = frame::kFramesInFlight * kMaxRegsChunks;
+        size.descriptorCount = 2 * frame::kFramesInFlight * kMaxRegsChunks;   // binding 0 and the GxLighting block
         VkDescriptorPoolCreateInfo pool = {};
         pool.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         pool.maxSets       = frame::kFramesInFlight * kMaxRegsChunks;
@@ -279,7 +279,8 @@ namespace gxvk::vk::pipelines
         // Set 1: the constant slice, for the translated family and the fixed-function pixel program.
         VkDescriptorSet set1    = VK_NULL_HANDLE;
         uint32_t        offset1 = 0;
-        if (needsRegs && !RegsSlice(slot, serial, draw, set1, offset1))
+        uint32_t        offsetLight = 0;
+        if (needsRegs && !RegsSlice(slot, serial, draw, set1, offset1, offsetLight))
         {
             ++s.stats.skipped;
             return false;
@@ -314,12 +315,14 @@ namespace gxvk::vk::pipelines
             d.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout.layout, 0, 1, &set0, 0, nullptr);
             b.set0 = set0;
         }
-        if (needsRegs && (!b.have1 || b.set1 != set1 || b.offset1 != offset1))
+        if (needsRegs && (!b.have1 || b.set1 != set1 || b.offset1 != offset1 || b.offsetLight != offsetLight))
         {
-            d.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout.layout, 1, 1, &set1, 1, &offset1);
-            b.set1    = set1;
-            b.offset1 = offset1;
-            b.have1   = true;
+            const uint32_t offsets[2] = { offset1, offsetLight };
+            d.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout.layout, 1, 1, &set1, 2, offsets);
+            b.set1        = set1;
+            b.offset1     = offset1;
+            b.offsetLight = offsetLight;
+            b.have1       = true;
         }
 
         VkBuffer     vbs[kMaxStreams + 1];
