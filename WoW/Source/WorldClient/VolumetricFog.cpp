@@ -169,7 +169,7 @@ Config ReadConfig() {
     cfg.ambient = std::max(CVarFloat(s_cvars.ambient, cfg.ambient), 0.0f);
     cfg.dataMode = std::clamp(CVarInt(s_cvars.data, cfg.dataMode), 0, 1);
     cfg.localLights = CVarInt(s_cvars.localLights, 1) != 0;
-    cfg.transparentFog = CVarInt(s_cvars.transparent, 1) != 0;
+    cfg.transparentFog = CVarInt(s_cvars.transparent, 0) != 0;
     cfg.fadeEarly = CVarInt(s_cvars.fadeEarly, 1) != 0;
     cfg.fadeStencil = CVarInt(s_cvars.fadeStencil, 1) != 0;
     cfg.msaaSplit = CVarInt(s_cvars.msaaSplit, 1) != 0;
@@ -722,7 +722,7 @@ void RegisterCVars() {
     s_cvars.ambient = CVar::Register("vfogAmbient", "Volumetric fog ambient light scale", 1, "1.75", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.data = CVar::Register("vfogData", "Volumetric fog: 0 = derived layers only, 1 = authored fog data where it covers", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.localLights = CVar::Register("vfogLocalLights", "Volumetric fog lit by nearby point lights", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
-    s_cvars.transparent = CVar::Register("vfogTransparent", "Volumetric fog: 1 = composite before transparents and fit the fog onto them, 0 = one composite after the whole world", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    s_cvars.transparent = CVar::Register("vfogTransparent", "Volumetric fog: 1 = composite before transparents and fit the fog onto them, 0 = one composite after the whole world", 1, "0", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.fadeEarly = CVar::Register("vfogFadeEarly", "Volumetric fog: 1 = M2s fading at their draw distance are drawn before the early composite, so it fogs them at their own depth (default), 0 = stock pass 1 with the fitted fog", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.fadeStencil = CVar::Register("vfogFadeStencil", "Volumetric fog: 1 = fading M2s drawn early cross-fade by their alpha between the fog behind them and their own (wxl-vfog 0.6.3, needs a stencil), 0 = they take their own fog at any alpha", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.msaaSplit = CVar::Register("vfogMsaaSplit", "Volumetric fog with MSAA: 1 = the near and far samples of an edge pixel each fogged at their own depth (coa sample split), 0 = the fog of one sample", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
