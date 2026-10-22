@@ -109,9 +109,9 @@ struct WaterConfig {
     float waves = 1.0f;         // vfogWaterWaves 0..2
     float wind = 2.0f;          // vfogWaterWind 0.5..10
     float foam = 1.0f;          // vfogWaterFoam 0..2
-    float reflections = 1.0f;   // vfogWaterReflections 0..2
-    float specular = 1.0f;      // vfogWaterSpecular 0..4
-    float clarity = 1.0f;       // vfogWaterClarity 0.25..4
+    float reflections = 0.5f;   // vfogWaterReflections 0..2
+    float specular = 1.5f;      // vfogWaterSpecular 0..4
+    float clarity = 1.4f;       // vfogWaterClarity 0.25..4
     float zoneColors = 0.5f;    // vfogWaterZoneColors 0..1
     float ripples = 0.5f;       // vfogWaterRipples 0..2 (0 = off: no simulation, no reading of the units)
     bool clientSplashes = false;    // vfogWaterClientSplashes (coa WaterClientSplashes)
@@ -1013,9 +1013,9 @@ void RegisterWaterCVars() {
     s_cvars.waves = CVar::Register("vfogWaterWaves", "Modern water wave height, 0..2 (0 = flat)", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.wind = CVar::Register("vfogWaterWind", "Modern water wind speed, 0.5..10", 1, "2", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.foam = CVar::Register("vfogWaterFoam", "Modern water foam, 0..2", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
-    s_cvars.reflections = CVar::Register("vfogWaterReflections", "Modern water reflections, 0..2 (0 = sky only, no screen reflections)", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
-    s_cvars.specular = CVar::Register("vfogWaterSpecular", "Modern water sun and moon highlight, 0..4", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
-    s_cvars.clarity = CVar::Register("vfogWaterClarity", "Modern water clarity, 0.25..4 (larger is clearer)", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    s_cvars.reflections = CVar::Register("vfogWaterReflections", "Modern water reflections, 0..2 (0 = sky only, no screen reflections)", 1, "0.5", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    s_cvars.specular = CVar::Register("vfogWaterSpecular", "Modern water sun and moon highlight, 0..4", 1, "1.5", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    s_cvars.clarity = CVar::Register("vfogWaterClarity", "Modern water clarity, 0.25..4 (larger is clearer)", 1, "1.4", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.zoneColors = CVar::Register("vfogWaterZoneColors", "How much the zone's own water colours tint the modern water, 0..1", 1, "0.5", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.ripples = CVar::Register("vfogWaterRipples", "Modern water ripples and wakes where units move through or jump into water, 0..2 (0 = off)", 1, "0.5", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.clientSplashes = CVar::Register("vfogWaterClientSplashes", "Keep the client's own splash discs and wake trails on top of the modern water's ripples (0 = hidden while the ripples run with screen reflections; always kept at quality 1 or reflections 0)", 1, "0", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
