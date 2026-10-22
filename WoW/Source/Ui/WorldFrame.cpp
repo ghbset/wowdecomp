@@ -43,6 +43,7 @@
 #include "WoW/Source/Game/GameClient/ProjectTex.h"
 #include "WoW/Source/Game/GameClient/WorldText.h"
 #include "WoW/Source/Game/GameTime.h"
+#include "Engine/Source/Gx/GxUpscale.h"
 #include "WoW/Source/Magic/MagicClient/SpellEnums.h"
 #include "WoW/Source/Magic/MagicClient/SpellVisuals.h"
 #include "WoW/Source/Magic/MagicClient/Spell_C.h"
@@ -1728,7 +1729,26 @@ void CGWorldFrame::OnWorldRender() {
         bottom = this->m_viewportNDC.minY;
     }
 
-    GxXformSetViewport(width * this->m_viewportNDC.minX + minX, this->m_viewportNDC.maxX * width + minX, height * bottom + minY, top * height + minY, minZ, CWorld::s_unk_ADEEE4);
+    float worldMinX = width * this->m_viewportNDC.minX + minX;
+    float worldMaxX = this->m_viewportNDC.maxX * width + minX;
+    float worldMinY = height * bottom + minY;
+    float worldMaxY = top * height + minY;
+    GxXformSetViewport(worldMinX, worldMaxX, worldMinY, worldMaxY, minZ, CWorld::s_unk_ADEEE4);
+
+    // FSR: not in 12340. The world into the top-left of its viewport at the render scale (y up: the top edge stays)
+    float upscaleX = 1.0f;
+    float upscaleY = 1.0f;
+
+    if (g_gxUpscale) {
+        g_gxUpscale->BeginWorld(upscaleX, upscaleY);
+    }
+
+    const bool upscaled = upscaleX < 1.0f || upscaleY < 1.0f;
+
+    if (upscaled) {
+        GxXformSetViewport(worldMinX, worldMinX + (worldMaxX - worldMinX) * upscaleX, worldMaxY - (worldMaxY - worldMinY) * upscaleY, worldMaxY, minZ, CWorld::s_unk_ADEEE4);
+    }
+
     TextureCacheResetLoadCount();
     PlayerNameUpdateEarly();
 
@@ -1759,6 +1779,11 @@ void CGWorldFrame::OnWorldRender() {
     if (!scene) {
         VolumetricFog::OnWorldDone();   // VFOG: not in 12340
         WorldLightingEndWorld();   // LIGHTING: not in 12340
+
+        if (g_gxUpscale) {
+            g_gxUpscale->EndWorld();   // FSR: not in 12340
+        }
+
         FrameProfileSwitch(FRAMEPROFILE_NONE);
         return;
     }
@@ -1838,10 +1863,25 @@ void CGWorldFrame::OnWorldRender() {
     g_theGxDevicePtr->RsPop();
     SmartScreenRectClearGrid(SRECTGRID_WORLDTEXT);
     CataWater::OnWorldDone();   // CATA WATER: not in 12340 (underwater tint, waterStyle 1)
-    CGChatBubbleFrame::OnWorldRender(this);
+
+    if (!upscaled) {
+        CGChatBubbleFrame::OnWorldRender(this);   // FSR: upscaled, after the upscale (below) at full size
+    }
+
     VolumetricFog::OnWorldDone();   // VFOG: not in 12340; before the restore so it sees the world viewport
     GxXformSetViewport(minX, maxX, minY, maxY, minZ, maxZ);
     WorldLightingEndWorld();   // LIGHTING: not in 12340 (bloom, tonemap; FFX glow sees the tonemapped world)
+
+    if (g_gxUpscale) {
+        g_gxUpscale->EndWorld();   // FSR: not in 12340 (the world upscaled after the post passes, before the UI)
+    }
+
+    if (upscaled) {
+        GxXformSetViewport(worldMinX, worldMaxX, worldMinY, worldMaxY, minZ, CWorld::s_unk_ADEEE4);
+        CGChatBubbleFrame::OnWorldRender(this);
+        GxXformSetViewport(minX, maxX, minY, maxY, minZ, maxZ);
+    }
+
     FFX::Finish();
     CVehiclePassenger_C::PostRenderUpdateAll();
     FrameProfileSwitch(FRAMEPROFILE_NONE);

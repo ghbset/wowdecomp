@@ -1,0 +1,20 @@
+// FSR: FSR 4's output (RGBA16F, the world viewport's size) into the world viewport of an RGBA8 image of the scene's
+// extent, written B, G, R, A for frame::CopyIntoScene (LightingApply.comp does the same); or, without FSR this frame,
+// the scene's render-size part stretched into it.
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "Upscale.glsl"
+
+layout(set = 0, binding = 3, rgba8) uniform writeonly image2D gxOut;
+
+void main() {
+    ivec2 id = ivec2(gl_GlobalInvocationID.xy);
+
+    if (any(greaterThanEqual(id, ivec2(gxNative.zw)))) {
+        return;
+    }
+
+    vec4 c = gxSource.z > 0.5 ? textureLod(gxColor, (gxRender.xy + (vec2(id) + 0.5) * gxRender.zw / gxNative.zw) * gxSource.xy, 0.0)
+                              : texelFetch(gxColor, id, 0);
+    imageStore(gxOut, id + ivec2(gxNative.xy), clamp(c, 0.0, 1.0).bgra);
+}

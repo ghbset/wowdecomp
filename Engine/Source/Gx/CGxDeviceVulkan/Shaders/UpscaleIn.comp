@@ -1,0 +1,38 @@
+// FSR: the scene's low-resolution world into FSR 4's inputs -- the colour as it is (gamma, RGBA16F), FSR's inverted
+// single-projection depth (near / w, 0 for the sky and the far bands) and camera motion vectors (last frame's uv minus
+// this frame's, jitter-free, uv units y down): wxl-light src/Depth.cpp kMotionHlsl, from the depth copy.
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "Upscale.glsl"
+
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D gxOutColor;
+layout(set = 0, binding = 5, r32f) uniform writeonly image2D gxOutDepth;
+layout(set = 0, binding = 6, rg16f) uniform writeonly image2D gxOutMotion;
+
+void main() {
+    ivec2 id = ivec2(gl_GlobalInvocationID.xy);
+
+    if (any(greaterThanEqual(id, ivec2(gxRender.zw)))) {
+        return;
+    }
+
+    ivec2 px = id + ivec2(gxRender.xy);
+    imageStore(gxOutColor, id, texelFetch(gxColor, px, 0));
+
+    float d = texelFetch(gxDepth, px, 0).r;
+    float dn = (d - gxDepthRange.x) * gxDepthRange.z;
+    bool geometry = d <= gxDepthRange.y + 0.00001 && dn < 0.99999;
+
+    vec2 ndc = vec2((float(id.x) + 0.5) / gxRender.z * 2.0 - 1.0, 1.0 - (float(id.y) + 0.5) / gxRender.w * 2.0);
+    vec4 h = vec4(ndc, min(dn, 1.0), 1.0) * gxInvProj;
+    vec3 view = h.xyz / h.w;
+
+    // the sky and the far bands: no distance known, at infinity, so they move by the camera's rotation only
+    vec4 c = vec4(view, geometry ? 1.0 : 0.0) * gxReproj;
+    vec2 here = ndc - gxJitter.xy;
+    vec2 prev = c.w > 1e-6 ? c.xy / c.w : here;
+    imageStore(gxOutMotion, id, vec4((prev - here) * vec2(0.5, -0.5) * gxJitter.z, 0.0, 0.0));
+
+    float w = dot(vec4(view, 1.0), gxProjW);
+    imageStore(gxOutDepth, id, vec4(geometry ? gxDepthRange.w / max(w, gxDepthRange.w) : 0.0, 0.0, 0.0, 0.0));
+}

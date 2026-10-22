@@ -4,6 +4,7 @@
 #include "WoW/Source/WorldClient/Map.h"
 #include "WoW/Source/WorldClient/World.h"
 #include "Engine/Source/Gx/Gx.h"
+#include "Engine/Source/Gx/GxUpscale.h"
 #include "Engine/Source/Gxu/GxuScene.h"
 #include "Engine/Source/Gx/CGxDevice/CGxDevice.h"
 #include "Engine/Source/Model2/M2Scene.h"
@@ -214,6 +215,11 @@ void CWorldScene::Render(const C3Vector& cameraPos, float time) {
     CShaderEffect::UpdateProjMatrix();
     CWorldScene::ApplyFogState();
     WorldLightingSetupView(cameraPos);   // LIGHTING: not in 12340 (the view the post passes use)
+
+    if (g_gxUpscale) {
+        g_gxUpscale->SetupView(CWorldScene::s_activeWorldView);   // FSR: not in 12340 (the view the motion vectors use)
+    }
+
     CataWater::RenderReflection();   // CATAREFL: not in 12340 (Cata p = 1 planar reflection, before the lists are consumed)
     FrameProfileSwitch(FRAMEPROFILE_TERRAIN);
     CWorldScene::RenderChunks();

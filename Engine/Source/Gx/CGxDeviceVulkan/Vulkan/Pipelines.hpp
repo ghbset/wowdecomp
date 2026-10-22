@@ -225,4 +225,8 @@ namespace gxvk::vk::pipelines
         uint64_t regsFull       = 0;   ///< draws refused because the frame's uniform ring was exhausted
     };
     void GetStats(Stats& out);
+
+    /// FSR: work recorded by someone else (the FSR 4 provider) pushed constants and bound state the cache does not
+    /// know of; the next Record() binds and pushes everything again.
+    void ForgetBound();
 }
