@@ -112,9 +112,9 @@ void WorldLightingRegisterCVars() {
     s_cv.tonemap = Reg("hdrTonemap", "HDR tonemap: 0 clamp (stock), 1 neutral, 2 ACES", "1");
     s_cv.bloom = Reg("bloom", "Bloom intensity, 0 = off (D3D11/Vulkan)", "0");
     s_cv.bloomThreshold = Reg("bloomThreshold", "Bloom threshold (linear light; the stock shaders never pass 1)", "0.6");
-    s_cv.ssao = Reg("ssao", "Screen-space ambient occlusion intensity, 0 = off (D3D11/Vulkan)", "0");
-    s_cv.ssaoRadius = Reg("ssaoRadius", "SSAO radius in yards", "1.5");
-    s_cv.ssaoDistance = Reg("ssaoDistance", "SSAO fades out by this distance in yards", "200");
+    s_cv.ssao = Reg("lightingSsao", "Post-pass ambient occlusion intensity, 0 = off (D3D11/Vulkan)", "0");
+    s_cv.ssaoRadius = Reg("lightingSsaoRadius", "Post-pass SSAO radius in yards", "1.5");
+    s_cv.ssaoDistance = Reg("lightingSsaoDistance", "Post-pass SSAO fades out by this distance in yards", "200");
     s_cv.fogScattering = Reg("fogScattering", "Fog tinted toward the sun's colour around the sun, 0 = off", "0");
     s_cv.debug = Reg("lightingDebug", "1 shows the SSAO term alone; 4, 5 the SSAO inputs", "0");
     // last: Features() takes a registered hdr to mean they all are

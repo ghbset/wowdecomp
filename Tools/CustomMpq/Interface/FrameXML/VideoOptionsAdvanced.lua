@@ -195,8 +195,6 @@ for _, page in ipairs(PAGES) do
 end
 
 -- Badgermilk0 ports (perfcore, streaming, gpuskin, shadows), lighting post passes and the sky: placed before Debug.
--- ssao / ssaoDistance (WorldLighting.cpp) are left out: CVar names are case-insensitive, so they are the same CVars as
--- the Legion SSAO / SSAODistance already on the Post Processing page.
 table.insert(PAGES, #PAGES, { name = "Performance", parent = "Advanced", title = "Performance & Streaming",
 	{ "gxMaxFrameLatency", "drop", "Frames queued ahead", "How many frames the graphics card may queue while the next one is prepared. Fewer feels more responsive, more runs smoother. All renderers.",
 	  { { "0", "0 (wait for each frame)" }, { "1", "1" }, { "2", "2" }, { "3", "3" } } },
@@ -226,13 +224,16 @@ for _, page in ipairs(PAGES) do
 	end
 end
 -- World lighting post passes (WorldLighting.cpp).
-table.insert(PAGES, #PAGES, { name = "Lighting", parent = "Advanced", title = "HDR & Bloom",
+table.insert(PAGES, #PAGES, { name = "Lighting", parent = "Advanced", title = "HDR, Bloom & Occlusion",
 	{ "hdr", "check", "HDR", "Draws the world in high dynamic range and tone maps it. D3D11/Vulkan only." },
 	{ "hdrExposure", "slider", "Exposure", "Overall brightness of the world with HDR on. D3D11/Vulkan only.", 0.25, 4, 0.05 },
 	{ "hdrTonemap", "drop", "Tone mapping", "How bright light is fitted to the screen with HDR on. D3D11/Vulkan only.",
 	  { { "0", "Clamp (stock)" }, { "1", "Neutral" }, { "2", "ACES (filmic)" } } },
 	{ "bloom", "slider", "Bloom", "Bright light glows onto what is around it. 0 turns it off. D3D11/Vulkan only.", 0, 2, 0.05 },
 	{ "bloomThreshold", "slider", "Bloom threshold", "How bright something must be before it glows. D3D11/Vulkan only.", 0.05, 2, 0.05 },
+	{ "lightingSsao", "slider", "Post-pass ambient occlusion", "A second, lighter ambient occlusion drawn after the world, separate from the one on Post Processing. 0 turns it off. D3D11/Vulkan only.", 0, 2, 0.05 },
+	{ "lightingSsaoRadius", "slider", "Post-pass occlusion radius (yards)", "How far around each point the post-pass occlusion looks for nearby surfaces. D3D11/Vulkan only.", 0.25, 5, 0.25 },
+	{ "lightingSsaoDistance", "slider", "Post-pass occlusion distance (yards)", "How far away the post-pass occlusion reaches before it fades out. D3D11/Vulkan only.", 25, 500, 25 },
 	{ "fogScattering", "slider", "Sun glow in distance fog", "Tints the distance fog toward the sun's colour around the sun. 0 turns it off. D3D11/Vulkan only.", 0, 2, 0.05 },
 })
 -- Sky and clouds (SkyClouds.cpp, DayNight.cpp).
