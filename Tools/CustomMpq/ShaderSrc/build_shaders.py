@@ -26,6 +26,7 @@ Grass wind (wxl-grasswind, MULTI): Shaders/Vertex/vs_3_0|vs_4_0/DetailDoodad.bls
 Fading models (wxl-vfog 0.6.3): VFogDepthCopy. Legion FFX post: LegionPost{0,1,2}. Legion SSAO: LegionSsao{,Box,Bilateral,Apply}. Legion heat haze (refraction): LegionRefraction. Land shadow mask (shadowMask): VFogShadowMask. Lamps (lightMode): LegionLights. MSAA sample split (coa): VFogSilhouette and VFogCompositeSplit{Q}[L][N].
 Soft particles (wxl-light Soft.cpp): SoftParticle{0,1}.
 Caustics (wxl-water): VFogCausticsAbove / VFogCausticsUnder.
+Sky and clouds under the sun arc (wxl-light Clouds.cpp, WorldClient/SkyClouds.cpp): SkyClouds.
 """
 import argparse
 import concurrent.futures
@@ -100,6 +101,8 @@ SHADERS = {
     # (scene depth, + the tint); s5/s6 the sun shadow bands (vf_shadow.hlsli)
     'VFogCausticsAbove': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 1, 5, 6, 7), 0, 'VFogCaustics', {'UNDER': 0}),
     'VFogCausticsUnder': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 5, 6, 7), 0, 'VFogCaustics', {'UNDER': 1}),
+    # sky and clouds (wxl-light Clouds.cpp, SKY-CLOUDS-PLAN.md): s0 the cloud noise atlas, s3 the moon, s4 the cloud sheet
+    'SkyClouds': ('ps_3_0', TEXCOORD0, COLOR0, samplers(0, 3, 4), 0, 'SkyClouds', {}),
 }
 # Cata water (waterStyle 1, docs/BACKLOG_PORT.md "Cata water"): the ProcWater VS and ProcWaterAbove / Below PS,
 # drawn by the liquid material in place of vsLiquidWater / psLiquidWater (WorldClient/CataWater.cpp).

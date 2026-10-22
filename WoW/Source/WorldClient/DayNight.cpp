@@ -1,5 +1,6 @@
 #include "WoW/Source/WorldClient/TerrainSunShadow.h"
 #include "WoW/Source/WorldClient/DayNight__DNInfo.h"
+#include "WoW/Source/WorldClient/SkyClouds.h"
 #include "Engine/Source/ShaderEffect/ShadowCache.h"
 #include <cmath>
 #include <new>
@@ -102,6 +103,7 @@ C3Vector DayNight::g_moonToward(0.0f, 0.0f, -1.0f);
 static CVar* s_cvSunArc;
 static CVar* s_cvSunArcMatch;       // not stock: gfxSunArcMatch (PickLightBody)
 static CVar* s_cvSunArcDawnRamp;    // not stock: gfxSunArcDawnRamp (PickLightBody)
+static CVar* s_cvSunArcSkybox;      // not stock: gfxSunArcSkybox (end of SetColors)
 static CVar* s_cvDebugHour;         // not stock: debugHour (DayNight::DebugHour)
 static CVar* s_cvShadowFade;
 float DayNight::g_shadowFade = 1.0f;
@@ -1884,10 +1886,16 @@ void DayNight::RenderSky(CPortalView* view) {
         }
     }
 
+    // Not stock (skyClouds): wxl-light's sky and clouds in the sheet's slot; under the arc its disc stands in for the
+    // stock sun and moon.
+    const bool ourClouds = drawObjects && SkyClouds::Active();
+
     if (drawObjects) {
         DayNight::g_stars.Render();
-        DayNight::g_planets.m_sun.Render();
-        DayNight::g_planets.m_moon.Render();
+        if (!ourClouds || !SkyClouds::Disc()) {
+            DayNight::g_planets.m_sun.Render();
+            DayNight::g_planets.m_moon.Render();
+        }
         // Not stock (gfxSunArc): the second moon keeps the stock tables (SetPlanets' s_moon2Theta/Phi, 135-165 degrees),
         // so it is the old path's moon left in the sky; only the arc's sun and moon are drawn. (Its colour is never
         // set but for the storm alpha, so stock shows it as a dark disc in rain and snow.)
@@ -1895,7 +1903,11 @@ void DayNight::RenderSky(CPortalView* view) {
             DayNight::g_planets.m_moon2.Render();
         }
         DayNight::g_sky.Render();
-        DayNight::g_clouds.Render();
+        if (ourClouds) {
+            SkyClouds::Draw();
+        } else {
+            DayNight::g_clouds.Render();
+        }
     }
 
     if (s_skyScene) {
@@ -2631,6 +2643,8 @@ void DayNight::LoadMap(int32_t mapId) {
     s_cvSkyCloudLOD = CVar::Register("SkyCloudLOD", nullptr, 0, "0", CWorldParam::CloudLODCallback, 1, false, nullptr, false);
     s_cvSunArc = CVar::Register("gfxSunArc", "Sun and moon cross the sky and the world's light comes from them (0 = stock)", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvSunArcMatch = CVar::Register("gfxSunArcMatch", "Under gfxSunArc, light the ground no steeper than the stock light for the hour (0 = full arc height, 1 = stock)", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    s_cvSunArcSkybox = CVar::Register("gfxSunArcSkybox", "Under gfxSunArc, outdoor skybox models: 0 = none, 1 = stock, 2 = only the overlays drawn over the sky (auroras)", 1, "2", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    SkyClouds::RegisterCVars();
     s_cvSunArcDawnRamp = CVar::Register("gfxSunArcDawnRamp", "Under gfxSunArc, degrees of sun/moon height over which its direct light fades in at dawn and out at dusk (4 = old ramp)", 1, "15", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvDebugHour = CVar::Register("debugHour", "Draw the sky, light, sun, moon, shadows and skyboxes for this hour (0-24); -1 = the game clock", 0, "-1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvShadowFade = CVar::Register("gfxShadowFade", "Shadows fade out as the sun or moon nears the horizon (0 = always full)", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
@@ -2860,6 +2874,30 @@ void DayNight::SetColors() {
         info.m_blendSkyboxWeight[count] = 0.0f;
     }
 
+    // Not stock (gfxSunArcSkybox): under the arc a skybox model's own sun, moon and sky disagree with the arc's light,
+    // so the outdoor ones go (mode 2 keeps the flag-2 overlays, auroras, drawn over the procedural sky). Here, at
+    // the source, every reader agrees: RenderSky draws the procedural sky, DNGlare and DNClouds see no skybox. The
+    // interior (WMO) skybox is set after this (SetBlendSky) and stays.
+    const int32_t skyboxMode = s_cvSunArcSkybox ? s_cvSunArcSkybox->m_intValue : 1;
+    if (DayNight::SunArc() && skyboxMode != 1) {
+        info.m_skybox = nullptr;
+        info.m_skyboxWeight = 0.0f;
+        uint32_t kept = 0;
+        for (uint32_t i = 0; i < count; i++) {
+            if (skyboxMode == 2 && info.m_blendSkyboxFlags[i] && info.m_blendSkyboxWeight[i] > 0.0f) {
+                info.m_blendSkybox[kept] = info.m_blendSkybox[i];
+                info.m_blendSkyboxWeight[kept] = info.m_blendSkyboxWeight[i];
+                info.m_blendSkyboxFlags[kept] = info.m_blendSkyboxFlags[i];
+                kept++;
+            }
+        }
+        for (uint32_t i = kept; i < 3; i++) {
+            info.m_blendSkybox[i] = nullptr;
+            info.m_blendSkyboxWeight[i] = 0.0f;
+            info.m_blendSkyboxFlags[i] = 0;
+        }
+    }
+
     info.m_curve0 = DayNight::InterpTable(s_curveTable0, 4, info.m_dayProgression);
     info.m_curve1 = DayNight::InterpTable(s_curveTable1, 2, info.m_dayProgression);
 }
@@ -3054,6 +3092,10 @@ void DayNight::SetFlashColor(CImVector color, float blend) {
 // OFFSET: 0x007F0870
 void DayNight::RenderGlares() {
     if (!DayNight::g_dnInfo.m_showSky) {
+        return;
+    }
+
+    if (SkyClouds::HidesGlares()) {   // not stock (skyClouds): our disc stands in for the sun and moon, glares too
         return;
     }
 

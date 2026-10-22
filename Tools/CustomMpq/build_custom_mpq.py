@@ -26,7 +26,8 @@ Contents:
   VFog\\...               every file in Tools/CustomMpq/VFog (fogdata.bin: the Classic/Forever fog layers,
                           coa-vfog data/fogdata.bin, read by VolumetricFogData.cpp; waterdata.bin: the Forever
                           water presets, FFT tiles and foam masks, coa-vfog data/waterdata.bin, read by
-                          VolumetricFogWater.cpp).
+                          VolumetricFogWater.cpp; cloudnoise.bin: wxl-light's 64^3 BGRA cloud noise, src/CloudNoise.bin,
+                          read by SkyClouds.cpp).
   Interface\\...         every file in Tools/CustomMpq/Interface (FrameXML\\VideoOptionsAdvanced.lua: the Video
                           Options > Advanced page, run by GameUI.cpp after the stock FrameXML.toc).
 Cache/vkpipelines.bin is a runtime cache and stays loose.
