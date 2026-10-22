@@ -11,7 +11,8 @@
 
 float4 cComposite : register(c96);
 float4 cGodRayColour : register(c97);
-float4 cSun : register(c98);
+float4 cSun : register(c98);           // xy = sun marker pixel, z = sun marker shown, w = glow to compensate
+float4 cMoonMarker : register(c95);    // xy = moon marker pixel, z = shown (vfogSunMarker)
 
 sampler2D sFog : register(s1);
 sampler2D sGodRays : register(s2);
@@ -25,6 +26,7 @@ sampler2D sMarchDepth : register(s8);
 static const float kHighlightKnee = 0.8;
 static const float kSunMarkerRadius = 6;
 static const float4 kSunMarkerColour = float4(1, 0, 0, 1);
+static const float4 kMoonMarkerColour = float4(0, 0.4, 1, 1);
 static const float kDebugRadiance = 1;
 static const float kDebugTransmittance = 2;
 static const float kDebugLinearDepth = 3;
@@ -327,6 +329,8 @@ float4 CompositeAtDepth(float2 pixel, float depth)
     }
     [branch] if (SunMarkerEnabled() && distance(pixel, SunPixel()) < kSunMarkerRadius)
         return kSunMarkerColour;
+    [branch] if (cMoonMarker.z > 0 && distance(pixel, cMoonMarker.xy) < kSunMarkerRadius)
+        return kMoonMarkerColour;
 
     [branch] if (BlendsOverSceneCopy())
         return BlendOverSceneCopy(viewportUv, fog, godRays);

@@ -69,7 +69,7 @@ struct Config {
     bool underwater = false;        // vfogUnderwater: coa Underwater, fog after the world with the camera in liquid
     bool stockFog = true;           // vfogStockFog: coa StockFog, 0 = keep the stock fog, no distance layer
     bool foreverGlow = false;       // vfogForeverGlow: coa ForeverGlow, the modern client's glow amount
-    bool sunMarker = false;         // vfogSunMarker: coa SunMarker, red dot at the light's screen position
+    bool sunMarker = false;         // vfogSunMarker: red dot on the sun, blue on the moon
     bool liquidDepth = true;        // vfogLiquidDepth: coa LiquidDepth, water writes depth while the fog draws
 };
 

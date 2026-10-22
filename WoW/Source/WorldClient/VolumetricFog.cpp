@@ -760,7 +760,7 @@ void RegisterCVars() {
     s_cvars.underwater = reg("vfogUnderwater", "Volumetric fog also with the camera under water, over the stock fog (coa Underwater)", "0");
     s_cvars.stockFog = reg("vfogStockFog", "Volumetric fog: 1 = replaces the stock fog (default), 0 = keeps it and adds no distance fog (coa StockFog)", "1");
     s_cvars.foreverGlow = reg("vfogForeverGlow", "Volumetric fog: the modern client's glow amount where its lights cover the camera (coa ForeverGlow)", "0");
-    s_cvars.sunMarker = reg("vfogSunMarker", "Volumetric fog debug: red dot where the light direction projects (coa SunMarker)", "0");
+    s_cvars.sunMarker = reg("vfogSunMarker", "Volumetric fog debug: red dot on the sun, blue dot on the moon (coa SunMarker)", "0");
     s_cvars.liquidDepth = reg("vfogLiquidDepth", "Volumetric fog: water writes depth so it is fogged at its own distance; always on while modern water draws (coa LiquidDepth)", "1");
 
     RegisterWaterCVars();

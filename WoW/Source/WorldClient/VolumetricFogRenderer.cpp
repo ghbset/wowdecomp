@@ -35,6 +35,7 @@ constexpr uint32_t kLayerNoiseRegister = 36;
 constexpr uint32_t kLocalControlRegister = 53;
 constexpr uint32_t kVariationRegister = 78;
 constexpr uint32_t kCompositeRegister = 96;
+constexpr uint32_t kMoonMarkerRegister = 95;       // vf_composite cMoonMarker (c81-c95 free in the composite, D3D and Vulkan)
 constexpr uint32_t kHorizonBandRegister = 99;
 constexpr uint32_t kSampleSideRegister = 80;        // VFogCompositeSplit c80 (coa c99, which is the horizon band here)
 constexpr uint32_t kDitherRegister = 79;            // vf_common cDither (x on, y frame)
@@ -768,6 +769,7 @@ struct FogFrame {
     float march[4];
     float localControl[4];
     float sunPx[2];
+    float markers[2][4];   // vfogSunMarker: sun then moon (pixel x, y, shown, 0)
     float rayStrength;
     uint32_t rayW, rayH;
     bool rays;
@@ -907,13 +909,14 @@ void CompositePass(FogFrame& f, CGxTex* fogResult) {
     float compositeConstants[3][4] = {
         { exposure, 0.0f, static_cast<float>(f.cfg.debugView), static_cast<float>(blend) },
         { f.fog.rayColor[0], f.fog.rayColor[1], f.fog.rayColor[2], 0.0f },    // w = 0: no dither
-        { f.sunPx[0], f.sunPx[1], f.cfg.sunMarker && f.toLightInView[2] > 0.05f ? 1.0f : 0.0f, glow },                               // coa m_drawnGlowCompensation
+        { f.markers[0][0], f.markers[0][1], f.markers[0][2], glow },                               // coa m_drawnGlowCompensation
     };
     const FogParams compositeFog = f.lit ? WithMeanNoise(f.fog) : f.fog;
     SetPs(9, f.celestialLight, 1);
     SetPs(11, f.march, 1);
     SetPs(kLayerRegister, &compositeFog.layers[0].start, 6 * kFogLayers);
     SetPs(kCompositeRegister, &compositeConstants[0][0], 3);
+    SetPs(kMoonMarkerRegister, f.markers[1], 1);
     Bind(0, f.depth);
     Bind(1, fogResult);
     Bind(2, nullptr);
@@ -1222,6 +1225,24 @@ bool RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg,
         sunScreenFade = std::clamp(1.6f - std::max(std::fabs(ndcX), std::fabs(ndcY)), 0.0f, 1.0f);
     }
 
+    // vfogSunMarker: a dot on the sun and one on the moon (DayNight positions about the sky centre), each when in front.
+    float markers[2][4] = {};
+    if (cfg.sunMarker) {
+        const C3Vector* toward[2] = { &DayNight::g_sunToward, &DayNight::g_moonToward };
+        for (int i = 0; i < 2; ++i) {
+            float dir[3] = { toward[i]->x, toward[i]->y, toward[i]->z };
+            float v[3];
+            TransformDirection(dir, in.cameraRelativeView, v);
+            float len = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+            if (len < 1e-6f || v[2] / len <= 0.05f) {
+                continue;
+            }
+            markers[i][0] = vpX + ((v[0] / v[2] * proj[0] + proj[8]) * 0.5f + 0.5f) * vpW;
+            markers[i][1] = vpY + (0.5f - (v[1] / v[2] * proj[5] + proj[9]) * 0.5f) * vpH;
+            markers[i][2] = 1.0f;
+        }
+    }
+
     // coa :1344. The rays need the back buffer (scene copies) and their three shaders; without them the fog still draws.
     // vfog39: the rays come from the shown disc (in.toLight, gfxSunArc's g_lightBody, not gfxSunArcMatch's capped
     // shading light): none at or under the horizon, full by 3 degrees (lightVisibility keeps the fog's sunset glow),
@@ -1270,6 +1291,7 @@ bool RenderFog(const FogParams& fogIn, const FrameInputs& in, const Config& cfg,
     std::memcpy(f.march, march, sizeof(march));
     std::memcpy(f.localControl, localControl, sizeof(localControl));
     std::memcpy(f.sunPx, sunPx, sizeof(sunPx));
+    std::memcpy(f.markers, markers, sizeof(markers));
     f.rayStrength = rayStrength;
     f.rayW = rayW; f.rayH = rayH;
     f.rays = rays;
