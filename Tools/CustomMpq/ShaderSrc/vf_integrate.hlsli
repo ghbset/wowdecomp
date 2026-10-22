@@ -337,7 +337,7 @@ float4 IntegrateFogAtDepth(float2 pixel, float depth, float jitter)
     float3 cameraWorld = CameraPositionWorld();
     float3 directionWorld = ViewToWorldDirection(viewDirection);
     float cosToLight = dot(DirectionToLightView(), viewDirection);
-    float upward = max(directionWorld.z, 0);
+    float upward = skyMask > 0 ? abs(directionWorld.z) : max(directionWorld.z, 0);   // Raz0r fork 1667464: void below the horizon thinned as the sky above
     float riseLevelledAtHorizon = lerp(directionWorld.z, upward, horizonBlend);
     float skyUpward = skyMask * upward;
     MarchRay ray = {viewDirection, directionWorld, cameraWorld.z, riseLevelledAtHorizon};
