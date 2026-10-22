@@ -917,6 +917,7 @@ void CompositePass(FogFrame& f, CGxTex* fogResult) {
     SetPs(kLayerRegister, &compositeFog.layers[0].start, 6 * kFogLayers);
     SetPs(kCompositeRegister, &compositeConstants[0][0], 3);
     SetPs(kMoonMarkerRegister, f.markers[1], 1);
+    SetPs(kLayerNoiseRegister, &f.noiseRegisters[0].octaveOffsetAndInverseTile[0][0], 4 * kSceneLayers);   // AnyLayerNoise (0d6a2f6)
     Bind(0, f.depth);
     Bind(1, fogResult);
     Bind(2, nullptr);
