@@ -8,7 +8,6 @@
 #include "Engine/Source/Gx/CGxDevice/CGxDevice.h"
 #include "Engine/Source/Gx/Gx.h"
 #include "Engine/Source/Gx/Types.h"
-#include "Engine/Source/Os/TimeManager.h"
 #include "Engine/Source/Tempest/C44Matrix.h"
 #include "Engine/Source/Tempest/CAaBox.h"
 #include "Engine/Source/Tempest/CAaSphere.h"
@@ -25,9 +24,10 @@ namespace {
     constexpr float kPad = 1.0f;
     /// A camera inside the box grown by this much is never culled and never queried (near plane).
     constexpr float kInsidePad = kPad + 2.0f;
-    /// Camera moves or stalls past these reset every answer (teleport, loading screen, hitch).
+    /// Camera moves past this reset every answer (teleport, loading screen). No reset on a slow frame:
+    /// a time gate made culling flip on and off every other frame near the threshold (flicker with a
+    /// low background FPS cap); the per-answer position and direction gates already cover stale answers.
     constexpr float kJumpDistSq = 10.0f * 10.0f;
-    constexpr uint32_t kStallMs = 250;
     /// Doodads smaller than this (sphere radius, yards) cost less to draw than to query.
     constexpr float kMinDoodadRadius = 1.0f;
     /// An "occluded" answer holds only while the camera is within this of where its query was drawn.
@@ -38,6 +38,10 @@ namespace {
     /// ponytail: culling is in effect only while (nearly) standing still; a reprojected or same-frame
     /// test is the upgrade if moving-camera savings matter.
     constexpr float kAnswerMoveSq = 0.05f * 0.05f;
+    /// ...and while the view direction is within about 0.8 degrees of it. The box is only rasterised
+    /// where it is on screen and tested against on-screen depth, so after a turn an "occluded" answer
+    /// can belong to the part of the box that was in view, not the part that is now.
+    constexpr float kAnswerDirDot = 0.9999f;
 
     struct Entry {
         CAaBox box;
@@ -46,13 +50,14 @@ namespace {
         bool occluded = false;      ///< the last answer
         C3Vector queryAt;           ///< camera position the query in flight was drawn from
         C3Vector answerAt;          ///< camera position the last answer belongs to
+        C3Vector queryDir;          ///< view direction the query in flight was drawn with
+        C3Vector answerDir;         ///< view direction the last answer belongs to
         bool queued = false;        ///< in s_toQuery this frame
     };
 
     bool s_active;
     CGxDevice* s_device;
     uint32_t s_frame = 1;
-    uint32_t s_lastMs;
     C3Vector s_lastCam;
     std::unordered_map<const void*, Entry> s_entries;
     std::vector<Entry*> s_toQuery;
@@ -146,15 +151,13 @@ void OcclusionCull::BeginFrame() {
         s_device = g_theGxDevicePtr;
     }
 
-    const uint32_t now = OsGetAsyncTimeMs();
     const C3Vector cam = CWorldScene::s_activeWorldView;
     const C3Vector d = cam - s_lastCam;
 
-    if (now - s_lastMs > kStallMs || d.x * d.x + d.y * d.y + d.z * d.z > kJumpDistSq) {
+    if (d.x * d.x + d.y * d.y + d.z * d.z > kJumpDistSq) {
         ResetAll();
     }
 
-    s_lastMs = now;
     s_lastCam = cam;
     s_frame++;
     s_toQuery.clear();
@@ -171,6 +174,7 @@ void OcclusionCull::BeginFrame() {
                 uint32_t samples = 1;
                 e.occluded = GxQueryGetData(e.query, &samples) && samples == 0;
                 e.answerAt = e.queryAt;
+                e.answerDir = e.queryDir;
                 Release(e, true);
             }
         }
@@ -210,7 +214,9 @@ bool OcclusionCull::IsOccluded(const void* key, const CAaBox& box) {
     }
 
     const C3Vector d = CWorldScene::s_activeWorldView - e.answerAt;
-    return e.occluded && d.x * d.x + d.y * d.y + d.z * d.z <= kAnswerMoveSq;
+    const C3Vector& v = CWorldScene::camVec;
+    return e.occluded && d.x * d.x + d.y * d.y + d.z * d.z <= kAnswerMoveSq
+        && v.x * e.answerDir.x + v.y * e.answerDir.y + v.z * e.answerDir.z >= kAnswerDirDot;
 }
 
 bool OcclusionCull::IsOccluded(const void* key, const CAaSphere& sphere) {
@@ -247,6 +253,7 @@ void OcclusionCull::IssueQueries() {
         }
 
         e->queryAt = CWorldScene::s_activeWorldView;
+        e->queryDir = CWorldScene::camVec;
         batch.push_back(e);
     }
 

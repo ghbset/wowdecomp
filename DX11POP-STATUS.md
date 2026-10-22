@@ -49,3 +49,21 @@ Ask the user (D3D11, at Thorn Hill), in order:
 2. `environmentDetail 0.5` then `1.5`: if the snap distance moves with it, the fade band is confirmed.
 3. If neither changes it: `vfog 0`, then `extShadowQuality 0` (shadow band and caster cut-offs, ShadowQuery.cpp:913
    maxDoodadSize / IsBeyondFadeDistance: the hut platform may stop shadowing its stakes past a band).
+
+## Session 3 (2026-10-22): occlusionCulling, fix committed, compile-checked only
+
+User test: unchecking Advanced > "Occlusion culling" (CVar `occlusionCulling`, default 0, Vulkan only:
+OcclusionCull.cpp Enabled() requires GxApi_Vulkan) stops the unfocused-window flicker. So item 3 was on Vulkan.
+Not the stock `occlusion` CVar (sun-glare query only, DayNight.cpp:3347).
+
+Mechanism (OcclusionCull.cpp, d2605ac0 + 4d4185aa), answers are 1-3 frames old:
+- BeginFrame reset every answer when a frame took > 250 ms (kStallMs). Near that frame time, culling turned on and
+  off every other frame. Removed: the jump test plus the per-answer position gate already cover stale answers.
+- An "occluded" answer was kept through camera turns: the gate checked position only. The box is only rasterised
+  where it is on screen, against on-screen depth, so after a turn the answer can be about a different part of the
+  box (objects pop in late at screen edges). Answers now also need the view direction within 0.8 degrees (camVec dot).
+Does NOT explain item 1: D3D11 never runs this system. Item 4 (identity giants): no link found in code; ask for an A/B.
+Note: World.cpp:3681 sets m_culled = 0 before the GPU test, so occluded doodads still look "not culled" to other code.
+
+Build: OcclusionCull.cpp compiled clean with the wt-gbuf-x64 flags against this tree; no full Wow link (this
+worktree has no build dir in /root/wowdecomp-xbuild).
