@@ -6,6 +6,7 @@
 #include <windows.h>
 #include <d3d9.h>
 #include "Engine/Source/Gx/CGxDevice/CGxDevice.h"
+#include "Engine/Source/Gx/GxFrameLatency.h"
 #include "Engine/Source/Storm/H/stpl.h"
 
 class CGxDeviceD3d : public CGxDevice {
@@ -263,6 +264,8 @@ class CGxDeviceD3d : public CGxDevice {
     void INormalCreate();
     void INormalRelease();
     void INormalSync();
+    // CUSTOM (Badgermilk0 port); gxFixLag waits on the frame gxMaxFrameLatency back, not the one just submitted
+    CGxFrameLatency m_frameLatency;
 
     virtual void ITexMarkAsUpdated(CGxTex* texId);
     virtual void IRsSendToHw(EGxRenderState which);

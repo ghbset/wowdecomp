@@ -136,6 +136,10 @@ class CGxDeviceD3d11 : public CGxDevice {
     ID3D11PixelShader* m_ffPs[3];
     // d3d11Debug 2: shaders created from the SM2 (ps_2_0/vs_2_0) families, by family name.
     std::unordered_map<const CGxShader*, std::string> m_sm2Shaders;
+    // CUSTOM (Badgermilk0 port, GxFrameLatency.h): gxFixLag keeps DXGI's queue gxMaxFrameLatency frames deep; 0 waits
+    // on this event query for the frame just submitted (the stock D3D9 behaviour)
+    ID3D11Query* m_frameLatencyQuery = nullptr;
+    uint32_t m_frameLatencyApplied = 0;
 
     virtual void ITexMarkAsUpdated(CGxTex* texId);
     virtual void IRsSendToHw(EGxRenderState which);

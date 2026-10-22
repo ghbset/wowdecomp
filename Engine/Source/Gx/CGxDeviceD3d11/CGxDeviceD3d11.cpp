@@ -16,6 +16,7 @@
 #include "Engine/Source/Gx/CGxPool.h"
 #include "Engine/Source/Gx/CGxTex.h"
 #include "Engine/Source/Gx/Gx.h"
+#include "Engine/Source/Gx/GxFrameLatency.h"
 #include "Engine/Source/Os/Error.h"
 #include "Engine/Source/Services/Texture.h"
 #include "Engine/Source/Services/TextureBlob.h"
@@ -760,7 +761,9 @@ int32_t CGxDeviceD3d11::ICreateSwapChain(const CGxFormat& format) {
         IDXGIDevice1* dxgiDevice = nullptr;
 
         if (SUCCEEDED(this->m_d3dDevice->QueryInterface(__uuidof(IDXGIDevice1), reinterpret_cast<void**>(&dxgiDevice)))) {
-            dxgiDevice->SetMaximumFrameLatency(1);
+            // CUSTOM (Badgermilk0 port): gxMaxFrameLatency frames (0 waits in ScenePresent, DXGI's minimum is 1)
+            this->m_frameLatencyApplied = g_gxMaxFrameLatency;
+            dxgiDevice->SetMaximumFrameLatency(g_gxMaxFrameLatency ? g_gxMaxFrameLatency : 1);
             dxgiDevice->Release();
         }
     }
@@ -923,6 +926,7 @@ void CGxDeviceD3d11::IDestroyD3d() {
     D3d11Log("CGxDeviceD3d11::IDestroyD3d(): back buffer, constant buffers, state objects released");
 
     SafeRelease(this->m_swapChain);
+    SafeRelease(this->m_frameLatencyQuery);   // CUSTOM (Badgermilk0 port)
     D3d11Log("CGxDeviceD3d11::IDestroyD3d(): swap chain released");
 
     if (this->m_d3dContext) {
@@ -1611,14 +1615,50 @@ void CGxDeviceD3d11::ScenePresent() {
 
         this->m_resolveValid = false;
         this->m_sceneDepthFresh = false;
+        // CUSTOM (Badgermilk0 port): performance diagnostics (GxFrameStats)
+        uint64_t frameStart = GxFrameStatsNow();
         CGxDevice::ScenePresent();
         // Software cursor (no hardware cursor in D3D11). Draws through the normal path, so it shows from phase 2 on.
         this->ICursorDraw();
+
+        uint64_t gpuWaitStart = GxFrameStatsNow();
+
+        // CUSTOM (Badgermilk0 port, GxFrameLatency.h): gxMaxFrameLatency, live; 0 is the stock full wait
+        if (this->m_format.m_fixLag) {
+            uint32_t latency = g_gxMaxFrameLatency;
+
+            if (latency != this->m_frameLatencyApplied) {
+                IDXGIDevice1* dxgiDevice = nullptr;
+
+                if (SUCCEEDED(this->m_d3dDevice->QueryInterface(__uuidof(IDXGIDevice1), reinterpret_cast<void**>(&dxgiDevice)))) {
+                    dxgiDevice->SetMaximumFrameLatency(latency ? latency : 1);
+                    dxgiDevice->Release();
+                }
+
+                this->m_frameLatencyApplied = latency;
+            }
+
+            if (!latency) {
+                if (!this->m_frameLatencyQuery) {
+                    D3D11_QUERY_DESC desc = { D3D11_QUERY_EVENT, 0 };
+                    this->m_d3dDevice->CreateQuery(&desc, &this->m_frameLatencyQuery);
+                }
+
+                if (this->m_frameLatencyQuery) {
+                    this->m_d3dContext->End(this->m_frameLatencyQuery);
+
+                    while (this->m_d3dContext->GetData(this->m_frameLatencyQuery, nullptr, 0, 0) == S_FALSE) {
+                        SwitchToThread();
+                    }
+                }
+            }
+        }
 
         if (scrShotClick) {
             this->DeviceScreenShot();
         }
 
+        uint64_t capStart = GxFrameStatsNow();
         this->WaitForFPSCap();
 
         if (s_dumpFrame) {
@@ -1641,7 +1681,9 @@ void CGxDeviceD3d11::ScenePresent() {
 
         uint32_t vsync = this->m_format.m_vsync;
         UINT interval = vsync ? (this->m_format.m_window ? 1 : (vsync > 4 ? 4 : vsync)) : 0;
+        uint64_t presentStart = GxFrameStatsNow();
         HRESULT hr = this->m_swapChain->Present(interval, 0);
+        GxFrameStatsRecord(frameStart, gpuWaitStart, capStart, presentStart, GxFrameStatsNow());
 
         if (FAILED(hr)) {
             D3d11Log("CGxDeviceD3d11::ScenePresent(): Present failed: 0x%08X", static_cast<uint32_t>(hr));

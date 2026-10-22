@@ -8,6 +8,7 @@
 #include "Engine/Source/Gx/CGxDevice/Types.h"
 #include "Engine/Source/Gx/CGxFormat.h"
 #include "Engine/Source/Gx/Gx.h"
+#include "Engine/Source/Gx/GxFrameLatency.h"
 #include "Engine/Source/Os/Input.h"
 #include "Engine/Source/Storm/H/storm.h"
 #include "WoW/Source/Client.h"
@@ -266,6 +267,18 @@ static bool CVGxMultisampleQualityCallback(CVar* var, const char* oldValue, cons
 static bool CVGxFixLagCallback(CVar* var, const char* oldValue, const char* value, void* arg) {
     s_requestedFormat.m_fixLag = SStrToInt(value) != 0;
     ConsoleWrite("set pending gxRestart", DEFAULT_COLOR);
+    return true;
+}
+
+// CUSTOM (Badgermilk0 port); how many frames gxFixLag lets the GPU queue (0 = the stock full wait), live
+static bool CVGxMaxFrameLatencyCallback(CVar* var, const char* oldValue, const char* value, void* arg) {
+    int32_t latency = SStrToInt(value);
+
+    if (latency < 0 || latency > 3) {
+        return false;
+    }
+
+    g_gxMaxFrameLatency = static_cast<uint32_t>(latency);
     return true;
 }
 
@@ -566,6 +579,8 @@ void RegisterGxCVars() {
 
     SStrPrintf(value, sizeof(value), "%d", s_hardware.m_videoHw->m_fixLag);
     s_cvGxFixLag = CVar::Register("gxFixLag", "prevent cursor lag", 3, value, CVGxFixLagCallback, CATEGORY_GRAPHICS, false, nullptr, false);
+    // CUSTOM (Badgermilk0 port)
+    CVar::Register("gxMaxFrameLatency", "frames the GPU may queue with gxFixLag (0-3, 0 = wait for each frame)", 1, "1", CVGxMaxFrameLatencyCallback, CATEGORY_GRAPHICS, false, nullptr, false);
 
     s_cvGxStereoEnabled = CVar::Register("gxStereoEnabled", "Enable stereoscopic rendering", 1, "0", CVGxStereoEnabledCallback, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvGxOverride = CVar::Register("gxOverride", "gx overrides", 1, "", CVGxOverrideCallback, CATEGORY_GRAPHICS, false, nullptr, false);
