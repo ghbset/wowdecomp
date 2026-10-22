@@ -174,6 +174,7 @@
 #include "Engine/Source/Tempest/CMath.h"
 #include "WoW/Source/DB/Rec/PaperDollItemFrameRec.h"
 #include "WoW/Source/Object/WGUID.h"
+#include "WoW/Source/Ui/Radio.h"
 
 // STATIC: 0x00BD0CC4
 static CWOWClientStatus* s_loadAddOnStatus;
@@ -6665,6 +6666,7 @@ void LoadScriptFunctions() {
     EquipmentManagerRegisterScriptFunctions();
     GMTicketInfoRegisterScriptFunctions();
     BattlenetUI_RegisterScriptFunctions();
+    RadioRegisterScriptFunctions();   // fork: wxl-radio port
 }
 
 // VERIFY: ce499890 manual
@@ -6747,4 +6749,5 @@ void UnloadScriptFunctions() {
     EquipmentManagerUnregisterScriptFunctions();
     GMTicketInfoUnregisterScriptFunctions();
     BattlenetUI_UnregisterScriptFunctions();
+    RadioUnregisterScriptFunctions();   // fork: wxl-radio port
 }

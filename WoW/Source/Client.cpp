@@ -112,6 +112,7 @@
 #include "WoW/Source/WowSvcs/WowSvcsClient/ClientServices.h"
 #include "WoW/Source/WowSvcs/WowSvcsClient/FriendList.h"
 #include "WoW/Source/WowSysMessageOutput.h"
+#include "WoW/Source/Ui/Radio.h"
 
 namespace {
 
@@ -1650,6 +1651,7 @@ void ClientDestroyGame(int32_t charSelect, int32_t resumeGlue, int32_t worldLogi
 // VERIFY: e61971e0 auto
 // OFFSET: 0x004066D0
 int32_t DestroyEngineCallback(const void* data, void* param) {
+    RadioShutdown();   // fork: wxl-radio port, silence the stream before teardown
     GxTeardownLog("DestroyEngineCallback: RemoveConsoleDeviceDefaultCallback");
     RemoveConsoleDeviceDefaultCallback(SetDefaults);
     GxTeardownLog("DestroyEngineCallback: ClientDestroyGame");
