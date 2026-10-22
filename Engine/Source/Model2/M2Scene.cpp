@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstring>
 #include <new>
+#include "Engine/Source/Base/FrameProfile.h"
 #include <xmmintrin.h>
 #include "Engine/Source/Model2/M2Scene.h"
 #include "Engine/Source/Base/ObjectAlloc.h"
@@ -1796,6 +1797,9 @@ int32_t CM2Scene::Animate(const C3Vector& cameraPos) {
     this->m_view.Translate(move);
     this->m_viewInv = this->m_view.Inverse(this->m_view.Determinant());
 
+    // CUSTOM (Badgermilk0 port): performance diagnostics (FrameProfile.h)
+    uint64_t animStart = FrameProfileNow();
+
     // Not stock: stock splits the list between the main thread and one worker. We snapshot the root models and
     // share them out over the worker pool; short lists (portraits, glue scenes) stay on this thread.
     s_animateRoots.SetCount(0);
@@ -1821,6 +1825,11 @@ int32_t CM2Scene::Animate(const C3Vector& cameraPos) {
             AnimateRoot(model, &this->m_view);
         }
     }
+
+    // CUSTOM (Badgermilk0 port): performance diagnostics (FrameProfile.h)
+    uint64_t serialStart = FrameProfileNow();
+    FrameProfileAdd(FRAMEPROFILE_ANIM_PARALLEL, animStart, serialStart);
+    FrameProfileCount(FRAMEPROFILE_MODELS_ANIMATED, s_animateRoots.Count());
 
     // Not stock: emitters of thread-safe root trees update on the worker pool first; the rest of AnimateST (lights,
     // draw/particle list links, unsafe trees in full) then runs here in the stock list order.
@@ -1848,6 +1857,15 @@ int32_t CM2Scene::Animate(const C3Vector& cameraPos) {
         model->m_animateNext = nullptr;
         model->SetupLighting();
     }
+
+    // CUSTOM (Badgermilk0 port): performance diagnostics (FrameProfile.h)
+    uint64_t batchStart = FrameProfileNow();
+    FrameProfileAdd(FRAMEPROFILE_ANIM_SERIAL, serialStart, batchStart);
+    // the batch build has early returns; charge it whichever way it leaves
+    struct BatchTimer {
+        uint64_t m_start;
+        ~BatchTimer() { FrameProfileAdd(FRAMEPROFILE_ANIM_BATCH, this->m_start, FrameProfileNow()); }
+    } batchTimer = { batchStart };
 
     this->m_doodadElements.m_count = 0;
 

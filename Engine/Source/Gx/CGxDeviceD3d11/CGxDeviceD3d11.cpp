@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <unordered_set>
+#include "Engine/Source/Base/FrameProfile.h"
 #include "Engine/Source/Gx/CGxDeviceD3d11/CGxDeviceD3d11.h"
 #include "Engine/Source/Gx/CGxDeviceD3d11/D3d11Util.h"
 #include "Engine/Source/ConsoleBase/ConsoleVar.h"
@@ -705,6 +706,18 @@ void CGxDeviceD3d11::ILeaveFullscreen() {
 
 // Swap chain + back buffer views + depth on the current device and window. DeviceSetFormat rebuilds just this when
 // the device survives, so textures, shaders and states keep their contents.
+// CUSTOM (Badgermilk0 port): performance diagnostics. The device whose GPU FrameProfile's section switches time
+// (D3d11GpuTimer.h)
+static CGxDeviceD3d11* s_gpuTimedDevice;
+
+static void GpuTimerMark(FrameProfileSection section) {
+    CGxDeviceD3d11* device = s_gpuTimedDevice;
+
+    if (device && device->m_context && device->m_d3dDevice && device->m_d3dContext) {
+        device->m_gpuTimer.Mark(device->m_d3dDevice, device->m_d3dContext, section);
+    }
+}
+
 int32_t CGxDeviceD3d11::ICreateSwapChain(const CGxFormat& format) {
     DXGI_SWAP_CHAIN_DESC desc;
     memset(&desc, 0, sizeof(desc));
@@ -767,6 +780,10 @@ int32_t CGxDeviceD3d11::ICreateSwapChain(const CGxFormat& format) {
             dxgiDevice->Release();
         }
     }
+
+    // CUSTOM (Badgermilk0 port): performance diagnostics (D3d11GpuTimer.h)
+    s_gpuTimedDevice = this;
+    g_frameProfileGpuMark = GpuTimerMark;
 
     return this->ICreateBackBuffer();
 }
@@ -927,6 +944,13 @@ void CGxDeviceD3d11::IDestroyD3d() {
 
     SafeRelease(this->m_swapChain);
     SafeRelease(this->m_frameLatencyQuery);   // CUSTOM (Badgermilk0 port)
+    this->m_gpuTimer.Release();               // CUSTOM (Badgermilk0 port)
+
+    if (s_gpuTimedDevice == this) {
+        s_gpuTimedDevice = nullptr;
+        g_frameProfileGpuMark = nullptr;
+    }
+
     D3d11Log("CGxDeviceD3d11::IDestroyD3d(): swap chain released");
 
     if (this->m_d3dContext) {
@@ -1620,6 +1644,9 @@ void CGxDeviceD3d11::ScenePresent() {
         CGxDevice::ScenePresent();
         // Software cursor (no hardware cursor in D3D11). Draws through the normal path, so it shows from phase 2 on.
         this->ICursorDraw();
+
+        // CUSTOM (Badgermilk0 port): performance diagnostics (D3d11GpuTimer.h)
+        this->m_gpuTimer.EndFrame(this->m_d3dDevice, this->m_d3dContext);
 
         uint64_t gpuWaitStart = GxFrameStatsNow();
 
@@ -3305,6 +3332,9 @@ void CGxDeviceD3d11::Draw(CGxBatch* batch, int32_t count) {
     if (!this->m_context || this->m_intF5C) {
         return;
     }
+
+    // CUSTOM (Badgermilk0 port): performance diagnostics (FrameProfile.h), API draw calls per frame
+    FrameProfileCount(FRAMEPROFILE_DRAW_CALLS, static_cast<uint32_t>(count));
 
     this->m_resolveValid = false;
     this->IStateSync();

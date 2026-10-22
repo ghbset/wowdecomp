@@ -9,6 +9,7 @@
 #include <string>
 #include <unordered_map>
 #include "Engine/Source/Gx/CGxDevice/CGxDevice.h"
+#include "Engine/Source/Gx/CGxDeviceD3d11/D3d11GpuTimer.h"
 #include "Engine/Source/Storm/H/stpl.h"
 
 // D3D11 backend, modelled on 4.3.4 (15595) CGxDeviceD3d11 (vtable 0x00BD5710). Not part of 12340: no OFFSET tags.
@@ -140,6 +141,8 @@ class CGxDeviceD3d11 : public CGxDevice {
     // on this event query for the frame just submitted (the stock D3D9 behaviour)
     ID3D11Query* m_frameLatencyQuery = nullptr;
     uint32_t m_frameLatencyApplied = 0;
+    // CUSTOM (Badgermilk0 port): GPU time per FrameProfile section (D3d11GpuTimer.h)
+    D3d11GpuTimer m_gpuTimer;
 
     virtual void ITexMarkAsUpdated(CGxTex* texId);
     virtual void IRsSendToHw(EGxRenderState which);

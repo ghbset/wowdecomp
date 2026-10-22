@@ -152,6 +152,11 @@
 #include "WoW/Source/UIUtil/PortraitButton.h"
 #include "WoW/Source/UIUtil/Tooltip.h"
 #include "WoW/Source/WorldClient/World.h"
+#include "Engine/Source/Base/FrameProfile.h"
+#include "Engine/Source/Gx/GxFrameLatency.h"
+#include "Engine/Source/Model2/M2Cache.h"
+#include "Engine/Source/Model2/M2Scene.h"
+#include "WoW/Source/WorldClient/DetailDoodad.h"
 #include "WoW/Source/WowServices/RealmConnection.h"
 #include "WoW/Source/WowServices/WDataStore.h"
 #include "WoW/Source/WowSvcs/WowSvcsClient/AccountData.h"
@@ -2554,6 +2559,57 @@ static int32_t Script_GetMirrorTimerInfo(lua_State* L) {
 // OFFSET: 0x00510470
 static int32_t Script_GetFramerate(lua_State* L) {
     lua_pushnumber(L, World::GetFramerate());
+    return 1;
+}
+
+// CUSTOM (Badgermilk0 port): where a frame's time goes (GxFrameLatency.h), smoothed ms: cpu, gpu wait (gxFixLag), fps
+// cap, present (vsync and a full swap chain block here), the whole frame
+static int32_t Script_GetFrameTimings(lua_State* L) {
+    lua_pushnumber(L, g_gxFrameStats.m_cpu);
+    lua_pushnumber(L, g_gxFrameStats.m_gpuWait);
+    lua_pushnumber(L, g_gxFrameStats.m_capWait);
+    lua_pushnumber(L, g_gxFrameStats.m_present);
+    lua_pushnumber(L, g_gxFrameStats.m_frame);
+    return 5;
+}
+
+// CUSTOM (Badgermilk0 port): ms per FrameProfileSection in enum order (unitUpdate, worldUpdate, cull, animParallel,
+// animSerial, animBatch, terrain, wmo, worldOther, nameplates, models, detail, liquid, effects, shadows, grassFill,
+// grassLights), then the counters in enum order (models animated, draw calls, grass chunks, grass draws, grass fills,
+// grass streamed), then the animation threads (the Model2 workers and the main thread)
+static int32_t Script_GetSceneTimings(lua_State* L) {
+    for (uint32_t i = 0; i < FRAMEPROFILE_COUNT; i++) {
+        lua_pushnumber(L, g_frameProfile.m_ms[i]);
+    }
+
+    for (uint32_t i = 0; i < FRAMEPROFILE_COUNTERS; i++) {
+        lua_pushnumber(L, g_frameProfile.m_counters[i]);
+    }
+
+    CM2Scene* scene = World::s_m2Scene;
+    lua_pushnumber(L, scene && scene->m_cache ? scene->m_cache->m_threadCount + 1 : 1);
+    return FRAMEPROFILE_COUNT + FRAMEPROFILE_COUNTERS + 1;
+}
+
+// CUSTOM (Badgermilk0 port): nothing on a device that cannot time its GPU (D3d11GpuTimer.h); else the frame's GPU ms,
+// then ms per section as GetSceneTimings
+static int32_t Script_GetGpuTimings(lua_State* L) {
+    if (!g_frameProfile.m_gpuValid) {
+        return 0;
+    }
+
+    lua_pushnumber(L, g_frameProfile.m_gpuFrame);
+
+    for (uint32_t i = 0; i < FRAMEPROFILE_COUNT; i++) {
+        lua_pushnumber(L, g_frameProfile.m_gpuMs[i]);
+    }
+
+    return FRAMEPROFILE_COUNT + 1;
+}
+
+// CUSTOM (Badgermilk0 port): baked grass buffer pairs in use (CDetailDoodad::GrowPools)
+static int32_t Script_GetGroundEffectBuffers(lua_State* L) {
+    lua_pushnumber(L, CDetailDoodad::s_poolPairs);
     return 1;
 }
 
@@ -6196,6 +6252,11 @@ static FrameScript_Method s_ScriptFunctions[] = {
     { "SetConsoleKey", &Script_SetConsoleKey },
     { "Screenshot", &Script_Screenshot },
     { "GetFramerate", &Script_GetFramerate },
+    // CUSTOM (Badgermilk0 port)
+    { "GetFrameTimings", &Script_GetFrameTimings },
+    { "GetSceneTimings", &Script_GetSceneTimings },
+    { "GetGpuTimings", &Script_GetGpuTimings },
+    { "GetGroundEffectBuffers", &Script_GetGroundEffectBuffers },
     { "TogglePerformanceDisplay", &Script_TogglePerformanceDisplay },
     { "TogglePerformancePause", &Script_TogglePerformancePause },
     { "TogglePerformanceValues", &Script_TogglePerformanceValues },

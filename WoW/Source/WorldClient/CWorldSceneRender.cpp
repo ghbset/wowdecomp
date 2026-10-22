@@ -1,5 +1,6 @@
 #include <cfloat>
 #include "CWorldSceneRender.h"
+#include "Engine/Source/Base/FrameProfile.h"
 #include "WoW/Source/WorldClient/Map.h"
 #include "WoW/Source/WorldClient/World.h"
 #include "Engine/Source/Gx/Gx.h"
@@ -73,6 +74,9 @@ void CWorldScene::RenderCollisionDebug() {
 // VERIFY: cd492c82 manual
 // OFFSET: 0x0079A870
 void CWorldScene::Render(const C3Vector& cameraPos, float time) {
+    // CUSTOM (Badgermilk0 port): performance diagnostics (FrameProfile.h), the FrameProfileSwitch calls below
+    FrameProfileSwitch(FRAMEPROFILE_CULL);
+
     if (!CWorldScene::s_viewerMapObjDef) {
         CWorldScene::ComputeExteriorSortDistances();
     }
@@ -191,6 +195,8 @@ void CWorldScene::Render(const C3Vector& cameraPos, float time) {
     }
 
     CM2Scene* scene = World::s_m2Scene;
+    // Animate times its own parts
+    FrameProfileSwitch(FRAMEPROFILE_NONE);
 
     if (scene) {
         scene->m_flags |= 0x1;
@@ -199,16 +205,23 @@ void CWorldScene::Render(const C3Vector& cameraPos, float time) {
         scene->m_flags &= ~0x1;
     }
 
+    FrameProfileSwitch(FRAMEPROFILE_WORLD_OTHER);
     CGUnit_C::UpdateMissileTrajectoryTargeting();
+    FrameProfileSwitch(FRAMEPROFILE_SHADOWS);
     CShadowQuery::Update();
+    FrameProfileSwitch(FRAMEPROFILE_WORLD_OTHER);
     CShaderEffect::UpdateProjMatrix();
     CWorldScene::ApplyFogState();
     CataWater::RenderReflection();   // CATAREFL: not in 12340 (Cata p = 1 planar reflection, before the lists are consumed)
+    FrameProfileSwitch(FRAMEPROFILE_TERRAIN);
     CWorldScene::RenderChunks();
+    FrameProfileSwitch(FRAMEPROFILE_WMO);
     CWorldScene::RenderMapObjDefGroups();
     // OCCLUSION: depth now holds terrain and WMO groups; test this frame's candidates against it.
     OcclusionCull::IssueQueries();
+    FrameProfileSwitch(FRAMEPROFILE_TERRAIN);
     CWorldScene::RenderHorizon();
+    FrameProfileSwitch(FRAMEPROFILE_WMO);
 
     if (CWorldScene::s_unk_ADF570.m_maxViewDepth >= 0.0f) {
         if (CWorldScene::s_exteriorPortalViews.Count()) {
@@ -230,6 +243,7 @@ void CWorldScene::Render(const C3Vector& cameraPos, float time) {
         }
     }
 
+    FrameProfileSwitch(FRAMEPROFILE_WORLD_OTHER);
     CWorldScene::RenderEntitys();
     Liquid::UpdateProceduralTextures();
     CWorldScene::PrepareLiquidInstances();
@@ -260,6 +274,8 @@ void CWorldScene::Render(const C3Vector& cameraPos, float time) {
         CMap::debugVertexArray.SetCount(0);
         CMap::debugIndexArray.m_count = 0;
     }
+
+    FrameProfileSwitch(FRAMEPROFILE_NONE);
 }
 
 

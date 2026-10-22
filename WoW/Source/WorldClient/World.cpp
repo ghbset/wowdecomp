@@ -1,4 +1,5 @@
 #include "World.h"
+#include "Engine/Source/Base/FrameProfile.h"
 #include "WoW/Source/WorldClient/TreeLeaves.h"   // TREELEAVES
 #include "WoW/Source/WorldClient/WorldConstants.h"
 #include <cstdlib>
@@ -3616,9 +3617,13 @@ void CWorldScene::RenderDetailDoodads() {
         CMapChunk* chunk = inst->m_chunk;
         inst->m_age = 0;
 
+        // CUSTOM (Badgermilk0 port): performance diagnostics (FrameProfile.h)
+        uint64_t lightStart = FrameProfileNow();
         CM2Lighting lighting(chunk->m_sphere);
         World::s_m2Scene->SelectLights(&lighting);
         chunk->SelectLights(&lighting);
+        FrameProfileAdd(FRAMEPROFILE_GRASS_LIGHTS, lightStart, FrameProfileNow());
+        FrameProfileCount(FRAMEPROFILE_GRASS_CHUNKS, 1);
 
         world = C44Matrix();
         world.Translate(chunk->m_topLeftCoords - CWorldScene::s_activeWorldView);

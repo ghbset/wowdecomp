@@ -1,4 +1,5 @@
 #include "Engine/Source/Gx/GxFrameLatency.h"
+#include "Engine/Source/Base/FrameProfile.h"
 
 // CUSTOM (Badgermilk0 port), see GxFrameLatency.h
 
@@ -38,6 +39,9 @@ void GxFrameStatsRecord(uint64_t frameStart, uint64_t gpuWaitStart, uint64_t cap
     }
 
     s_lastPresentEnd = presentEnd;
+
+    // the scene sections (FrameProfile.h) close their frame here too
+    FrameProfileEndFrame();
 }
 
 void CGxFrameLatency::EndFrame(IDirect3DDevice9* device) {

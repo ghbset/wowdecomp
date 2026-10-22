@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstring>
 #include <malloc.h>
+#include "Engine/Source/Base/FrameProfile.h"
 #include "Engine/Source/Gx/CGxDeviceD3d/CGxDeviceD3d.h"
 #include "Engine/Source/Gx/Blit.h"
 #include "Engine/Source/Gx/CGxDeviceD3d/D3d9SceneDepth.h"
@@ -3332,6 +3333,9 @@ void CGxDeviceD3d::Draw(CGxBatch* batch, int32_t count) {
     if (!this->m_context || this->m_intF5C) {
         return;
     }
+
+    // CUSTOM (Badgermilk0 port): performance diagnostics (FrameProfile.h), API draw calls per frame
+    FrameProfileCount(FRAMEPROFILE_DRAW_CALLS, static_cast<uint32_t>(count));
 
     this->IStateSync();
 
