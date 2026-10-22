@@ -3607,7 +3607,10 @@ void CWorldScene::RenderDetailDoodads() {
     g_theGxDevicePtr->XformPush(GxXform_World);
     g_theGxDevicePtr->XformPush(GxXform_Tex1);
 
-    CDetailDoodad::PrefillBatches(); // GRASSJOBS: not in 12340
+    // GRASSJOBS: not in 12340; charged to grassFill like Draw's own refills (FrameProfile.h)
+    uint64_t prefillStart = FrameProfileNow();
+    CDetailDoodad::PrefillBatches();
+    FrameProfileAdd(FRAMEPROFILE_GRASS_FILL, prefillStart, FrameProfileNow());
     int32_t shaders = CDetailDoodad::InitializeRenderState();
     C44Matrix world;
 
