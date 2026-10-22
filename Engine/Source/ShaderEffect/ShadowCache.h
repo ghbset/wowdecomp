@@ -90,6 +90,10 @@ class CShadowCache {
     static int32_t s_texelSnap;       // gfxShadowSnap: map centres snapped to whole texels in light space
     static int32_t s_haveBandCentre;  // gfxShadowAnchor: the bands follow s_bandCentre instead of the viewer
     static C3Vector s_bandCentre;
+    // Not stock (Badgermilk0 port; CShadowQuery sets these from shadowMapSize / shadowSoftness / shadowCascadeReuse):
+    static uint32_t s_sizeOverride;   // texels per map side, 0 = stock (1024, 2048 from MEDIUM and HIGH up); PCF only
+    static float s_pcfScale;          // scales the PCF tap offsets, 1 = stock (a kernel of about two texels)
+    static int32_t s_cascadeReuse;    // VERY_HIGH: band 1 redrawn every 2nd frame, band 2 every 4th, sooner on a move
     static C4Vector s_pcfOffsets[8];
     static int32_t s_publishedRead;    // set by GetPublished, consumed by GatherBands (band 1 keeps band 0's casters)
     static C44Matrix s_publishedView;  // S3: PostUpdate's Gx view, for GetPublished

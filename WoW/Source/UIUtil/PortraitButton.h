@@ -52,6 +52,13 @@ void RenderPortraitTexture(CSimpleTexture* texture, CGUnit_C* unit);
 
 int32_t ReadyModelForUI(CGUnit_C* unit, uint32_t flags);
 
+// Not stock (Badgermilk0 port): portraitResolution and live portraits (portraitLive). UpdateLivePortraits runs once a
+// frame from CGWorldFrame::OnWorldUpdate, polls both CVars and redraws every live portrait on screen.
+void PortraitSetResolution(uint32_t resolution);
+void PortraitSetLive(int32_t live);
+int32_t PortraitIsLive();
+void UpdateLivePortraits();
+
 extern const char* s_sexNames[3];
 
 #endif

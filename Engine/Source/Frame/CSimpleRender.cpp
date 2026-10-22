@@ -73,6 +73,7 @@ const char* CSimpleTexture::s_imageModePixelShaderNames[2] = { "UI", "Desaturate
 
 // STATIC: 0x00AC0F00
 EGxTexFilter CSimpleTexture::s_textureFilterMode = GxTex_Linear;
+void (*CSimpleTexture::s_destroyCallback)(CSimpleTexture* texture);   // not stock (portraitLive)
 
 // STATIC: 0x00B47930
 int32_t CSimpleTexture::s_count;
@@ -2205,6 +2206,10 @@ int32_t CSimpleTexture::GetScriptMetaTable() {
 // VERIFY: ec4a9c07 auto
 // OFFSET: [0x00482860, 0x00483010]
 CSimpleTexture::~CSimpleTexture() {
+    if (CSimpleTexture::s_destroyCallback) {   // not stock (portraitLive)
+        CSimpleTexture::s_destroyCallback(this);
+    }
+
     if (this->m_texture) {
         HandleClose(reinterpret_cast<HOBJECT>(this->m_texture));
     }

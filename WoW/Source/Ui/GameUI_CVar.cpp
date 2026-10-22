@@ -95,6 +95,9 @@ CVar* g_rotateMinimapCVar;
 
 // CUSTOM: minimap blip refresh interval (ms), see CGMinimapFrame::Render
 CVar* g_minimapBlipIntervalCVar;
+CVar* g_minimapIndoorResolutionCVar;
+CVar* g_portraitLiveCVar;
+CVar* g_portraitResolutionCVar;
 
 // CUSTOM: damp the mount gallop on mounted names, see CGUnit_C::GetNamePosition
 CVar* g_nameMountSmoothingCVar;
@@ -482,6 +485,17 @@ void CGGameUI::RegisterGameCVars() {
     g_showVKeyCastbarCVar = CVar::Register("showVKeyCastbar", "If the V key display is up for your current target, show the enemy cast bar with the target's health bar in the game field", 0x10, "1", nullptr, CATEGORY_GAME, false, nullptr, false);
     g_rotateMinimapCVar = CVar::Register("rotateMinimap", "Whether to rotate the entire minimap instead of the player arrow", 0x10, "0", nullptr, CATEGORY_GAME, false, nullptr, false);
     // CUSTOM: the exe rebuilds minimap blips once per second; 0 = every frame
+    // CUSTOM (Badgermilk0 port): the indoor minimap's render target size (stock 256; Wow32 keeps stock)
+    // CUSTOM (Badgermilk0 port): animated 3D unit portraits, and the render-target portraits' size (stock 64)
+#if defined(_WIN64)
+    g_minimapIndoorResolutionCVar = CVar::Register("minimapIndoorResolution", "Indoor minimap render target size, 256 to 2048 (stock 256)", 0x10, "1024", nullptr, CATEGORY_GAME, false, nullptr, false);
+    g_portraitLiveCVar = CVar::Register("portraitLive", "Unit portraits are animated 3D models (0 = stock snapshot)", 0x10, "1", nullptr, CATEGORY_GAME, false, nullptr, false);
+    g_portraitResolutionCVar = CVar::Register("portraitResolution", "Unit portrait render target size, 64 to 2048 (stock 64)", 0x10, "256", nullptr, CATEGORY_GAME, false, nullptr, false);
+#else
+    g_minimapIndoorResolutionCVar = CVar::Register("minimapIndoorResolution", "Indoor minimap render target size, 256 to 2048 (stock 256)", 0x10, "256", nullptr, CATEGORY_GAME, false, nullptr, false);
+    g_portraitLiveCVar = CVar::Register("portraitLive", "Unit portraits are animated 3D models (0 = stock snapshot)", 0x10, "0", nullptr, CATEGORY_GAME, false, nullptr, false);
+    g_portraitResolutionCVar = CVar::Register("portraitResolution", "Unit portrait render target size, 64 to 2048 (stock 64)", 0x10, "64", nullptr, CATEGORY_GAME, false, nullptr, false);
+#endif
     g_minimapBlipIntervalCVar = CVar::Register("minimapBlipInterval", "Milliseconds between minimap blip position updates (0 = every frame)", 0x10, "0", nullptr, CATEGORY_GAME, false, nullptr, false);
     // CUSTOM: benilla-style anti-jitter for mounted name positions
     g_nameMountSmoothingCVar = CVar::Register("nameMountSmoothing", "Damp the mount's gallop on mounted unit names and nameplates", 0x10, "1", nullptr, CATEGORY_GAME, false, nullptr, false);

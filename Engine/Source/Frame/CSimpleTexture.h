@@ -30,6 +30,8 @@ class CSimpleTexture : public CSimpleRegion {
     static int32_t s_objectType;
     static const char* s_objectTypeName;
     static EGxTexFilter s_textureFilterMode;
+    // Not stock (portraitLive): told about each texture as it is destroyed, so the live portraits drop their pointer
+    static void (*s_destroyCallback)(CSimpleTexture* texture);
 
     static void operator delete(void* ptr);
     static void CreateScriptMetaTable();

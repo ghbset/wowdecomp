@@ -28,6 +28,9 @@
 #include "WoW/Source/DB/Rec/ChrRacesRec.h"
 #include "WoW/Source/DB/Rec/VehicleSeatRec.h"
 #include "WoW/Source/Ui/PartyFrame.h"
+#include "WoW/Common/ComponentCore/Types.h"
+#include "Engine/Source/Os/TimeManager.h"
+#include "Engine/Source/ConsoleBase/ConsoleVar.h"
 #include <cstring>
 #include "Engine/Source/Base/Coordinate.h"
 
@@ -66,6 +69,43 @@ static TSList<PORTRAITREQUEST, TSGetLink<PORTRAITREQUEST>> s_pendingPortraits;
 
 // STATIC: 0x00AD28F0
 static TSList<PORTRAITREQUEST, TSGetLink<PORTRAITREQUEST>> s_freePortraits;
+
+// Not stock (Badgermilk0 port): HD portraits. The render-target portraits (and the live ones) render at this size
+// instead of 64, the depth target with them; the camera works in normalized coordinates, so the framing is unchanged.
+// The icon and readback paths keep 64, their sources are 64x64. Set from portraitResolution.
+static uint32_t s_portraitResolution = 64;
+
+// Not stock (Badgermilk0 port): live portraits (CVar portraitLive). A unit's portrait keeps its own copy of the unit's model playing the
+// idle animation, and UpdateLivePortraits redraws it into the portrait's render target every frame, through the same
+// camera, lighting and circular mask as the stock snapshot. One entry per unit GUID, shared by every texture showing
+// that unit; an entry ends once no texture holds its render target. The copy lives on when the unit leaves view, as a
+// PlayerModel's does. Units with an icon portrait, the 64x64 readback path and party pets keep the stock snapshot.
+struct LIVEPORTRAIT {
+    WOWGUID m_guid;
+    CTexture* m_texture;
+    CM2Scene* m_scene;
+    CM2Model* m_model;
+    CCamera* m_camera;
+    // the camera made when the model has no portrait camera; otherwise the model owns m_camera
+    CCamera* m_createdCamera;
+    // the unit's world model the copy was made from: compared to spot a model swap, never dereferenced
+    CM2Model* m_source;
+    // textures that were last given m_texture, to skip drawing for hidden frames (s_destroyCallback forgets them)
+    CSimpleTexture* m_owners[8];
+    uint32_t m_ownerCount;
+    uint32_t m_lastTimeMs;
+    int32_t m_dirty;
+};
+
+static const uint32_t LIVE_PORTRAIT_MAX = 32;
+static LIVEPORTRAIT s_livePortraits[LIVE_PORTRAIT_MAX];
+static uint32_t s_livePortraitCount;
+static int32_t s_portraitLive = 0;
+
+// null marks every entry
+static void LivePortraitMarkDirty(const WOWGUID* guid);
+static void LivePortraitForgetTexture(CSimpleTexture* texture);
+static void LivePortraitFreeAll();
 
 static void PortraitDepthTextureCallback(EGxTexCommand command, uint32_t width, uint32_t height, uint32_t depth, uint32_t mipLevel, void* userArg, uint32_t& texelStrideInBytes, const void*& texels) {
 }
@@ -118,6 +158,8 @@ void __fastcall UpdateAllPortraits() {
         portrait->m_cache.m_dirty = 1;
     }
 
+    LivePortraitMarkDirty(nullptr);   // not stock (portraitLive)
+
     Script_SendUniqueSignalToAllUnits(SCRIPT_EVENT_UNIT_PORTRAIT_UPDATE);
 }
 
@@ -139,11 +181,13 @@ void PortraitInitialize() {
     if (s_rtAlphaSupported && (g_theGxDevicePtr->DeviceApi() == GxApi_OpenGl || g_theGxDevicePtr->DeviceApi() == GxApi_GLL)) {
         CGxTexFlags flags(GxTex_Linear, 0, 0, 0, 0, 0, 1);
         flags.m_renderTarget = 1;
-        s_portraitDepthTexture = TextureCreate(GxTex_2d, 64, 64, 24, GxTex_D24X8, GxTex_D24X8, flags, nullptr, PortraitDepthTextureCallback, "PortraitDepth", 1);
+        s_portraitDepthTexture = TextureCreate(GxTex_2d, s_portraitResolution, s_portraitResolution, 24, GxTex_D24X8, GxTex_D24X8, flags, nullptr, PortraitDepthTextureCallback, "PortraitDepth", 1);
     }
 
     s_playerPortraitCache = nullptr;
     s_unitPortraitCache = nullptr;
+
+    CSimpleTexture::s_destroyCallback = LivePortraitForgetTexture;   // not stock (portraitLive)
 }
 
 // VERIFY: 59c574b9 auto
@@ -213,6 +257,8 @@ void UpdateModelForUI(const WOWGUID& guid, uint32_t flags) {
         if (portrait) {
             portrait->m_cache.m_dirty = 1;
         }
+
+        LivePortraitMarkDirty(&guid);   // not stock (portraitLive): the copy is remade from the unit's new model
     }
 
     if (flags & 2) {
@@ -410,6 +456,443 @@ static int32_t AddPendingPortraitFlags(CGUnit_C* unit, uint32_t flags) {
     return 0;
 }
 
+// Not stock (Badgermilk0 port): live portraits ---------------------------------------------------------------------------------------------
+
+static int32_t LivePortraitDeviceReady() {
+    return g_theGxDevicePtr && g_theGxDevicePtr->CapsIsWindowVisible(-1) && g_theGxDevicePtr->CapsHasContext(-1);
+}
+
+static LIVEPORTRAIT* LivePortraitFind(const WOWGUID& guid) {
+    for (uint32_t i = 0; i < s_livePortraitCount; i++) {
+        if (s_livePortraits[i].m_guid == guid) {
+            return &s_livePortraits[i];
+        }
+    }
+
+    return nullptr;
+}
+
+static void LivePortraitMarkDirty(const WOWGUID* guid) {
+    for (uint32_t i = 0; i < s_livePortraitCount; i++) {
+        if (!guid || s_livePortraits[i].m_guid == *guid) {
+            s_livePortraits[i].m_dirty = 1;
+        }
+    }
+}
+
+static void LivePortraitReleaseModel(LIVEPORTRAIT* live) {
+    if (live->m_createdCamera) {
+        HandleClose(reinterpret_cast<HOBJECT>(live->m_createdCamera));
+    }
+
+    if (live->m_model) {
+        live->m_model->Release();
+    }
+
+    live->m_createdCamera = nullptr;
+    live->m_camera = nullptr;
+    live->m_model = nullptr;
+    live->m_source = nullptr;
+}
+
+static void LivePortraitFree(uint32_t index) {
+    LIVEPORTRAIT* live = &s_livePortraits[index];
+    LivePortraitReleaseModel(live);
+
+    if (live->m_scene) {
+        live->m_scene->Release();
+    }
+
+    // the textures still showing it keep their reference until the UI sets them again
+    if (live->m_texture) {
+        HandleClose(reinterpret_cast<HOBJECT>(live->m_texture));
+    }
+
+    s_livePortraitCount--;
+    s_livePortraits[index] = s_livePortraits[s_livePortraitCount];
+    s_livePortraits[s_livePortraitCount] = LIVEPORTRAIT();
+}
+
+static void LivePortraitFreeAll() {
+    while (s_livePortraitCount) {
+        LivePortraitFree(s_livePortraitCount - 1);
+    }
+}
+
+// CSimpleTexture::s_destroyCallback: a destroyed texture (UI reload) must not stay in an owner list
+static void LivePortraitForgetTexture(CSimpleTexture* texture) {
+    for (uint32_t i = 0; i < s_livePortraitCount; i++) {
+        LIVEPORTRAIT* live = &s_livePortraits[i];
+
+        for (uint32_t j = 0; j < live->m_ownerCount; ) {
+            if (live->m_owners[j] == texture) {
+                live->m_owners[j] = live->m_owners[--live->m_ownerCount];
+            } else {
+                j++;
+            }
+        }
+    }
+}
+
+static void LivePortraitAddOwner(LIVEPORTRAIT* live, CSimpleTexture* texture) {
+    for (uint32_t i = 0; i < live->m_ownerCount; i++) {
+        if (live->m_owners[i] == texture) {
+            return;
+        }
+    }
+
+    if (live->m_ownerCount < sizeof(live->m_owners) / sizeof(live->m_owners[0])) {
+        live->m_owners[live->m_ownerCount++] = texture;
+    }
+}
+
+// true when a texture showing the portrait is on screen. Owners that moved on to another texture are dropped; a
+// reference held by a texture the list could not take counts as visible.
+static int32_t LivePortraitVisible(LIVEPORTRAIT* live) {
+    int32_t visible = 0;
+
+    for (uint32_t i = 0; i < live->m_ownerCount; ) {
+        CSimpleTexture* owner = live->m_owners[i];
+
+        if (owner->m_texture != live->m_texture) {
+            live->m_owners[i] = live->m_owners[--live->m_ownerCount];
+            continue;
+        }
+
+        if (owner->m_visible) {
+            visible = 1;
+        }
+
+        i++;
+    }
+
+    return visible || (!live->m_ownerCount && TextureGetRefCnt(live->m_texture) > 1);
+}
+
+// (re)makes the model copy from the unit's current world model; the unit must be portrait-drawable
+static int32_t LivePortraitBuild(LIVEPORTRAIT* live, CGUnit_C* unit) {
+    LivePortraitReleaseModel(live);
+
+    if (!live->m_scene) {
+        live->m_scene = M2CreateScene();
+
+        if (!live->m_scene) {
+            return 0;
+        }
+    }
+
+    CM2Model* model = live->m_scene->DuplicateModel(unit->m_worldModel, 0);
+
+    if (!model) {
+        return 0;
+    }
+
+    // as CGCharacterModelBase::SetUpModel (PlayerModel:SetUnit): visuals off, idle animation looping at full speed
+    if (!(model->m_fFlags & 0x1)) {
+        model->WaitForLoad(nullptr);
+    }
+
+    CCharacterComponent::RemoveVisuals(model);
+    model->SetBoneSequence(0xFFFFFFFF, 0, 0xFFFFFFFF, 0, 1.0f, 1, 1);
+
+    for (CM2Model* attached = model->m_attachList; attached; attached = attached->m_attachNext) {
+        if (attached->m_attachmentId == 2) {
+            CCharacterComponent::ComponentCloseFingers(model, COMP_HAND_LEFT);
+            break;
+        }
+    }
+
+    for (CM2Model* attached = model->m_attachList; attached; attached = attached->m_attachNext) {
+        if (attached->m_attachmentId == 1) {
+            CCharacterComponent::ComponentCloseFingers(model, COMP_HAND_RIGHT);
+            break;
+        }
+    }
+
+    // the camera RenderPortraitTexture frames the snapshot with
+    if (model->HasCamera(0)) {
+        live->m_camera = model->GetCameraById(0);
+    } else {
+        CCamera* camera = CameraCreate();
+
+        if (!camera) {
+            model->Release();
+            return 0;
+        }
+
+        M2SequenceInfo info;
+        info.Clear();
+        model->GetSequenceInfo(0, 0, info);
+        C3Vector position(info.m_radius * 1.7f + info.m_center.x, info.m_center.y, info.m_center.z);
+        C3Vector target = info.m_center;
+        CameraSetFloat(camera, 4, 1.57f);
+        CameraSetCoord(camera, 8, target, 0);
+        CameraSetCoord(camera, 7, position, 0);
+        CameraSetFloat(camera, 3, 0.027777778f);
+        live->m_camera = camera;
+        live->m_createdCamera = camera;
+    }
+
+    live->m_model = model;
+    live->m_source = unit->m_worldModel;
+    live->m_dirty = 0;
+    live->m_lastTimeMs = OsGetAsyncTimeMs();
+    return 1;
+}
+
+// one frame of the copy into the render target; the render-target half of RenderPortraitTexture
+static void LivePortraitDraw(LIVEPORTRAIT* live) {
+    CGxTex* gxTex = TextureGetGxTex(live->m_texture, 1, nullptr);
+
+    if (!gxTex || !gxTex->m_flags.m_renderTarget || !live->m_model) {
+        return;
+    }
+
+    CM2Scene* scene = live->m_scene;
+    CM2Model* model = live->m_model;
+    CCamera* camera = live->m_camera;
+
+    uint32_t now = OsGetAsyncTimeMs();
+    uint32_t delta = now - live->m_lastTimeMs;
+    live->m_lastTimeMs = now;
+    // a portrait that was hidden for a while resumes instead of fast-forwarding
+    scene->AdvanceTime(delta > 250 ? 250 : delta);
+
+    float viewportMinX;
+    float viewportMaxX;
+    float viewportMinY;
+    float viewportMaxY;
+    float viewportMinZ;
+    float viewportMaxZ;
+    GxXformViewport(viewportMinX, viewportMaxX, viewportMinY, viewportMaxY, viewportMinZ, viewportMaxZ);
+    GxXformSetViewport(0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 1.0f);
+
+    C44Matrix savedProjection;
+    C44Matrix savedView;
+    GxXformProjection(savedProjection);
+    GxXformView(savedView);
+    int32_t fogEnabled = GxMasterEnable(GxMasterEnable_Fog);
+    GxMasterEnableSet(GxMasterEnable_Fog, 0);
+
+    C3Vector cameraPosition(0.0f, 0.0f, 0.0f);
+    model->IsLoaded(1, 1);
+    model->SetAnimating(1);
+    C3Vector origin(0.0f, 0.0f, 0.0f);
+    scene->Animate(origin);
+    DataMgrGetCoord(reinterpret_cast<CDataMgr*>(camera), 7, &cameraPosition);
+
+    CRect window;
+    window.minY = 0.0f;
+    window.minX = 0.0f;
+    window.maxY = 0.0f;
+    window.maxX = 0.0f;
+    GxCapsWindowSizeInScreenCoords(window);
+    float width = window.maxX - window.minX;
+    float height = window.maxY - window.minY;
+    float ddcHeight = NDCToDDCHeight(1.0f);
+    float top = ddcHeight - NDCToDDCHeight(1.0f) / height * 64.0f;
+    float right = NDCToDDCWidth(1.0f) / width * 64.0f;
+
+    CRect projection;
+    projection.minY = 0.0f;
+    projection.minX = 0.0f;
+    projection.maxY = 1.0f;
+    projection.maxX = right / (ddcHeight - top);
+    CameraSetupWorldProjection(camera, projection, 0);
+
+    CGxTex* savedColorTarget = nullptr;
+    CGxTex* savedDepthTarget = nullptr;
+    g_theGxDevicePtr->DeviceGetRenderTarget(GxBuffers_Color, savedColorTarget);
+    GxRenderTargetSet(GxBuffers_Color, gxTex, 0);
+
+    if (s_portraitDepthTexture) {
+        g_theGxDevicePtr->DeviceGetRenderTarget(GxBuffers_Depth, savedDepthTarget);
+        GxRenderTargetSet(GxBuffers_Depth, TextureGetGxTex(s_portraitDepthTexture, 1, nullptr), 0);
+    }
+
+    GxSceneClear(GxBufferBit_Color | GxBufferBit_Depth, CImVector());
+    model->IsDrawable(1, 1);
+    model->SetAnimating(1);
+
+    if (model->m_attachParent) {
+        model->m_fFlags |= 0x80;
+    } else {
+        model->m_fFlags |= 0x8;
+    }
+
+    if (model->m_attachParent) {
+        model->m_fFlags |= 0x20000;
+    } else {
+        model->m_fFlags |= 0x10000;
+    }
+
+    model->m_lightingCallback = PortraitLightingCallback;
+    model->m_lightingArg = nullptr;
+    scene->Animate(cameraPosition);
+    scene->Draw(M2PASS_0);
+    scene->Draw(M2PASS_1);
+
+    // the circular mask into the alpha channel, as RenderPortraitTexture does
+    C44Matrix view;
+    GxXformSetView(view);
+    C44Matrix ortho;
+    GxuXformCreateOrtho(-1.0f, 1.0f, -1.0f, 1.0f, 0.0f, 500.0f, ortho);
+    GxXformSetProjection(ortho);
+    g_theGxDevicePtr->RsPush();
+    GxRsSet(GxRs_Texture0, s_portraitMaskGxTex);
+    GxRsSet(GxRs_ColorOp0, 0);
+    GxRsSet(GxRs_AlphaOp0, 0);
+    GxRsSet(GxRs_ColorWrite, 8);
+    GxRsSet(GxRs_BlendingMode, 0);
+    GxRsSet(GxRs_Lighting, 0);
+    GxRsSet(GxRs_Culling, 0);
+    GxRsSet(GxRs_DepthTest, 0);
+    GxRsSet(GxRs_AlphaRef, 0);
+    GxRsSet(GxRs_Multisample, 0);
+    g_theGxDevicePtr->XformPushAndSet(GxXform_World, view);
+
+    static C3Vector s_positions[] = { C3Vector(-1.0f, 1.0f, 0.0f), C3Vector(-1.0f, -1.0f, 0.0f), C3Vector(1.0f, 1.0f, 0.0f), C3Vector(1.0f, -1.0f, 0.0f) };
+    static C2Vector s_texCoords[] = { C2Vector(0.0f, 0.0f), C2Vector(0.0f, 1.0f), C2Vector(1.0f, 0.0f), C2Vector(1.0f, 1.0f) };
+    static uint16_t s_indices[] = { 0, 1, 2, 3 };
+
+    GxPrimLockVertexPtrs(4, s_positions, sizeof(C3Vector), nullptr, 0, nullptr, 0, nullptr, 0, s_texCoords, sizeof(C2Vector), nullptr, 0);
+    GxDrawLockedElements(GxPrim_TriangleStrip, 4, s_indices);
+    GxPrimUnlockVertexPtrs();
+    GxXformPop(GxXform_World);
+    g_theGxDevicePtr->RsPop();
+    GxRenderTargetSet(GxBuffers_Color, savedColorTarget, 0);
+
+    if (s_portraitDepthTexture) {
+        GxRenderTargetSet(GxBuffers_Depth, savedDepthTarget, 0);
+    }
+
+    CImVector black;
+    black.b = 0;
+    black.g = 0;
+    black.r = 0;
+    black.a = 0xFF;
+    GxSceneClear(GxBufferBit_Depth, black);
+
+    GxXformSetProjection(savedProjection);
+    GxXformSetView(savedView);
+    GxMasterEnableSet(GxMasterEnable_Fog, fogEnabled);
+    GxXformSetViewport(viewportMinX, viewportMaxX, viewportMinY, viewportMaxY, viewportMinZ, viewportMaxZ);
+}
+
+// RenderPortraitTexture's live path: 1 when the texture now shows a live portrait, 0 to fall back to the snapshot
+static int32_t LivePortraitSet(CSimpleTexture* texture, CGUnit_C* unit) {
+    if (!s_portraitLive || !s_rtAlphaSupported || !s_portraitMaskGxTex || !unit->m_worldModel) {
+        return 0;
+    }
+
+    WOWGUID guid = unit->m_obj->m_guid;
+    LIVEPORTRAIT* live = LivePortraitFind(guid);
+    int32_t drawable = LivePortraitDeviceReady() && IsPortraitDrawable(unit);
+    int32_t created = 0;
+
+    if (!live) {
+        // not drawable yet: the stock path shows its cached snapshot and queues the update that calls us back
+        if (!drawable || s_livePortraitCount >= LIVE_PORTRAIT_MAX) {
+            return 0;
+        }
+
+        CGxTexFlags flags(GxTex_Linear, 0, 0, 0, 0, 0, 1);
+        flags.m_filter = GxTex_Linear;
+        flags.m_renderTarget = 1;
+        CTexture* renderTarget = TextureCreate(s_portraitResolution, s_portraitResolution, GxTex_Argb8888, GxTex_Argb8888, flags, nullptr, TextureUpdate, "PortraitLive", 0);
+
+        if (!renderTarget) {
+            return 0;
+        }
+
+        live = &s_livePortraits[s_livePortraitCount++];
+        *live = LIVEPORTRAIT();
+        live->m_guid = guid;
+        live->m_texture = renderTarget;
+        created = 1;
+    }
+
+    int32_t rebuilt = 0;
+
+    if (live->m_dirty || !live->m_model || live->m_source != unit->m_worldModel) {
+        if (drawable) {
+            rebuilt = LivePortraitBuild(live, unit);
+        } else if (live->m_model) {
+            // keep showing the old copy; the queued update calls us back once the new model can draw (without a
+            // copy the stock path below queues it)
+            QueuePortraitUpdate(unit, 2);
+        }
+    }
+
+    if (!live->m_model) {
+        if (created) {
+            LivePortraitFree(static_cast<uint32_t>(live - s_livePortraits));
+        }
+
+        return 0;
+    }
+
+    texture->SetTexture(live->m_texture);
+    LivePortraitAddOwner(live, texture);
+
+    // a new render target has no picture until the next frame's update
+    if ((created || rebuilt) && LivePortraitDeviceReady()) {
+        LivePortraitDraw(live);
+    }
+
+    return 1;
+}
+
+// every frame, from CGWorldFrame::OnWorldUpdate (before the world and the UI draw)
+void UpdateLivePortraits() {
+    // portraitLive / portraitResolution, polled here (once a frame in the world) rather than through CVar callbacks
+    PortraitSetLive(g_portraitLiveCVar ? g_portraitLiveCVar->m_intValue : 0);
+    int32_t wanted = g_portraitResolutionCVar ? g_portraitResolutionCVar->m_intValue : 64;
+    uint32_t resolution = 64;
+
+    while (resolution < static_cast<uint32_t>(wanted) && resolution < 2048) {   // a power of two, 64 to 2048
+        resolution <<= 1;
+    }
+
+    PortraitSetResolution(resolution);
+
+    if (!s_livePortraitCount) {
+        return;
+    }
+
+    if (!s_portraitLive || !s_rtAlphaSupported) {
+        LivePortraitFreeAll();
+        return;
+    }
+
+    if (!LivePortraitDeviceReady()) {
+        return;
+    }
+
+    for (uint32_t i = s_livePortraitCount; i-- > 0; ) {
+        LIVEPORTRAIT* live = &s_livePortraits[i];
+
+        // only this list still holds it: no frame shows the portrait any more
+        if (TextureGetRefCnt(live->m_texture) <= 1) {
+            LivePortraitFree(i);
+            continue;
+        }
+
+        if (!LivePortraitVisible(live)) {
+            continue;
+        }
+
+        CGUnit_C* unit = static_cast<CGUnit_C*>(ClntObjMgrObjectPtr(live->m_guid, TYPE_UNIT, __FILE__, __LINE__));
+
+        // shapeshift, display or gear change: follow the unit's new model once it is ready to draw
+        if (unit && unit->m_worldModel && (live->m_dirty || live->m_source != unit->m_worldModel) && IsPortraitDrawable(unit)) {
+            LivePortraitBuild(live, unit);
+        }
+
+        LivePortraitDraw(live);
+    }
+}
+
 // VERIFY: b5510c04 auto
 // OFFSET: 0x00618180
 void SetPortraitTexture(CSimpleTexture* texture, uint32_t race, uint32_t sex, WOWGUID guid) {
@@ -521,6 +1004,10 @@ void RenderPortraitTexture(CSimpleTexture* texture, CGUnit_C* unit) {
         char fileName[260];
         SStrPrintf(fileName, sizeof(fileName), "interface\\icons\\%s", unit->GetPortraitTextureName());
         SetPortraitTexture(texture, fileName);
+        return;
+    }
+
+    if (LivePortraitSet(texture, unit)) {   // not stock (portraitLive)
         return;
     }
 
@@ -686,7 +1173,8 @@ void RenderPortraitTexture(CSimpleTexture* texture, CGUnit_C* unit) {
                 flags.m_renderTarget = 1;
             }
 
-            cache->m_texture = TextureCreate(64, 64, GxTex_Argb8888, GxTex_Argb8888, flags, s_rtAlphaSupported ? nullptr : &cache->m_texels, TextureUpdate, "Portrait1", 0);
+            uint32_t size = s_rtAlphaSupported ? s_portraitResolution : 64;   // not stock: portraitResolution
+            cache->m_texture = TextureCreate(size, size, GxTex_Argb8888, GxTex_Argb8888, flags, s_rtAlphaSupported ? nullptr : &cache->m_texels, TextureUpdate, "Portrait1", 0);
         }
     }
 
@@ -838,6 +1326,8 @@ int32_t ReadyModelForUI(CGUnit_C* unit, uint32_t flags) {
 // VERIFY: 7490c1d9 auto
 // OFFSET: 0x00617860
 void PortraitShutdown() {
+    LivePortraitFreeAll();   // not stock (portraitLive)
+
     s_portraitMaskGxTex = nullptr;
     HandleClose(reinterpret_cast<HOBJECT>(s_portraitMaskTexture));
     s_portraitMaskTexture = nullptr;
@@ -860,4 +1350,84 @@ void PortraitShutdown() {
     s_itemPortraits.Clear();
     s_pendingPortraits.Clear();
     s_freePortraits.Clear();
+}
+
+// Not stock (Badgermilk0 port): portraitResolution, the render-target portraits' size (stock 64)
+void PortraitSetResolution(uint32_t resolution) {
+    if (resolution < 64) {
+        resolution = 64;
+    }
+
+    if (resolution == s_portraitResolution) {
+        return;
+    }
+
+    s_portraitResolution = resolution;
+
+    // set before PortraitInitialize (the CVar registers at startup): nothing to rebuild yet
+    if (!s_portraitMaskTexture) {
+        return;
+    }
+
+    // every cached render target has the old size; the UI keeps its own references until each portrait redraws
+    LivePortraitFreeAll();
+    PortraitCachePurge(&s_playerPortraitCache, 0, 1);
+    PortraitCachePurge(&s_unitPortraitCache, 0, 1);
+
+    for (uint32_t i = 0; i < s_freePortraitTextures.m_count; i++) {
+        HandleClose(reinterpret_cast<HOBJECT>(s_freePortraitTextures.m_data[i]));
+    }
+
+    s_freePortraitTextures.Clear();
+
+    if (s_portraitDepthTexture) {
+        HandleClose(reinterpret_cast<HOBJECT>(s_portraitDepthTexture));
+
+        CGxTexFlags flags(GxTex_Linear, 0, 0, 0, 0, 0, 1);
+        flags.m_renderTarget = 1;
+        s_portraitDepthTexture = TextureCreate(GxTex_2d, s_portraitResolution, s_portraitResolution, 24, GxTex_D24X8, GxTex_D24X8, flags, nullptr, PortraitDepthTextureCallback, "PortraitDepth", 1);
+    }
+
+    for (PLAYERPORTRAIT* portrait = s_playerPortraits.m_fulllist.Head(); portrait; portrait = s_playerPortraits.Next(portrait)) {
+        portrait->m_cache.m_dirty = 1;
+    }
+
+    for (UNITPORTRAIT* portrait = s_unitPortraits.m_fulllist.Head(); portrait; portrait = s_unitPortraits.Next(portrait)) {
+        portrait->m_cache.m_dirty = 1;
+    }
+
+    Script_SendUniqueSignalToAllUnits(SCRIPT_EVENT_UNIT_PORTRAIT_UPDATE);
+}
+
+// Not stock (Badgermilk0 port): portraitLive
+void PortraitSetLive(int32_t live) {
+    live = live ? 1 : 0;
+
+    if (live == s_portraitLive) {
+        return;
+    }
+
+    s_portraitLive = live;
+
+    // set before PortraitInitialize (the CVar registers at startup): nothing to rebuild yet
+    if (!s_portraitMaskTexture) {
+        return;
+    }
+
+    // every unit frame asks again and gets the other kind of portrait
+    LivePortraitFreeAll();
+
+    for (PLAYERPORTRAIT* portrait = s_playerPortraits.m_fulllist.Head(); portrait; portrait = s_playerPortraits.Next(portrait)) {
+        portrait->m_cache.m_dirty = 1;
+    }
+
+    for (UNITPORTRAIT* portrait = s_unitPortraits.m_fulllist.Head(); portrait; portrait = s_unitPortraits.Next(portrait)) {
+        portrait->m_cache.m_dirty = 1;
+    }
+
+    Script_SendUniqueSignalToAllUnits(SCRIPT_EVENT_UNIT_PORTRAIT_UPDATE);
+}
+
+int32_t PortraitIsLive() {
+    return s_portraitLive;
 }

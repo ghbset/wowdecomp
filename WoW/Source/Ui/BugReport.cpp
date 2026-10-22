@@ -486,4 +486,16 @@ void BugReportRegister() {
         "    end\n"
         "end\n",
         "BugReport", nullptr);
+
+    // Not stock (Badgermilk0 port): /liveportraits [on|off] toggles the portraitLive CVar
+    FrameScript_Execute(
+        "SLASH_LIVEPORTRAITS1 = \"/liveportraits\"\n"
+        "SlashCmdList[\"LIVEPORTRAITS\"] = function(msg)\n"
+        "    local word = strlower(strtrim(msg or \"\"))\n"
+        "    local on = GetCVar(\"portraitLive\") ~= \"1\"\n"
+        "    if word == \"on\" or word == \"1\" then on = true elseif word == \"off\" or word == \"0\" then on = false end\n"
+        "    SetCVar(\"portraitLive\", on and \"1\" or \"0\")\n"
+        "    DEFAULT_CHAT_FRAME:AddMessage(on and \"Live 3D portraits |cff00ff00on|r (portraitLive 1)\" or \"Live 3D portraits |cffff5555off|r (portraitLive 0)\")\n"
+        "end\n",
+        "LivePortraits", nullptr);
 }

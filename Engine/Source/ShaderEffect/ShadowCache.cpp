@@ -56,6 +56,55 @@ C3Vector CShadowCache::s_bandCentre;
 /// centre's depth along the light is left as it is. The grid is anchored at a local reference (the player rounded
 /// to 256 yd, kept until they are 128 yd from it), not the world origin: a latch step rotates the axes, which slides
 /// an origin-anchored grid by |p| * angle (several texels 9000 yd out), but a local one by under 0.05 texel.
+uint32_t CShadowCache::s_sizeOverride;
+float CShadowCache::s_pcfScale = 1.0f;
+int32_t CShadowCache::s_cascadeReuse;
+
+/// Not stock (shadowCascadeReuse, after Badgermilk0's 5c8a872b): what each VERY_HIGH cascade was last drawn for.
+struct CascadeRender {
+    int32_t valid;
+    C3Vector pos;
+    C3Vector forward;
+    C3Vector right;
+    C3Vector sunDir;
+};
+
+static CascadeRender s_cascadeRenders[3];
+static uint32_t s_cascadeTick;
+
+/// Whether cascade i must be redrawn this frame. Band 0 (units move in it) always; band 1 on even frames, band 2 on
+/// every 4th (a frame later); at once when the view turns more than about 2 degrees (FrustumCallback widens a kept
+/// band 5% each side), moves 2% of the band's radius, or the light moves: gfxSunShadows' latch steps s_sunDir, and
+/// any step redraws, so a kept map is never projected along a light it was not drawn for.
+static int32_t CascadeDue(uint32_t i, float radius, const C3Vector& pos, const C3Vector& forward, const C3Vector& right) {
+    const CascadeRender& last = s_cascadeRenders[i];
+
+    if (!CShadowCache::s_cascadeReuse || i == 0 || !last.valid) {
+        return 1;
+    }
+
+    if (s_cascadeTick % (i == 1 ? 2u : 4u) == (i == 1 ? 0u : 1u)) {
+        return 1;
+    }
+
+    const float minDot = 0.99939f;   // cos 2 degrees
+
+    if (forward.x * last.forward.x + forward.y * last.forward.y + forward.z * last.forward.z < minDot
+        || right.x * last.right.x + right.y * last.right.y + right.z * last.right.z < minDot) {
+        return 1;
+    }
+
+    float dx = pos.x - last.pos.x, dy = pos.y - last.pos.y, dz = pos.z - last.pos.z;
+    float limit = radius * 0.02f;
+
+    if (dx * dx + dy * dy + dz * dz > limit * limit) {
+        return 1;
+    }
+
+    const C3Vector& sun = CShadowCache::s_sunDir;
+    return sun.x != last.sunDir.x || sun.y != last.sunDir.y || sun.z != last.sunDir.z;
+}
+
 static C3Vector s_snapRef;
 static int32_t s_haveSnapRef;
 
@@ -360,7 +409,7 @@ void CShadowCache::InitPcfOffsets() {
     CShadowCache::s_textureSize[0] = size;
     CShadowCache::s_textureSize[1] = size;
 
-    float texel = 1.0 / size;
+    float texel = CShadowCache::s_pcfScale / size;   // not stock (shadowSoftness): s_pcfScale, 1 = stock
 
     CShadowCache::s_pcfOffsets[0].x = 0.8f * texel;
     CShadowCache::s_pcfOffsets[0].y = -1.0f * texel;
@@ -628,12 +677,26 @@ void CShadowCache::GatherBands(CShadowCacheQueryData& data, const C3Vector& pos,
     } else {
         frame = CShadowCache::s_frameCounter;
 
+        // Not stock (shadowCascadeReuse): the camera's axes, to tell when a kept map stops covering the view
+        C44Matrix view;
+        GxXformView(view);
+        const C3Vector forward(view.a2, view.b2, view.c2);
+        const C3Vector right(view.a0, view.b0, view.c0);
+        s_cascadeTick++;
+
         for (uint32_t i = 0; i < 3; i++) {
             CShadowBand& band = CShadowCache::s_extShadowBands[i];
 
             data.m_textureIndex[i] = 0;
             data.m_active[i] = 0;
             data.m_radius[i] = band.m_radius;
+
+            // A kept band still gets this frame's query data (the queries are bounded by the last band) but no
+            // casters (query flags 0) and no draw, and keeps the centre it was drawn round.
+            const int32_t render = CascadeDue(i, band.m_radius, pos, forward, right);
+            const C3Vector keptPos = band.m_pos;
+            const C3Vector keptLastPos = band.m_lastPos;
+            data.m_queryFlags[i] = render ? 13 : 0;
             band.m_pos = pos;
 
             float cell;
@@ -670,20 +733,34 @@ void CShadowCache::GatherBands(CShadowCacheQueryData& data, const C3Vector& pos,
             CShadowCache::s_frustumCallback(data.m_frustums[i], data.m_matrices[i], band.m_dir, data, i);
             data.m_frustums[i].Extents(data.m_extents[i]);
 
-            data.m_useCullFrustum[i] = i == 1 && keepBand1 ? 0 : useCullFrustum;
+            // (shadowCascadeReuse: bands 1-2 keep band 0's casters, which a kept map needs where band 0 has moved on)
+            data.m_useCullFrustum[i] = (i == 1 && keepBand1) || (i && CShadowCache::s_cascadeReuse) ? 0 : useCullFrustum;
 
             if (useCullFrustum) {
                 data.m_cullFrustums[i] = frustum;
             }
 
-            data.m_queryFlags[i] = 13;
             frustum = data.m_frustums[i];
             frustum.InvertPlanes();
 
-            band.m_lastPos = band.m_pos;
-            data.m_active[i] = 1;
             data.m_lastBand = i;
             useCullFrustum = 1;
+
+            if (!render) {
+                band.m_pos = keptPos;
+                band.m_lastPos = keptLastPos;
+                continue;
+            }
+
+            band.m_lastPos = band.m_pos;
+            data.m_active[i] = 1;
+
+            CascadeRender& drawn = s_cascadeRenders[i];
+            drawn.valid = 1;
+            drawn.pos = pos;
+            drawn.forward = forward;
+            drawn.right = right;
+            drawn.sunDir = CShadowCache::s_sunDir;
         }
     }
 
@@ -814,6 +891,10 @@ CShadowCacheQueryData::CShadowCacheQueryData() {
 // VERIFY: e0449636 manual
 // OFFSET: 0x00875760
 void CShadowCache::ClearBandTextures() {
+    for (CascadeRender& drawn : s_cascadeRenders) {   // not stock (shadowCascadeReuse): nothing left to keep
+        drawn.valid = 0;
+    }
+
     if (CShadowCache::s_shadowMode <= SHADOW_MEDIUM) {
         CShadowCache::s_needsRebuild = 0;
         return;
@@ -945,6 +1026,13 @@ void CShadowCache::Init() {
 
     if (CShadowCache::s_shadowMode >= SHADOW_HIGH || CShadowCache::s_shadowMode == SHADOW_MEDIUM) {
         CShadowCache::s_shadowSize = 2048;
+    }
+
+    // Not stock (shadowMapSize): PCF only; the R32F path draws with the screen's depth buffer, which a map larger
+    // than the window would overrun.
+    if (CShadowCache::s_sizeOverride && CShaderEffect::s_usePcfFiltering) {
+        uint32_t maxSize = g_theGxDevicePtr->Caps().m_texMaxSize[GxTex_2d];
+        CShadowCache::s_shadowSize = maxSize && CShadowCache::s_sizeOverride > maxSize ? maxSize : CShadowCache::s_sizeOverride;
     }
 
     CShadowCache::InitPcfOffsets();

@@ -598,12 +598,23 @@ void CGMinimapFrame::OnFrameRender(CRenderBatch* batch, uint32_t layer) {
     }
 }
 
-// VERIFY: 855d28c7 auto
-// OFFSET: 0x005831C0
-void CGMinimapFrame::EnterWorld() {
-    s_inWorld = 1;
-    MinimapInitialize(CGPlayer_C::GetNewContinentID());
-    s_indoor.m_radius = 10.0f;
+// CUSTOM (Badgermilk0 port): minimapIndoorResolution, 256 to 2048 rounded up to a power of two (stock 256). The
+// indoor map is drawn into a square target covering three times the visible radius and only its middle third shows:
+// 256 left ~85 texels across, coarser than the WMO minimap textures (0.5 yd per texel) at every zoom but the closest.
+static uint32_t s_indoorResolution;
+
+static uint32_t IndoorResolution() {
+    int32_t value = g_minimapIndoorResolutionCVar ? g_minimapIndoorResolutionCVar->m_intValue : 256;
+    uint32_t resolution = 256;
+
+    while (resolution < static_cast<uint32_t>(value) && resolution < 2048) {
+        resolution <<= 1;
+    }
+
+    return resolution;
+}
+
+static void CreateIndoorTexture() {
     EGxTexFormat format = GxTex_Unknown;
 
     if (g_theGxDevicePtr->Caps().m_rttFormat[GxTex_Argb8888]) {
@@ -615,7 +626,17 @@ void CGMinimapFrame::EnterWorld() {
     }
 
     CGxTexFlags flags(GxTex_Linear, 0, 0, 0, 0, 1, 1, 0, 0, 0);
-    s_indoor.m_texture = TextureCreate(256, 256, format, format, flags, nullptr, CGMinimapFrame::MinimapTextureCallback, "MinimapRenderTarget", 0);
+    s_indoorResolution = IndoorResolution();
+    s_indoor.m_texture = TextureCreate(s_indoorResolution, s_indoorResolution, format, format, flags, nullptr, CGMinimapFrame::MinimapTextureCallback, "MinimapRenderTarget", 0);
+}
+
+// VERIFY: 855d28c7 auto
+// OFFSET: 0x005831C0
+void CGMinimapFrame::EnterWorld() {
+    s_inWorld = 1;
+    MinimapInitialize(CGPlayer_C::GetNewContinentID());
+    s_indoor.m_radius = 10.0f;
+    CreateIndoorTexture();   // CUSTOM: split out for minimapIndoorResolution (stock creates it inline, 256 square)
     memset(s_hoverObjects, 0, sizeof(s_hoverObjects));
 }
 
@@ -1861,6 +1882,12 @@ void CGMinimapFrame::Render() {
         GxXformSetView(identity);
 
         if (GxIsWindowVisible() && GxHasContext()) {
+            if (s_indoor.m_texture && IndoorResolution() != s_indoorResolution) {   // CUSTOM: minimapIndoorResolution, live
+                HandleClose(reinterpret_cast<HOBJECT>(s_indoor.m_texture));
+                CreateIndoorTexture();
+                s_indoor.m_dirty = 1;
+            }
+
             if (s_indoor.m_dirty) {
                 GxTexUpdate(TextureGetGxTex(s_indoor.m_texture, 1, nullptr), 0, 0, 0, 0, 0);
                 s_indoor.m_dirty = 0;
