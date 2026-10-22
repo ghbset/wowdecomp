@@ -127,6 +127,9 @@ int32_t TextureBuildAliasPath(char* buffer, const char* fileName);
 CTexture* TextureCacheGetTexture(char* fileName, char* extension, CGxTexFlags texFlags);
 CTexture* TextureCacheGetTexture(const CImVector& color);
 void TextureCacheUpdate();
+// CUSTOM (texevict): not in 12340. The device's view of the CGxTex recycle bin under memory pressure.
+int32_t TextureCacheShrink(int32_t maxDestroyed);
+void TextureCacheStats(int32_t& bytes, int32_t& count);
 void TextureCacheNewTexture(CTexture* texture);
 void TextureCacheNewTexture(CTexture* texture, CGxTexFlags texFlags);
 void TextureCacheNewTexture(CTexture* texture, const CImVector& color);

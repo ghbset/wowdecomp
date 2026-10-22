@@ -178,6 +178,7 @@ namespace gxvk::vk::texture
         uint32_t live      = 0;
         uint32_t livePeak  = 0;
         uint64_t bytes     = 0;   ///< device memory asked for, summed over creates
+        uint32_t capacity  = 0;   ///< the table's size (kMaxImages): `live` at it refuses every create
     };
     void GetStats(Stats& out);
 }
