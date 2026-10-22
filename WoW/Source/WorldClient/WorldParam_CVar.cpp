@@ -374,6 +374,24 @@ bool CWorldParam::TerrainAlphaBitDepthCallback(CVar* var, const char* oldValue, 
     return false;
 }
 
+// CUSTOM (Badgermilk0 port): groundEffectBuffers, baked grass buffer pairs per pool (stock 128, the only pool). More
+// pools of this size are added as the grass in view needs them (CDetailDoodad::GrowPools); each pair is up to 4096
+// vertices, about 150 KB of video memory. A change rebuilds the pools at the next world render (UpdatePools).
+static bool GroundEffectBuffersCallback(CVar* var, const char* oldValue, const char* value, void* arg) {
+    int32_t pairs = SStrToInt(value);
+
+    if (pairs < 32 || pairs > 1024) {
+        return false;
+    }
+
+    if (CDetailDoodad::s_bufferPairs != static_cast<uint32_t>(pairs)) {
+        CDetailDoodad::s_bufferPairs = static_cast<uint32_t>(pairs);
+        CDetailDoodad::s_bPoolsDirty = 1;
+    }
+
+    return true;
+}
+
 // VERIFY: 38a0f503 auto
 // OFFSET: 0x0078DAB0
 bool CWorldParam::GroundEffectDensityCallback(CVar* var, const char* oldValue, const char* value, void* arg) {
@@ -667,6 +685,8 @@ void CWorldParam::Initialize() {
     CWorldParam::cvar_terrainAlphaBitDepth = CVar::Register("terrainAlphaBitDepth", "Terrain alpha map bit depth", 1, "8", CWorldParam::TerrainAlphaBitDepthCallback, CATEGORY_GRAPHICS, false, nullptr, false);
     CWorldParam::cvar_groundEffectDensity = CVar::Register("groundEffectDensity", "Ground effect density", 1, "16", CWorldParam::GroundEffectDensityCallback, CATEGORY_GRAPHICS, false, nullptr, false);
     CWorldParam::cvar_groundEffectDist = CVar::Register("groundEffectDist", "Ground effect dist", 1, "70.0", CWorldParam::GroundEffectDistCallback, CATEGORY_GRAPHICS, false, nullptr, false);
+    // CUSTOM (Badgermilk0 port)
+    CVar::Register("groundEffectBuffers", "Baked grass buffer pairs per pool (32-1024, stock 128); more pools are added as needed", 1, "128", GroundEffectBuffersCallback, CATEGORY_GRAPHICS, false, nullptr, false);
     CWorldParam::cvar_objectFade = CVar::Register("objectFade", "Fade objects into view", 1, "1", CWorldParam::ObjectFadeCallback, CATEGORY_GRAPHICS, false, nullptr, false);
     CWorldParam::cvar_objectFadeZFill = CVar::Register("objectFadeZFill", "Fade objects using ZFill pass ", 1, "0", CWorldParam::ObjectFadeZFillCallback, CATEGORY_GRAPHICS, false, nullptr, false);
     // LEGION objcull: values are clamped to the Legion ranges where they are read (World.cpp).

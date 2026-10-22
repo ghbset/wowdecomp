@@ -93,6 +93,7 @@
 #include <cfloat>
 #include <cmath>
 #include "WoW/Source/Ui/SpellBookFrame.h"
+#include "Engine/Source/Base/FrameProfile.h"
 
 // STATIC: 0x009F9864
 static const CURSORMODE s_skinCursorModes[2] = { SKIN_ALLIANCE_CURSOR, SKIN_HORDE_CURSOR };
@@ -1737,6 +1738,8 @@ void CGWorldFrame::OnWorldRender() {
 
     CShaderEffect::UpdateProjMatrix();
     CWorld::Render(this->m_camera->m_position, this->m_elapsedSec);
+    // CUSTOM (Badgermilk0 port): performance diagnostics (FrameProfile.h), the FrameProfileSwitch calls below
+    FrameProfileSwitch(FRAMEPROFILE_NAMEPLATES);
     CMap::RenderFootprints();
     ClntObjMgrEnumVisibleObjects(UnitPostAnimateProc, this);
     CGUnit_C::NamePlateSetResortAll(false);
@@ -1753,9 +1756,11 @@ void CGWorldFrame::OnWorldRender() {
 
     if (!scene) {
         VolumetricFog::OnWorldDone();   // VFOG: not in 12340
+        FrameProfileSwitch(FRAMEPROFILE_NONE);
         return;
     }
 
+    FrameProfileSwitch(FRAMEPROFILE_MODELS);
     scene->SetFloat18(-CWorld::s_unk_CD7758);
     scene->m_passMask = CWorld::m_M2PassMask;
     LegionLights::OnWorld(false);   // LEGION lights: not in 12340 (lightMode 1: terrain and WMO, before the models)
@@ -1768,33 +1773,43 @@ void CGWorldFrame::OnWorldRender() {
 
     GxuSortDrawList(GxuCat_0, GxuSort_VtxStream, *World::GetCamPos());
     GxuFlushDrawList(GxuCat_0, *World::GetCamPos());
+    FrameProfileSwitch(FRAMEPROFILE_DETAIL);
     CWorldScene::RenderDetailDoodads();
     VolumetricFog::OnSolidDone();   // not in 12340: shadowMask, the land's sun shadow over the opaque world
     LegionLights::OnWorld(true);    // LEGION lights: not in 12340 (lightMode 2: the whole solid world)
 
     if (World::SceneCamLiquidStatus(nullptr)) {
+        FrameProfileSwitch(FRAMEPROFILE_LIQUID);
         CWorldScene::RenderBarriers(this->m_elapsedSec);
+        FrameProfileSwitch(FRAMEPROFILE_MODELS);
         SoftParticles::BeginPass();   // SOFTPARTICLES: not in 12340
         scene->Draw(M2PASS_1);
         SoftParticles::EndPass();
+        FrameProfileSwitch(FRAMEPROFILE_LIQUID);
         CWorldScene::RenderWeather();
         CWorldScene::RenderLiquidPass();
+        FrameProfileSwitch(FRAMEPROFILE_MODELS);
         SoftParticles::BeginPass();   // SOFTPARTICLES: not in 12340
         scene->Draw(M2PASS_2);
         SoftParticles::EndPass();
     } else {
+        FrameProfileSwitch(FRAMEPROFILE_MODELS);
         SoftParticles::BeginPass();   // SOFTPARTICLES: not in 12340
         scene->Draw(M2PASS_2);
         SoftParticles::EndPass();
+        FrameProfileSwitch(FRAMEPROFILE_LIQUID);
         CWorldScene::RenderLiquidPass();
         VolumetricFog::OnLiquidDone();   // VFOG: not in 12340 (early composite, above water only)
         VolumetricFog::OnHeatHaze();     // LEGION refraction: not in 12340 (heat haze over fires, above water only)
         CWorldScene::RenderWeather();
         CWorldScene::RenderBarriers(this->m_elapsedSec);
+        FrameProfileSwitch(FRAMEPROFILE_MODELS);
         SoftParticles::BeginPass();   // SOFTPARTICLES: not in 12340
         scene->Draw(M2PASS_1);
         SoftParticles::EndPass();
     }
+
+    FrameProfileSwitch(FRAMEPROFILE_EFFECTS);
 
     if (s_spellShadowStyle < NUM_SPELL_SHADOWS) {
         DrawSpellCursorShadow(0x20000);
@@ -1824,6 +1839,7 @@ void CGWorldFrame::OnWorldRender() {
     GxXformSetViewport(minX, maxX, minY, maxY, minZ, maxZ);
     FFX::Finish();
     CVehiclePassenger_C::PostRenderUpdateAll();
+    FrameProfileSwitch(FRAMEPROFILE_NONE);
 }
 
 // VERIFY: 79b17fb9 manual
@@ -1991,6 +2007,8 @@ void CGWorldFrame::OnLayerUpdate(float elapsedSec) {
 // VERIFY: b7190175 manual
 // OFFSET: 0x004FA5F0
 void CGWorldFrame::OnWorldUpdate() {
+    // CUSTOM (Badgermilk0 port): performance diagnostics (FrameProfile.h); the unit updates are their own section
+    FrameProfileSwitch(FRAMEPROFILE_WORLD_UPDATE);
     float elapsedSec = this->m_elapsedSec;
     CGPlayer_C* player = static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(ClntObjMgrGetActivePlayer(), TYPE_PLAYER, __FILE__, __LINE__));
 
@@ -2090,7 +2108,9 @@ void CGWorldFrame::OnWorldUpdate() {
     UpdateLivePortraits();   // not stock (portraitLive): one frame of animation for every live portrait on screen
     this->MoveToFreeList(&this->m_modelList);
     this->MoveToFreeList(&this->m_hitModelList);
+    FrameProfileSwitch(FRAMEPROFILE_UNIT_UPDATE);
     ClntObjMgrEnumVisibleObjects(UnitUpdateProc, nullptr);
+    FrameProfileSwitch(FRAMEPROFILE_WORLD_UPDATE);
     World::SetObjectCollisionCallback(ObjectCollisionProc);
     CEffect::CleanUpStaticLists();
     CMissile::UpdateStaticLists();
@@ -2120,6 +2140,8 @@ void CGWorldFrame::OnWorldUpdate() {
 
     CGUnit_C::UpdateAllSmoothFacing();
     CheckEventWorldStateUITimerUpdate();
+
+    FrameProfileSwitch(FRAMEPROFILE_NONE);
 }
 
 // VERIFY: 09c5961f manual

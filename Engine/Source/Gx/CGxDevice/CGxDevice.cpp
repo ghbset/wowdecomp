@@ -1876,15 +1876,30 @@ void CGxDevice::WaitForFPSCap() {
         return;
     }
 
-    uint32_t frameMs = 1000 / maxFps;
-    uint32_t now = OsGetAsyncTimeMs();
+    // CUSTOM (Badgermilk0 port). The stock cap slept whole milliseconds (1000 / maxFps, truncated) with Sleep(), which
+    // the 15.6 ms system timer turned into a stutter well under the cap. This paces in the high-resolution clock, keeps
+    // the cadence from frame to frame and waits precisely (OsWaitUntilClocks).
+    static uint64_t s_nextFrameClock;
 
-    if (s_nextFrameTime - now < 1000) {
-        OsSleep(s_nextFrameTime - now);
-        now = OsGetAsyncTimeMs();
+    int64_t frequency = OsGetAsyncClocksPerSecond();
+    uint64_t period = static_cast<uint64_t>(frequency / maxFps);
+    uint64_t now = OsGetAsyncTimeClocks();
+    int64_t ahead = static_cast<int64_t>(s_nextFrameClock - now);
+
+    // a deadline more than a second away is stale (the cap changed, or the clock jumped)
+    if (ahead > 0 && ahead < frequency) {
+        OsWaitUntilClocks(s_nextFrameClock);
+        now = OsGetAsyncTimeClocks();
     }
 
-    s_nextFrameTime = now + frameMs;
+    // the next frame starts a period after this one was due; a frame that ran late resets the cadence
+    if (s_nextFrameClock && now - s_nextFrameClock < period) {
+        s_nextFrameClock += period;
+    } else {
+        s_nextFrameClock = now + period;
+    }
+
+    s_nextFrameTime = OsGetAsyncTimeMs();
 }
 
 // VERIFY: c1bc4801 manual

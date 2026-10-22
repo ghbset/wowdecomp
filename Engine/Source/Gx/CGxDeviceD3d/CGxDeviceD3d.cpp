@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstring>
 #include <malloc.h>
+#include "Engine/Source/Base/FrameProfile.h"
 #include "Engine/Source/Gx/CGxDeviceD3d/CGxDeviceD3d.h"
 #include "Engine/Source/Gx/Blit.h"
 #include "Engine/Source/Gx/CGxDeviceD3d/D3d9SceneDepth.h"
@@ -2714,6 +2715,9 @@ void CGxDeviceD3d::IReleaseD3dResources(int32_t freeTextures) {
         this->m_eventQuery = nullptr;
     }
 
+    // CUSTOM (Badgermilk0 port)
+    this->m_frameLatency.Release();
+
     this->IReleaseD3dQueries();
 
     if (this->m_d3dDevice) {
@@ -2801,6 +2805,9 @@ void CGxDeviceD3d::IDestroyD3d() {
         this->m_eventQuery->Release();
         this->m_eventQuery = nullptr;
     }
+
+    // CUSTOM (Badgermilk0 port)
+    this->m_frameLatency.Release();
 
     if (this->m_texture3B58) {
         GxTexDestroy(this->m_texture3B58);
@@ -3261,18 +3268,19 @@ void CGxDeviceD3d::ScenePresent() {
         int32_t scrShotClick = this->m_scrShotClick;
         this->m_sceneDepthFresh = false;    // VFOG
         this->m_normalCleared = false;      // GBUFFER
+        // CUSTOM (Badgermilk0 port): performance diagnostics (GxFrameStats)
+        uint64_t frameStart = GxFrameStatsNow();
 
         CGxDevice::ScenePresent();
         this->ISceneEnd();
         this->ICursorDraw();
 
+        uint64_t gpuWaitStart = GxFrameStatsNow();
+
         if (this->m_format.m_fixLag) {
             if (this->m_eventQuery) {
-                this->m_eventQuery->Issue(D3DISSUE_END);
-
-                while (this->m_eventQuery->GetData(nullptr, 0, D3DGETDATA_FLUSH) == S_FALSE) {
-                    OsSleep(0);
-                }
+                // CUSTOM (Badgermilk0 port); the frame gxMaxFrameLatency back, not the one just submitted (GxFrameLatency.h)
+                this->m_frameLatency.EndFrame(this->m_d3dDevice);
             } else {
                 LPDIRECT3DSURFACE9 backBuffer;
 
@@ -3295,11 +3303,15 @@ void CGxDeviceD3d::ScenePresent() {
             this->DeviceScreenShot();
         }
 
+        uint64_t capStart = GxFrameStatsNow();
         this->WaitForFPSCap();
+        uint64_t presentStart = GxFrameStatsNow();
 
         if (FAILED(this->m_d3dDevice->Present(nullptr, nullptr, nullptr, nullptr))) {
             this->m_context = 0;
         }
+
+        GxFrameStatsRecord(frameStart, gpuWaitStart, capStart, presentStart, GxFrameStatsNow());
 
         if (this->m_d3dStereoHandle && this->m_d3dStereoDirty) {
             this->m_d3dStereoDirty = 0;
@@ -3321,6 +3333,9 @@ void CGxDeviceD3d::Draw(CGxBatch* batch, int32_t count) {
     if (!this->m_context || this->m_intF5C) {
         return;
     }
+
+    // CUSTOM (Badgermilk0 port): performance diagnostics (FrameProfile.h), API draw calls per frame
+    FrameProfileCount(FRAMEPROFILE_DRAW_CALLS, static_cast<uint32_t>(count));
 
     this->IStateSync();
 

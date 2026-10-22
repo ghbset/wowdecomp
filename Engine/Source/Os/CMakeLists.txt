@@ -18,5 +18,7 @@ if(WIN32)
             dinput8
             dxguid
             version
+            # CUSTOM: timeBeginPeriod (OsWait.cpp)
+            winmm
     )
 endif()

@@ -6,6 +6,7 @@
 #include <windows.h>
 #include <d3d9.h>
 #include "Engine/Source/Gx/CGxDevice/CGxDevice.h"
+#include "Engine/Source/Gx/GxFrameLatency.h"
 #include "Engine/Source/Gx/CGxTex.h"
 #include "Engine/Source/Storm/H/stpl.h"
 
@@ -261,6 +262,8 @@ class CGxDeviceD3d9Ex : public CGxDevice {
     bool m_sceneDepthResz = false;  // MSAA: INTZ is not bound; DeviceCopySceneDepth fills it from the MSAA depth by RESZ
     bool m_sceneDepthFresh = false; // RESZ: INTZ still matches the depth (no depth-writing draw, depth clear or present since)
     CGxTex* m_sceneDepthTex;
+    // CUSTOM (Badgermilk0 port); gxFixLag waits on the frame gxMaxFrameLatency back, not the one just submitted
+    CGxFrameLatency m_frameLatency;
 
     virtual void ITexMarkAsUpdated(CGxTex* texId);
     virtual void IRsSendToHw(EGxRenderState which);

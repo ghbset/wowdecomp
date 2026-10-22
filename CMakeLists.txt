@@ -38,6 +38,31 @@ else ()
     message(FATAL_ERROR "Unsupported pointer size.")
 endif ()
 
+# CUSTOM (Badgermilk0 port): Release x64 builds with whole-program optimisation (/GL + /LTCG with MSVC, ThinLTO with
+# clang-cl and lld-link: cross-module inlining over the many small engine accessors), function-level linking with
+# unreferenced code removed (/Gy /OPT:REF /OPT:ICF) and intrinsics. Opt-in: AVX2 code generation (needs a 2013 or later
+# CPU) and /fp:fast (the original was built with it, but the decomp's float edge cases have not been checked against it).
+if (MSVC AND WOWDECOMP_ARCH_64)
+    option(WOWDECOMP_LTCG "Whole-program optimisation (/GL, /LTCG) for Release" ON)
+    option(WOWDECOMP_AVX2 "Generate AVX2 code (/arch:AVX2)" OFF)
+    option(WOWDECOMP_FAST_FLOAT "Relaxed floating point (/fp:fast)" OFF)
+
+    if (WOWDECOMP_LTCG)
+        set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+    endif ()
+
+    add_compile_options($<$<CONFIG:Release>:/Oi> $<$<CONFIG:Release>:/Gy>)
+    add_link_options($<$<CONFIG:Release>:/OPT:REF> $<$<CONFIG:Release>:/OPT:ICF>)
+
+    if (WOWDECOMP_AVX2)
+        add_compile_options(/arch:AVX2)
+    endif ()
+
+    if (WOWDECOMP_FAST_FLOAT)
+        add_compile_options(/fp:fast)
+    endif ()
+endif ()
+
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

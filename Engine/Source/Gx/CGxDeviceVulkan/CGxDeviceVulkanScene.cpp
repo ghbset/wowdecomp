@@ -6,6 +6,7 @@
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Context.hpp"
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Frame.hpp"
 #include "Engine/Source/Gx/Gx.h"
+#include "Engine/Source/Gx/GxFrameLatency.h"
 
 namespace context = gxvk::vk::context;
 namespace frame   = gxvk::vk::frame;
@@ -30,6 +31,10 @@ void CGxDeviceVulkan::ScenePresent() {
     if (this->m_context) {
         int32_t scrShotClick = this->m_scrShotClick;
 
+        // CUSTOM (Badgermilk0 port): performance diagnostics (GxFrameStats). Vulkan has no wait before the present:
+        // the GPU time a frame waits on is the fence of the slot it reuses (cpu), or with gxMaxFrameLatency 0 the
+        // wait below (present).
+        uint64_t frameStart = GxFrameStatsNow();
         CGxDevice::ScenePresent();
         this->ICursorDraw();
 
@@ -37,7 +42,9 @@ void CGxDeviceVulkan::ScenePresent() {
             this->DeviceScreenShot();
         }
 
+        uint64_t capStart = GxFrameStatsNow();
         this->WaitForFPSCap();
+        uint64_t presentStart = GxFrameStatsNow();
 
         this->IBringUpIfPending();
 
@@ -51,12 +58,21 @@ void CGxDeviceVulkan::ScenePresent() {
                 context::Rebind(this->m_hwnd);
             }
 
+            // CUSTOM (Badgermilk0 port, GxFrameLatency.h): kFramesInFlight 2 already lets the CPU build one frame while
+            // the GPU draws the last, which is gxMaxFrameLatency 1 (deeper queues are not offered). gxFixLag with 0 is
+            // the stock full wait: the frame just presented has to finish.
+            if (this->m_format.m_fixLag && !g_gxMaxFrameLatency) {
+                frame::WaitSerial(frame::Serial() - 1);
+            }
+
             if (frame::Failed()) {
                 // The frame stopped for good; the engine sees a lost context, as it would a failed
                 // D3D Present.
                 this->m_context = 0;
             }
         }
+
+        GxFrameStatsRecord(frameStart, capStart, capStart, presentStart, GxFrameStatsNow());
     }
 
     this->ShaderConstantsClear();

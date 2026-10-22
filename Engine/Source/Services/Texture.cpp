@@ -1117,6 +1117,14 @@ void TextureSetCacheSize(int32_t size) {
         maxSize = 0x2000000;
     }
 
+#if defined(WOWDECOMP_ARCH_64)
+    // CUSTOM (Badgermilk0 port). This pool keeps released textures for reuse, so the device does not create and destroy
+    // texture objects while the camera moves; 64 MB was the 32-bit address space's budget. 512 MB with 4 GB of RAM
+    if (OsGetPhysicalMemory() >= 0x100000000ull) {
+        maxSize = 0x20000000;
+    }
+#endif
+
     if (g_theGxDevicePtr->DeviceApi() == GxApi_D3d9Ex) {
         maxSize = 0;
     }

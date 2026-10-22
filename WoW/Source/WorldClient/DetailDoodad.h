@@ -35,6 +35,15 @@ class CDetailDoodad {
     static SShaderConstants s_shaderConstants;
     static CGxShader* s_vertexShader[6];
     static uint32_t s_vtxBufItems;
+    // CUSTOM (Badgermilk0 port). Vertex/index buffer pairs the chunks' grass batches are baked into: s_bufferPairs at
+    // first (stock 128, the groundEffectBuffers CVar), then more pools of that many whenever they run out, up to
+    // MAX_BUFFER_PAIRS. The stock pool never grew: a batch that found none free fell back to a stream buffer and was
+    // rebuilt on the CPU every frame (Crystal Lake: 220 of 348 batches, 2.8 ms a frame)
+    static const uint32_t MAX_BUFFER_PAIRS = 2048;
+    static uint32_t s_bufferPairs;
+    static uint32_t s_poolPairs;
+    static bool GrowPools();
+    static bool OwnsBuffer(const CGxBuf* buf);
     // GRASSWIND: not in 12340 (wxl-grasswind). CVars grassWind / grassWindStrength / grassParting; the motion
     // constants (vs c35-c42 of our DetailDoodad.bls, Tools/CustomMpq/ShaderSrc/DetailDoodad.hlsl).
     static int32_t s_grassWind;
@@ -141,7 +150,8 @@ inline void CDetailDoodadInstBatch::FreeBuffers() {
         return;
     }
 
-    if (this->m_vertexBuf->m_pool == CDetailDoodad::s_gxVertexPool) {
+    // CUSTOM (Badgermilk0 port): any of the grown pools
+    if (CDetailDoodad::OwnsBuffer(this->m_vertexBuf)) {
         *CDetailDoodad::s_freeGxBufs.New() = this->m_vertexBuf;
         *CDetailDoodad::s_freeGxBufs.New() = this->m_indexBuf;
     }
