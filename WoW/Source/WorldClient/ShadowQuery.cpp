@@ -43,6 +43,39 @@ static CVar* s_cvSunShadows;
 static CVar* s_cvShadowSnap;
 static CVar* s_cvShadowAnchor;
 static CVar* s_cvShadowSlopeBias;
+// Not stock (Badgermilk0 port): shadowMapSize, shadowSoftness, shadowCascadeReuse.
+static CVar* s_cvShadowMapSize;
+static CVar* s_cvShadowSoftness;
+static CVar* s_cvShadowCascadeReuse;
+
+#if defined(_WIN64)
+static const char* const kShadowMapSizeDefault = "4096";   // ~600 MB of maps at extShadowQuality 3-4
+#else
+static const char* const kShadowMapSizeDefault = "0";      // Wow32: a 32-bit address space keeps the stock size
+#endif
+
+/// shadowMapSize: 0 = stock, else the power of two from 1024 to 8192 at or above the value.
+static uint32_t ShadowMapSize() {
+    int32_t value = s_cvShadowMapSize ? s_cvShadowMapSize->m_intValue : 0;
+
+    if (value <= 0) {
+        return 0;
+    }
+
+    uint32_t size = 1024;
+
+    while (size < static_cast<uint32_t>(value) && size < 8192) {
+        size *= 2;
+    }
+
+    return size;
+}
+
+/// shadowSoftness: the PCF kernel scale, 0.25 to 4.
+static float ShadowSoftness() {
+    float value = s_cvShadowSoftness ? s_cvShadowSoftness->m_floatValue : 1.0f;
+    return value < 0.25f ? 0.25f : (value > 4.0f ? 4.0f : value);
+}
 
 // STATIC: 0x00D25300
 uint8_t CShadowQuery::s_stamp;
@@ -74,6 +107,13 @@ void CShadowQuery::Initialize() {
     s_cvShadowSnap = CVar::Register("gfxShadowSnap", "Shadow maps move in whole texels so shadow edges do not crawl (0 = stock)", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvShadowAnchor = CVar::Register("gfxShadowAnchor", "Shadow cascades stay put while the player jumps (0 = stock)", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvShadowSlopeBias = CVar::Register("gfxShadowSlopeBias", "Extra shadow depth bias at a low sun, in band texels times cot(elevation) up to 3 (0 = stock)", 1, "1.5", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    s_cvShadowMapSize = CVar::Register("shadowMapSize", "Shadow map size, a power of two from 1024 to 8192 (0 = stock 1024/2048; PCF filtering only)", 1, kShadowMapSizeDefault, nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    s_cvShadowSoftness = CVar::Register("shadowSoftness", "Scales the shadow PCF filter, 0.25 to 4 (1 = stock)", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    s_cvShadowCascadeReuse = CVar::Register("shadowCascadeReuse", "extShadowQuality 5: redraw the 320 yd cascade every 2nd frame and the 1280 yd one every 4th (0 = stock)", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+
+    // (before CShadowCache::Initialize creates the maps, so a saved size needs no second Init)
+    CShadowCache::s_sizeOverride = ShadowMapSize();
+    CShadowCache::s_pcfScale = ShadowSoftness();
 
     CShadowCache::Initialize();
 }
@@ -299,6 +339,25 @@ void CShadowQuery::Update() {
     GetViewerPosition(&viewer);
 
     CShadowCache::s_texelSnap = s_cvShadowSnap && s_cvShadowSnap->m_intValue;
+    CShadowCache::s_cascadeReuse = s_cvShadowCascadeReuse && s_cvShadowCascadeReuse->m_intValue;
+
+    // shadowMapSize / shadowSoftness, live: CShadowCache::Update rebuilds the maps at a new size this frame.
+    uint32_t mapSize = ShadowMapSize();
+
+    if (mapSize != CShadowCache::s_sizeOverride) {
+        CShadowCache::s_sizeOverride = mapSize;
+        CShadowCache::s_recreateTextures = 1;
+    }
+
+    float softness = ShadowSoftness();
+
+    if (softness != CShadowCache::s_pcfScale) {
+        CShadowCache::s_pcfScale = softness;
+
+        if (CShadowCache::s_shadowSize) {
+            CShadowCache::InitPcfOffsets();
+        }
+    }
     CShadowCache::s_haveBandCentre = s_cvShadowAnchor && s_cvShadowAnchor->m_intValue;
 
     if (CShadowCache::s_haveBandCentre) {
@@ -421,6 +480,16 @@ void CShadowQuery::FrustumCallback(CFrustum& frustum, C44Matrix& matrix, const C
     CFrustum clip = CWorldScene::s_clipFrustum;
     clip.Transform(view * matrix);
     CAaBox box = CAaBox::Bounding(clip.corners, 8);
+
+    // Not stock (shadowCascadeReuse): a band that may be kept a few frames covers 5% of its width more on each side,
+    // what about 2 degrees of turn uncovers at its far edge (CShadowCache's CascadeDue redraws past that).
+    if (CShadowCache::s_cascadeReuse && band > 0) {
+        box.b.x -= 0.1f;
+        box.b.y -= 0.1f;
+        box.t.x += 0.1f;
+        box.t.y += 0.1f;
+    }
+
     box.b = C3Vector::Max(box.b, C3Vector(-1.0f, -1.0f, -1.0f));
     box.b = C3Vector::Min(box.b, C3Vector(1.0f, 1.0f, 1.0f));
     box.t = C3Vector::Max(box.t, C3Vector(-1.0f, -1.0f, -1.0f));
@@ -959,7 +1028,8 @@ void CShadowQuery::QueryMapObjDefs(CShadowCacheQueryData& data, int32_t firstBan
             }
 
             for (int32_t band = firstBand; band <= lastBand; band++) {
-                if (data.m_extents[band].Intersects(defGroup->m_bbox) && data.m_bandFrustums[band].Cull(defGroup->m_bbox) && (!data.m_useCullFrustum[band] || data.m_cullFrustums[band].CullInv(defGroup->m_bbox) != WorldCull_notOutside)) {
+                // (not stock: a band kept from an earlier frame, query flags 0, gathers nothing; shadowCascadeReuse)
+                if (data.m_queryFlags[band] && data.m_extents[band].Intersects(defGroup->m_bbox) && data.m_bandFrustums[band].Cull(defGroup->m_bbox) && (!data.m_useCullFrustum[band] || data.m_cullFrustums[band].CullInv(defGroup->m_bbox) != WorldCull_notOutside)) {
                     ShadowQueryBuffers& buffers = CShadowQuery::s_bandBuffers[band];
 
                     if (buffers.m_groupCount >= 0x800) {
@@ -979,7 +1049,7 @@ void CShadowQuery::QueryMapObjDefs(CShadowCacheQueryData& data, int32_t firstBan
                 }
 
                 for (int32_t band = firstBand; band <= lastBand; band++) {
-                    if (doodad->m_shadowStamps[band] == CShadowQuery::s_stamp) {
+                    if (!data.m_queryFlags[band] || doodad->m_shadowStamps[band] == CShadowQuery::s_stamp) {
                         continue;
                     }
 
