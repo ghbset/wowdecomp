@@ -1,4 +1,5 @@
 #include "GameUI.h"
+#include "WoW/Source/Ui/WorldLighting.h"   // LIGHTING
 #include "Engine/Source/ConsoleBase/ConsoleVar.h"
 #include "Engine/Source/ConsoleBase/Types.h"
 #include "Engine/Source/Gx/CGxDevice/CGxDevice.h"
@@ -463,6 +464,7 @@ bool CVarHandler_threatWarning(CVar* var, const char* oldValue, const char* valu
 // VERIFY: 24146977 auto
 // OFFSET: 0x0051D9B0
 void CGGameUI::RegisterGameCVars() {
+    WorldLightingRegisterCVars();   // LIGHTING: not in 12340 (hdr, bloom, ssao, fogHeight...; all off)
     g_deselectOnClickCVar = CVar::Register("deselectOnClick", "Clear the target when clicking on terrain", 0x10, "1", nullptr, CATEGORY_GAME, false, nullptr, false);
     g_cvAutoInteract = CVar::Register("autoInteract", "Toggles auto-move to interact target", 0x10, s_locale == 1 ? "1" : "0", AutoInteractStateChangedCallback, CATEGORY_GAME, false, nullptr, false);
     g_autoStandCVar = CVar::Register("autoStand", "Automatically stand when needed", 0x10, "1", nullptr, CATEGORY_GAME, false, nullptr, false);

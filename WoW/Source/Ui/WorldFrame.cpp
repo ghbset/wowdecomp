@@ -1,5 +1,6 @@
 #include "WorldFrame.h"
 #include "WoW/Source/WorldClient/SoftParticles.h"   // SOFTPARTICLES
+#include "WoW/Source/Ui/WorldLighting.h"   // LIGHTING
 #include "Engine/Source/Base/ConvertUTF.h"
 #include <cstring>
 #include <typeinfo>
@@ -1736,6 +1737,7 @@ void CGWorldFrame::OnWorldRender() {
     }
 
     CShaderEffect::UpdateProjMatrix();
+    WorldLightingBeginWorld();   // LIGHTING: not in 12340 (hdr: the world into the HDR target)
     CWorld::Render(this->m_camera->m_position, this->m_elapsedSec);
     CMap::RenderFootprints();
     ClntObjMgrEnumVisibleObjects(UnitPostAnimateProc, this);
@@ -1753,6 +1755,7 @@ void CGWorldFrame::OnWorldRender() {
 
     if (!scene) {
         VolumetricFog::OnWorldDone();   // VFOG: not in 12340
+        WorldLightingEndWorld();   // LIGHTING: not in 12340
         return;
     }
 
@@ -1771,6 +1774,7 @@ void CGWorldFrame::OnWorldRender() {
     CWorldScene::RenderDetailDoodads();
     VolumetricFog::OnSolidDone();   // not in 12340: shadowMask, the land's sun shadow over the opaque world
     LegionLights::OnWorld(true);    // LEGION lights: not in 12340 (lightMode 2: the whole solid world)
+    WorldLightingOpaqueDone();   // LIGHTING: not in 12340 (SSAO, height fog over the opaque world)
 
     if (World::SceneCamLiquidStatus(nullptr)) {
         CWorldScene::RenderBarriers(this->m_elapsedSec);
@@ -1822,6 +1826,7 @@ void CGWorldFrame::OnWorldRender() {
     CGChatBubbleFrame::OnWorldRender(this);
     VolumetricFog::OnWorldDone();   // VFOG: not in 12340; before the restore so it sees the world viewport
     GxXformSetViewport(minX, maxX, minY, maxY, minZ, maxZ);
+    WorldLightingEndWorld();   // LIGHTING: not in 12340 (bloom, tonemap; FFX glow sees the tonemapped world)
     FFX::Finish();
     CVehiclePassenger_C::PostRenderUpdateAll();
 }
