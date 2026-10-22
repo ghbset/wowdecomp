@@ -8,6 +8,7 @@
 #include "Engine/Source/lua-5.1/src/lua.h"
 #include "WoW/Source/Ui/BarberShop.h"
 #include "WoW/Source/Ui/WorldFrame.h"
+#include "WoW/Source/UIUtil/ActionCam.h"
 
 // VERIFY: 60071b01 auto
 // OFFSET: 0x006017E0
@@ -274,6 +275,12 @@ static int32_t Script_VehicleCameraZoomOut(lua_State* L) {
     return Script_CameraZoomOut(L);
 }
 
+// Not stock: wxl-camera's GetCameraZoom() (the DynamicCam addon steers on it): the zoom asked for, as Legion's.
+static int32_t Script_GetCameraZoom(lua_State* L) {
+    lua_pushnumber(L, ActionCam::DesiredZoom());
+    return 1;
+}
+
 // STATIC: 0x00AD2060
 static FrameScript_Method s_ScriptFunctions[] = {
     { "CameraZoomIn", &Script_CameraZoomIn },
@@ -298,6 +305,7 @@ static FrameScript_Method s_ScriptFunctions[] = {
     { "FlipCameraYaw", &Script_FlipCameraYaw },
     { "VehicleCameraZoomIn", &Script_VehicleCameraZoomIn },
     { "VehicleCameraZoomOut", &Script_VehicleCameraZoomOut },
+    { "GetCameraZoom", &Script_GetCameraZoom },   // not stock
 };
 
 // VERIFY: bb9ee072 auto

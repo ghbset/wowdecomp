@@ -2,6 +2,7 @@
 #include "Engine/Source/ConsoleBase/IConsole.h"
 #include "Engine/Source/Storm/H/storm.h"
 #include "WoW/Source/UIUtil/Camera.h"
+#include "WoW/Source/UIUtil/ActionCam.h"
 
 // STATIC: 0x00C24970
 CVar* s_cvCameraSmoothTimeMax;
@@ -548,4 +549,5 @@ void CameraRegisterCVars() {
     s_cvCameraYawSmoothMax = CVar::Register("cameraYawSmoothMax", nullptr, 0x10, "0.0", ValidateCameraYaw, CATEGORY_DEFAULT, false, nullptr, false);
     s_cvCameraSmoothTimeMin = CVar::Register("cameraSmoothTimeMin", nullptr, 0x10, "0.1", ValidateCameraTime, CATEGORY_DEFAULT, false, nullptr, false);
     s_cvCameraSmoothTimeMax = CVar::Register("cameraSmoothTimeMax", nullptr, 0x10, "2.0", ValidateCameraTime, CATEGORY_DEFAULT, false, nullptr, false);
+    ActionCam::RegisterCVars();   // not stock: test_camera* + wxl_camera* (ActionCam.cpp)
 }

@@ -37,6 +37,7 @@
 #include "WoW/Source/Ui/BarberShop.h"
 #include "WoW/Source/Ui/GameUI.h"
 #include "WoW/Source/Ui/WorldFrame.h"
+#include "WoW/Source/UIUtil/ActionCam.h"
 #include "WoW/Source/UIUtil/InputControl.h"
 #include "WoW/Source/WorldClient/FrameTime.h"
 #include "WoW/Source/WorldClient/World.h"
@@ -1527,6 +1528,10 @@ void CGCamera::CameraTeleported(float facing) {
 // VERIFY: fd583d08 manual
 // OFFSET: 0x005FFDE0
 uint32_t CGCamera::CanSmoothTargetFacing(CGObject_C* target) {
+    if (ActionCam::RefusePivot(this)) {   // not stock: test_cameraDynamicPitch replaces the smart pivot below the cutoff
+        return 0;
+    }
+
     if (!target || !(target->m_obj->m_type & TYPE_UNIT) || !s_cvCameraPivot->m_intValue) {
         return 0;
     }
@@ -2345,6 +2350,8 @@ void CGCamera::CalcTargetCamera(CGObject_C* target, uint32_t time) {
         return;
     }
 
+    ActionCam::FrameBegin(this, target, time);   // not stock: ActionCam (all of it idle while its CVars are off)
+
     this->UpdateVehicleTarget(FrameTime::s_curTimeMs);
 
     float unitPitch = 0.0f;
@@ -2408,6 +2415,7 @@ void CGCamera::CalcTargetCamera(CGObject_C* target, uint32_t time) {
     }
 
     this->UpdateTargetSmoothing(target, time);
+    ActionCam::AfterSmoothing(this, time);   // not stock: wxl_cameraLegionZoom
 
     float facingYaw;
     float facingDistance;
@@ -2495,7 +2503,10 @@ void CGCamera::CalcTargetCamera(CGObject_C* target, uint32_t time) {
 
     float heightAdjust = 0.0f;
     this->m_state &= ~0x30000;
-    this->m_state |= this->CollideCameraWithWorld(safePos, distance, heightAdjust, offset, liquid, this->m_collideExtent);
+    ActionCam::CollideBegin(this, safePos, offset);   // not stock: shoulder offset + head movement into offset
+    uint32_t collideBits = this->CollideCameraWithWorld(safePos, distance, heightAdjust, offset, liquid, this->m_collideExtent);
+    this->m_state |= collideBits;
+    ActionCam::CollideEnd(this, collideBits, distance, heightAdjust, offset);   // not stock: Legion's offset scaling
 
     C3Vector cameraTarget = C3Vector(safePos.x + offset.x, safePos.y + offset.y, offset.z + safePos.z + heightAdjust);
 
@@ -2667,6 +2678,7 @@ void CGCamera::CalcTargetCamera(CGObject_C* target, uint32_t time) {
     this->UpdateTargetHeight(target, time);
     this->m_targetPosition = target->GetPosition();
     this->m_wasFlying = flying;
+    ActionCam::FrameEnd(this, time);   // not stock: dynamic pitch + target focus (look-only)
 }
 
 // VERIFY: 4dd64323 manual
@@ -3729,14 +3741,16 @@ uint32_t CGCamera::CollideCameraWithWorld(const C3Vector& target, float& distanc
         }
 
         float hitDistance = 1.0f;
+        end += ActionCam::BoomShift();   // not stock: test_cameraOverShoulder traces to the shifted camera
 
         if (World::Intersect(base, end, &hit, &hitDistance, flags, nullptr)) {
             result |= 0x10000;
             distance = distance * hitDistance;
+            ActionCam::BoomHit(hitDistance);
         }
 
         if (0.00000095367432f < distance) {
-            C3Vector position = this->GetCameraPosition(base, distance, offset);
+            C3Vector position = this->GetCameraPosition(base, distance, ActionCam::SweepOffset(offset));
 
             if (this->GetCameraDistance(distance, position, base, flags)) {
                 result |= 0x10000;
