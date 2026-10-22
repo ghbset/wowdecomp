@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 #include "lua.h"
 #include "Engine/Source/Storm/H/stpl.h"
 
@@ -13,6 +14,9 @@ class MemChunk {
     /* 0008 */ uint32_t m_size;
     /* 000C */ uint32_t m_blockSize;
     /* 0010 */ uint32_t m_numBlocks;
+    // CUSTOM (Badgermilk0 port); the pool's list of chunks that have a free block
+    MemChunk* m_nextAvailable;
+    uint8_t m_available;
 
     MemChunk(uint32_t blockSize, uint32_t size);
     ~MemChunk();
@@ -24,6 +28,11 @@ class MemPool {
     /* 000C */ uint32_t m_chunkSize;
     /* 0010 */ uint32_t m_blockSize;
     /* 0014 */ uint32_t m_numBlocks;
+    // CUSTOM (Badgermilk0 port). The stock pool scanned every chunk on each allocation (for one with a free block) and
+    // on each free (for the owner), so Lua allocation and garbage collection slowed down with the Lua heap. Chunks
+    // with a free block are kept in a list, and the chunks sorted by address for a binary search on free.
+    MemChunk* m_available;
+    std::vector<MemChunk*> m_byAddress;
 
     MemPool();
     ~MemPool();

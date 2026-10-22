@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstring>
 #include "lmemPool.h"
 #include "Engine/Source/Storm/H/storm.h"
@@ -12,6 +13,9 @@ MemChunk::MemChunk(uint32_t blockSize, uint32_t size) {
     this->m_numBlocks = size / blockSize;
     this->m_size = blockSize * this->m_numBlocks;
     this->m_memblocks = SMemAlloc(this->m_size, __FILE__, __LINE__, 0);
+    // CUSTOM (Badgermilk0 port)
+    this->m_nextAvailable = nullptr;
+    this->m_available = 0;
 
     char* block = static_cast<char*>(this->m_memblocks);
     this->m_free = block;
@@ -31,20 +35,36 @@ MemChunk::~MemChunk() {
 
 // INLINED
 MemPool::MemPool() {
+    // CUSTOM (Badgermilk0 port)
+    this->m_available = nullptr;
 }
 
 // VERIFY: 403cd95b auto
 // OFFSET: 0x00855670
 int32_t MemPool::MemFree(void* ptr) {
-    for (uint32_t i = 0; i < this->m_chunks.Count(); i++) {
-        MemChunk* chunk = this->m_chunks[i];
+    // CUSTOM (Badgermilk0 port); binary search for the chunk holding ptr instead of scanning all of them
+    auto it = std::upper_bound(this->m_byAddress.begin(), this->m_byAddress.end(), ptr, [](void* p, const MemChunk* chunk) {
+        return static_cast<char*>(p) < static_cast<char*>(chunk->m_memblocks);
+    });
 
-        if (ptr >= chunk->m_memblocks && ptr < static_cast<char*>(chunk->m_memblocks) + chunk->m_size) {
-            *static_cast<void**>(ptr) = chunk->m_free;
-            chunk->m_numBlocks++;
-            chunk->m_free = ptr;
-            return 1;
+    if (it == this->m_byAddress.begin()) {
+        return 0;
+    }
+
+    MemChunk* chunk = *(it - 1);
+
+    if (ptr >= chunk->m_memblocks && ptr < static_cast<char*>(chunk->m_memblocks) + chunk->m_size) {
+        *static_cast<void**>(ptr) = chunk->m_free;
+        chunk->m_numBlocks++;
+        chunk->m_free = ptr;
+
+        if (!chunk->m_available) {
+            chunk->m_available = 1;
+            chunk->m_nextAvailable = this->m_available;
+            this->m_available = chunk;
         }
+
+        return 1;
     }
 
     return 0;
@@ -92,29 +112,39 @@ void luaM_freePool(void* ud) {
 // VERIFY: 48e99a2f manual
 // OFFSET: 0x00855820
 void* MemPool::MemAlloc() {
-    uint32_t count = this->m_chunks.Count();
+    // CUSTOM (Badgermilk0 port); the first chunk of the free-block list instead of a scan over all chunks
+    MemChunk* chunk = this->m_available;
 
-    for (uint32_t i = 0; i < count; i++) {
-        MemChunk* chunk = this->m_chunks[i];
+    if (!chunk) {
+        uint32_t count = this->m_chunks.Count();
+        this->m_chunks.SetCount(count + 1);
+        this->m_chunks[count] = new (__FILE__, __LINE__) MemChunk(this->m_blockSize, this->m_chunkSize);
 
-        if (chunk->m_free) {
-            void* block = chunk->m_free;
-            chunk->m_numBlocks--;
-            chunk->m_free = *static_cast<void**>(block);
-            return block;
+        chunk = this->m_chunks[count];
+
+        auto it = std::upper_bound(this->m_byAddress.begin(), this->m_byAddress.end(), chunk, [](const MemChunk* a, const MemChunk* b) {
+            return static_cast<char*>(a->m_memblocks) < static_cast<char*>(b->m_memblocks);
+        });
+
+        this->m_byAddress.insert(it, chunk);
+
+        if (!chunk->m_free) {
+            return nullptr;
         }
+
+        chunk->m_available = 1;
+        chunk->m_nextAvailable = nullptr;
+        this->m_available = chunk;
     }
 
-    this->m_chunks.SetCount(count + 1);
-    this->m_chunks[count] = new (__FILE__, __LINE__) MemChunk(this->m_blockSize, this->m_chunkSize);
+    void* block = chunk->m_free;
+    chunk->m_numBlocks--;
+    chunk->m_free = *static_cast<void**>(block);
 
-    MemChunk* chunk = this->m_chunks[count];
-    void* block = nullptr;
-
-    if (chunk->m_free) {
-        block = chunk->m_free;
-        chunk->m_numBlocks--;
-        chunk->m_free = *static_cast<void**>(block);
+    if (!chunk->m_free) {
+        this->m_available = chunk->m_nextAvailable;
+        chunk->m_nextAvailable = nullptr;
+        chunk->m_available = 0;
     }
 
     return block;
