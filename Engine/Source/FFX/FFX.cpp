@@ -136,16 +136,13 @@ void FFX::Destroy() {
     DestroyTex(FFX::s_screen);
 }
 
-// Not in 12340: the half-texel offset is D3D9's pixel-centre convention. D3D11 and Vulkan centre pixels on +0.5
-// already, so the offset there lands every tap on a texel corner (half-texel shift, extra 2x2 blur of the whole
-// world under the UI); 4.3.4 drops it the same way. d3d11Debug 5 puts the D3D9 offset back on D3D11 (bisect switch
-// for the glue screens).
+// Not in 12340: the half-texel offset is D3D9's pixel-centre convention. D3D11 centres pixels on +0.5 already, so
+// the offset there lands every tap on a texel corner (half-texel shift, extra 2x2 blur of the whole world under the
+// UI); 4.3.4 drops it the same way. Vulkan keeps it: its backend moves every viewport half a pixel to emulate D3D9's
+// centres (kD3d9CentreShift), so without it the taps land on corners there. d3d11Debug 5 puts the D3D9 offset back on
+// D3D11 (bisect switch for the glue screens).
 static float FfxTexelOffset() {
     EGxApi api = g_theGxDevicePtr->DeviceApi();
-
-    if (api == GxApi_Vulkan) {
-        return 0.0f;
-    }
 
     if (api != GxApi_D3d11) {
         return 0.5f;

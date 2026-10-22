@@ -224,8 +224,7 @@ void DrawFarQuad(const VolumetricFog::WorldViewport& vp) {
     GxuXformCreateOrtho(0.0f, w, 0.0f, h, -1.0f, 1.0f, projection);
     GxXformSetProjection(projection);
     GxXformSetViewport(vp.minX, vp.maxX, vp.minY, vp.maxY, 1.0f, 1.0f);
-    const EGxApi api = g_theGxDevicePtr->DeviceApi();
-    const float offset = api == GxApi_D3d9 || api == GxApi_D3d9Ex ? 0.5f : 0.0f;
+    const float offset = g_theGxDevicePtr->Caps().m_pixelCenterOnEdge ? 0.0f : 0.5f;   // D3D9 and Vulkan centres (DrawQuad)
     const float minU = offset / w, maxU = (w + offset) / w, minV = offset / h, maxV = (h + offset) / h;
     C3Vector pos[4];
     C2Vector tex[4];

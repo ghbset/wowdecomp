@@ -447,8 +447,8 @@ void BindNormalBuffer() {
 
 // One quad over the Gx viewport [minX..maxX, minY..maxY] (normalised; default the whole target) of width x height
 // pixels, through the fixed-function VS. TEXCOORD0 = uv across that viewport, (x + 0.5) / width with v = 0 on the
-// top row, at every pixel centre on every backend: D3D9 rasterises at integer pixel coordinates, so its uvs carry
-// the half texel (as FFX does).
+// top row, at every pixel centre on every backend: D3D9 rasterises at integer pixel coordinates, and Vulkan emulates
+// that (its viewport moves half a pixel, kD3d9CentreShift), so both carry the half texel (as FFX does); caps say which.
 void DrawQuad(uint32_t width, uint32_t height, float minX, float maxX, float minY, float maxY) {
     static uint16_t s_indices[4] = { 0, 3, 1, 2 };
     static CGxBatch s_batch = { GxPrim_TriangleStrip, 0, 4, 0, 3 };
@@ -458,8 +458,7 @@ void DrawQuad(uint32_t width, uint32_t height, float minX, float maxX, float min
     GxXformSetProjection(projection);
     GxXformSetViewport(minX, maxX, minY, maxY, 0.0f, 1.0f);
 
-    EGxApi api = g_theGxDevicePtr->DeviceApi();
-    float offset = api == GxApi_D3d9 || api == GxApi_D3d9Ex ? 0.5f : 0.0f;
+    float offset = g_theGxDevicePtr->Caps().m_pixelCenterOnEdge ? 0.0f : 0.5f;
     float w = static_cast<float>(width);
     float h = static_cast<float>(height);
     float minU = offset / w;
