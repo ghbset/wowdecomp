@@ -38,10 +38,12 @@ float LightingHistoryWeight(float3 current, float3 history)
     return weight;
 }
 
-void CurrentNeighbourhoodRange(float2 uv, float4 centre, out float4 lowest, out float4 highest)
+// Raz0r fork 789fdc6: also the 3x3 sum; its mean is what LightingHistoryWeight judges instead of the jittered centre texel.
+void CurrentNeighbourhoodRange(float2 uv, float4 centre, out float4 lowest, out float4 highest, out float4 sum)
 {
     lowest = centre;
     highest = centre;
+    sum = centre;
     static const float2 kNeighbourOffsets[8] = {
         float2(-1, -1), float2(0, -1), float2(1, -1), float2(-1, 0),
         float2(1, 0), float2(-1, 1), float2(0, 1), float2(1, 1)
@@ -51,6 +53,7 @@ void CurrentNeighbourhoodRange(float2 uv, float4 centre, out float4 lowest, out 
         float4 neighbour = tex2Dlod(sCurrent, float4(uv + kNeighbourOffsets[k] * LowResTexelSize(), 0, 0));
         lowest = min(lowest, neighbour);
         highest = max(highest, neighbour);
+        sum += neighbour;
     }
 }
 
@@ -155,9 +158,10 @@ float4 Filtered(float2 lowResTexel)
     float4 current = tex2Dlod(sCurrent, float4(uv, 0, 0));
     float4 lowest;
     float4 highest;
-    CurrentNeighbourhoodRange(uv, current, lowest, highest);
+    float4 sum;
+    CurrentNeighbourhoodRange(uv, current, lowest, highest, sum);
     float4 history = clamp(reprojected.value, lowest, highest);
-    return lerp(current, history, LightingHistoryWeight(current.rgb, history.rgb));
+    return lerp(current, history, LightingHistoryWeight(sum.rgb / 9, history.rgb));
 }
 
 float4 main(float2 targetUv : TEXCOORD0) : COLOR0
