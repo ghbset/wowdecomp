@@ -6,6 +6,7 @@
 local RESTART = OPTION_RESTART_REQUIREMENT or "Requires a client restart."
 
 -- { cvar, kind, label, tooltip, ... }  kind: "check" | "slider" (min, max, step) | "drop" ({ {value, text}, ... })
+-- check: on/off = values written instead of "1"/"0"; slider: pct = shown as a percentage.
 local PAGES = {
 	{ name = "Advanced", title = "Renderer & Performance",
 	  text = "Settings added by this client. Pick a category on the left.",
@@ -236,6 +237,12 @@ table.insert(PAGES, #PAGES, { name = "Lighting", parent = "Advanced", title = "H
 	{ "lightingSsaoDistance", "slider", "Post-pass occlusion distance (yards)", "How far away the post-pass occlusion reaches before it fades out. D3D11/Vulkan only.", 25, 500, 25 },
 	{ "fogScattering", "slider", "Sun glow in distance fog", "Tints the distance fog toward the sun's colour around the sun. 0 turns it off. D3D11/Vulkan only.", 0, 2, 0.05 },
 })
+-- FSR 4 world upscaler (Vulkan/Upscale.cpp). Turning it off is live; turning it on builds the Vulkan device with the
+-- FSR 4 provider, so it waits for a restart.
+table.insert(PAGES, #PAGES, { name = "FSR", parent = "Advanced", title = "FSR Upscaling",
+	{ "fsrMode", "check", "FSR 4 upscaling", "Draws the world at a lower resolution and upscales it with AMD FSR 4. Vulkan only.", on = "fsr4", off = "off", restart = true },
+	{ "fsrScale", "slider", "Render scale", "Resolution the world is drawn at before FSR 4 upscales it. 100% turns upscaling off. Vulkan only.", 0.5, 1, 0.01, pct = true },
+})
 -- Sky and clouds (SkyClouds.cpp, DayNight.cpp).
 table.insert(PAGES, #PAGES, { name = "Sky", parent = "Advanced", title = "Sky & Clouds",
 	{ "skyClouds", "check", "Volumetric clouds", "Clouds with depth replace the flat stock cloud layer; with the sun crossing the sky it also uses the modern sky colours. All renderers." },
@@ -290,12 +297,12 @@ end
 local function Show(c, value)
 	c.cur = value
 	if c.kind == "check" then
-		c:SetChecked(value ~= nil and Num(value) ~= 0)
+		c:SetChecked(value ~= nil and (c.on and Same(value, c.on) or not c.on and Num(value) ~= 0))
 	elseif c.kind == "slider" then
 		c.panel.refreshing = true
 		c:SetValue(Num(value))
 		c.panel.refreshing = nil
-		_G[c:GetName() .. "Text"]:SetText(c.label .. ": " .. (value and Fmt(Num(value)) or "-"))
+		_G[c:GetName() .. "Text"]:SetText(c.label .. ": " .. (value and (c.pct and Fmt(Num(value) * 100) .. "%" or Fmt(Num(value))) or "-"))
 	else
 		UIDropDownMenu_SetText(c, DropText(c, value))
 	end
@@ -399,7 +406,7 @@ local function Build(page)
 			_G[cname .. "Text"]:SetText(s[3])
 			c:SetScript("OnClick", function(self)
 				PlaySound(self:GetChecked() and "igMainMenuOptionCheckBoxOn" or "igMainMenuOptionCheckBoxOff")
-				Change(self, self:GetChecked() and "1" or "0")
+				Change(self, self:GetChecked() and (s.on or "1") or (s.off or "0"))
 				if self.unavailable then Show(self, self.cur) end
 			end)
 			y = y - 28
@@ -410,8 +417,8 @@ local function Build(page)
 			c:SetMinMaxValues(s[5], s[6])
 			c:SetValueStep(s[7])
 			c.step = s[7]
-			_G[cname .. "Low"]:SetText(Fmt(s[5]))
-			_G[cname .. "High"]:SetText(Fmt(s[6]))
+			_G[cname .. "Low"]:SetText(s.pct and Fmt(s[5] * 100) .. "%" or Fmt(s[5]))
+			_G[cname .. "High"]:SetText(s.pct and Fmt(s[6] * 100) .. "%" or Fmt(s[6]))
 			c:SetScript("OnValueChanged", function(self, value)
 				if self.panel.refreshing then return end
 				value = math.floor((value - s[5]) / self.step + 0.5) * self.step + s[5]
@@ -436,6 +443,7 @@ local function Build(page)
 			y = y - 34
 		end
 		c.cvar, c.kind, c.label, c.tip, c.restart, c.panel = s[1], s[2], s[3], s[4], s.restart, panel
+		c.on, c.pct = s.on, s.pct
 		c:SetScript("OnEnter", Tooltip)
 		c:SetScript("OnLeave", HideTooltip)
 		tinsert(panel.controls, c)

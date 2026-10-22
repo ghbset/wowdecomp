@@ -57,6 +57,8 @@ class CGxDeviceVulkan : public CGxDevice {
     // the image changes (CursorUnlock), shown over the client area by WM_SETCURSOR.
     HCURSOR m_hcursor;
     int32_t m_hwCursorDirty;
+    // FSR (Vulkan/Upscale.cpp): added to every perspective projection while the world is drawn upscaled, NDC units
+    float m_projJitter[2] = { 0.0f, 0.0f };
 
     virtual void ITexMarkAsUpdated(CGxTex* texId);
     virtual void ICursorCreate(const CGxFormat& format);

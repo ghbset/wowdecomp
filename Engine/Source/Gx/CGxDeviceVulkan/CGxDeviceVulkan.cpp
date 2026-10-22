@@ -19,6 +19,7 @@
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Queries.hpp"
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Shaders.hpp"
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Texture.hpp"
+#include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Upscale.hpp"
 #include "Engine/Source/Gx/CGxPool.h"
 #include "Engine/Source/Gx/Gx.h"
 #include "Engine/Source/Os/Error.h"
@@ -264,6 +265,7 @@ void CGxDeviceVulkan::ICreateDrawPath() {
     if (this->m_drawPath) {
         particles::Init();
         gxvk::vk::lighting::Init(this);   // LIGHTING: g_gxLighting (GxLighting.h)
+        gxvk::vk::upscale::Init(this);    // FSR: g_gxUpscale (GxUpscale.h), when the device was made for FSR 4
     }
 
     if (!this->m_drawPath) {
@@ -317,6 +319,7 @@ void CGxDeviceVulkan::IDestroyVulkan() {
     frame::Destroy();
     particles::Shutdown();   // GPUPARTICLES: quad records
     gxvk::vk::lighting::Shutdown();   // LIGHTING: its images, before texture::Shutdown()
+    gxvk::vk::upscale::Shutdown();    // FSR: its images and the FSR context, before texture::Shutdown()
     pipelines::Shutdown();
     present::Shutdown();
     queries::Shutdown();

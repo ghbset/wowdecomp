@@ -1,5 +1,6 @@
 // The logical device, its features and its queue.
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Context/Internal.hpp"
+#include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Upscale.hpp"
 
 namespace gxvk::vk::context::detail
 {
@@ -86,6 +87,9 @@ namespace gxvk::vk::context::detail
             // polygon mode, legal only with the feature; without it such a draw stays filled.
             features.fillModeNonSolid = have.fillModeNonSolid;
             g.wireframe               = have.fillModeNonSolid == VK_TRUE;
+            // FSR (Vulkan/Upscale.cpp): its motion-vector pass writes an rg16f storage image
+            if (upscale::Wanted())
+                features.shaderStorageImageExtendedFormats = have.shaderStorageImageExtendedFormats;
             if (!g.bc)
                 Write(Warn, "vulkan: the adapter has no textureCompressionBC; DXT textures are decoded to RGBA8, four to eight times larger");
             if (!g.preciseOcclusion)
@@ -111,7 +115,15 @@ namespace gxvk::vk::context::detail
         info.ppEnabledExtensionNames = extensions;
         info.pEnabledFeatures        = &features;
 
-        VkResult r = g.iapi.CreateDevice(g.physical, &info, nullptr, &g.device);
+        // FSR: the device with what the FSR 4 provider adds (Vulkan/Upscale.cpp); refused or failed, the device as it was
+        VkResult r = VK_ERROR_FEATURE_NOT_PRESENT;
+        if (const VkDeviceCreateInfo* fsr = upscale::PrepareDevice(g.instance, g.physical, info, g.caps.deviceVersion))
+        {
+            r = g.iapi.CreateDevice(g.physical, fsr, nullptr, &g.device);
+            upscale::DevicePrepared(r == VK_SUCCESS);
+            if (r != VK_SUCCESS) g.device = nullptr;
+        }
+        if (r != VK_SUCCESS) r = g.iapi.CreateDevice(g.physical, &info, nullptr, &g.device);
         bool chainUsed = richer;
         if (r != VK_SUCCESS && richer)
         {

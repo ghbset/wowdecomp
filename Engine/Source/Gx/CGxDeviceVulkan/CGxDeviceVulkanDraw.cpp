@@ -619,6 +619,12 @@ void CGxDeviceVulkan::XformSetProjection(const C44Matrix& matrix) {
         projNative = projNative * scale;
     }
 
+    // FSR: the upscaler's sub-pixel jitter (Vulkan/Upscale.cpp); clip w is view z here (c3 = 1), so this moves NDC
+    if (projNative.d3 == 0.0f) {
+        projNative.c0 += this->m_projJitter[0];
+        projNative.c1 += this->m_projJitter[1];
+    }
+
     this->m_xforms[GxXform_Projection].m_dirty = 1;
     this->m_projNative = projNative;
 }
