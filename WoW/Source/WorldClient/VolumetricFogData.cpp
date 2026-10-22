@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <iterator>
 #include <limits>
 #include <vector>
 #include "Engine/Source/BlizzardCore/SFile2-Core.h"
@@ -705,7 +706,13 @@ ConditionFog FogData::LightConditionFog(const Light& light, float halfMinuteOfDa
     if (storm <= 0.0f || light.paramsBySlot[kStormSlot] == 0) {
         return clearFog;
     }
-    const ConditionFog stormFog = this->ParamsCondition(this->FindParams(light.paramsBySlot[kStormSlot]), halfMinuteOfDay);
+    ConditionFog stormFog = this->ParamsCondition(this->FindParams(light.paramsBySlot[kStormSlot]), halfMinuteOfDay);
+    // Raz0r fork d08a6a3: 31 Classic lights (EPL light 42 among them) point their storm slot at params with no fog keys;
+    // those keep the clear layers, else the fog fades to ~1/23 as rain sets in. Glow and grading still blend.
+    if (stormFog.layerCount == 0) {
+        stormFog.layerCount = clearFog.layerCount;
+        std::copy(std::begin(clearFog.layers), std::end(clearFog.layers), std::begin(stormFog.layers));
+    }
     return BlendConditions(clearFog, stormFog, storm);
 }
 
