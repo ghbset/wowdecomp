@@ -542,6 +542,7 @@ bool CMapObj::Read(char* fileName) {
     this->m_asyncObject->m_size = this->m_wmoFileSize;
     this->m_asyncObject->m_userPostloadCallback = reinterpret_cast<void*>(CMapObj::PostloadCallback);
     this->m_asyncObject->m_priority = 124;
+    ASYNC_SET_KIND(this->m_asyncObject, ASYNC_KIND_WMO);
     AsyncFileReadObject(this->m_asyncObject, 0);
 
     CMapObj::s_asyncLoadQueue.LinkToTail(this);
@@ -721,6 +722,7 @@ void CMapObj::ReadGroup(uint32_t index, bool preLoad) {
     object->m_size = group->m_fileSize;
     object->m_userArg = group;
     object->m_userPostloadCallback = reinterpret_cast<void*>(CMapObjGroup::AsyncPostloadCallback);
+    ASYNC_SET_KIND(object, ASYNC_KIND_WMOGROUP);
     group->m_asyncObjPtr = object;
     AsyncFileReadObject(object, 0);
 

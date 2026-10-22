@@ -24,7 +24,37 @@ class CAsyncThread : public TSLinkedNode<CAsyncThread> {
     /* 0008 */ SThread m_thread;
     /* 000C */ CAsyncQueue* m_queue;
     /* 0010 */ CAsyncObject* m_currentObject;
+#if defined(WOWDECOMP_ARCH_64)
+    // MODIFIED: the thread's place in its queue's pool; a disk thread at or past the active count idles
+    uint32_t m_index;
+#endif
 };
+
+#if defined(WOWDECOMP_ARCH_64)
+// MODIFIED: performance diagnostics. Where loading costs the main thread, smoothed per frame like GetSceneTimings
+// (GetLoadTimings() in Lua). Window values cover the last complete 5 s window; peaks the current and last window.
+struct AsyncLoadStats {
+    double m_postMs[ASYNC_KIND_COUNT]; // main-thread ms per frame in post-load callbacks, by ASYNC_KIND_*
+    double m_postPeak;                 // the most post-load ms any one frame spent
+    double m_waitMs;                   // main-thread ms per frame blocked in AsyncFileReadWait
+    double m_waitPeak;                 // the longest single AsyncFileReadWait, ms
+    double m_prepareMs;                // reader-thread ms per second in prepare callbacks (off the main thread)
+    double m_readMBps;                 // MB per second the reader threads read
+    uint32_t m_waits;                  // AsyncFileReadWait calls per window
+    uint32_t m_loads;                  // post-load callbacks per window
+    uint32_t m_queued;                 // objects waiting for a reader thread (stale lists included)
+    uint32_t m_reading;                // reader threads reading now
+    uint32_t m_posted;                 // read objects waiting for their post-load callback
+    uint32_t m_threads;                // active disk reader threads
+};
+
+// the counts (queued, reading, posted, threads) are taken at the call; the rest is kept current by the poll event
+const AsyncLoadStats& AsyncFileReadGetStats();
+// disk reader threads (stock 1, at most 8); more are created as needed, surplus ones idle
+void AsyncFileReadSetDiskThreads(uint32_t count);
+// main-thread ms per frame for post-load callbacks outside loading screens; 0 = asyncHandlerTimeout (stock 100)
+void AsyncFileReadSetPostloadBudget(uint32_t ms);
+#endif
 
 class AsyncFile {
     public:

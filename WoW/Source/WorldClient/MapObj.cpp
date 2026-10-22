@@ -1683,7 +1683,13 @@ void CMapObj::PrepareUpdate() {
         if (!mapObj->m_refCount) {
             mapObj->m_flushTimer += FrameTime::s_tickTimeSec;
 
+#if defined(WOWDECOMP_ARCH_64)
+            // MODIFIED: performance; a WMO no longer placed in the world is kept CMapObj::s_flushTime s (wmoCacheTime,
+            // 120; stock 10) before it is freed, so flying back over a town does not read its root and groups again
+            if (mapObj->m_flushTimer > CMapObj::s_flushTime) {
+#else
             if (mapObj->m_flushTimer > 10.0f) {
+#endif
                 CMapObj::mapObjHash.Unlink(mapObj);
                 CMap::FreeMapObj(mapObj);
             }
@@ -1696,6 +1702,10 @@ void CMapObj::PrepareUpdate() {
         CMapObj::ProcessAsyncLoadQueue();
     }
 }
+
+#if defined(WOWDECOMP_ARCH_64)
+float CMapObj::s_flushTime = 120.0f;
+#endif
 
 // VERIFY: d0b199c6 manual
 // OFFSET: 0x007AD1F0

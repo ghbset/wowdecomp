@@ -29,7 +29,9 @@
 static const uint32_t s_skinProfileBoneCounts[4] = { 256, 64, 53, 21 };
 
 // STATIC: 0x00AF59D8
-static uint32_t s_sequenceIndex = 0xFFFFFFFF;
+// MODIFIED: performance; thread_local, as M2Init now also runs on the async reader threads (CM2Shared::PrepareLoad)
+// while the main thread may be relocating a low-priority sequence with these set
+static thread_local uint32_t s_sequenceIndex = 0xFFFFFFFF;
 
 // STATIC: 0x00AF59E8
 static const EGxTexOp s_alphaOps[8] = { static_cast<EGxTexOp>(3), static_cast<EGxTexOp>(0), static_cast<EGxTexOp>(3), static_cast<EGxTexOp>(2), static_cast<EGxTexOp>(1), static_cast<EGxTexOp>(3), static_cast<EGxTexOp>(3), static_cast<EGxTexOp>(3) };
@@ -38,10 +40,10 @@ static const EGxTexOp s_alphaOps[8] = { static_cast<EGxTexOp>(3), static_cast<EG
 static const EGxTexOp s_colorOps[8] = { static_cast<EGxTexOp>(0), static_cast<EGxTexOp>(0), static_cast<EGxTexOp>(4), static_cast<EGxTexOp>(2), static_cast<EGxTexOp>(1), static_cast<EGxTexOp>(5), static_cast<EGxTexOp>(1), static_cast<EGxTexOp>(2) };
 
 // STATIC: 0x00D41258
-static uint8_t* s_sequenceData;
+static thread_local uint8_t* s_sequenceData;
 
 // STATIC: 0x00D4125C
-static uint32_t s_sequenceSize;
+static thread_local uint32_t s_sequenceSize;
 
 // VERIFY: eb5cb8e9 auto
 // OFFSET: 0x00835950
@@ -65,6 +67,10 @@ uint32_t CM2Shared::AddRef() {
     if (!this->m_refCount && this->m_cache) {
         if (this->m_freePrev) {
             *this->m_freePrev = this->m_freeNext;
+#if defined(WOWDECOMP_ARCH_64)
+            // MODIFIED: performance; leaves the free list (CM2Cache::GarbageCollect)
+            g_m2CacheFreeBytes -= g_m2CacheFreeBytes < this->m_fileSize ? g_m2CacheFreeBytes : this->m_fileSize;
+#endif
         }
 
         if (this->m_freeNext) {
@@ -1635,6 +1641,7 @@ int32_t CM2Shared::LoadSkinProfile(uint32_t profile) {
     this->m_asyncObject->m_isRead = 0;
     this->m_asyncObject->m_isProcessed = 0;
     this->m_asyncObject->m_priority = 125;
+    ASYNC_SET_KIND(this->m_asyncObject, ASYNC_KIND_SKIN);
     AsyncFileReadObject(this->m_asyncObject, 1);
 
     return 1;
@@ -1729,12 +1736,13 @@ int32_t CM2Shared::Initialize() {
 }
 
 // INLINED
-int32_t CM2Shared::FinishLoading() {
+int32_t CM2Shared::FinishLoading(int32_t prepared) {
     if (this->m_flags & 1) {
         return 1;
     }
 
-    if (!M2Init(reinterpret_cast<uint8_t*>(this->m_data), this->m_fileSize, *this->m_data)) {
+    // MODIFIED: performance; prepared > 0: the reader thread already relocated the data (PrepareLoad), < 0: and failed
+    if (prepared < 0 || (!prepared && !M2Init(reinterpret_cast<uint8_t*>(this->m_data), this->m_fileSize, *this->m_data))) {
         DebugLog("Corrupt model data: %s", this->m_fileName);
         return 0;
     }
@@ -1766,10 +1774,26 @@ int32_t CM2Shared::FinishLoading() {
 // OFFSET: 0x0083D340
 void CM2Shared::LoadSucceededCallback(void* param) {
     CM2Shared* shared = static_cast<CM2Shared*>(param);
+#if defined(WOWDECOMP_ARCH_64)
+    int32_t prepared = shared->m_asyncObject->m_prepared;
+#else
+    int32_t prepared = 0;
+#endif
     AsyncFileReadDestroyObject(shared->m_asyncObject);
     shared->m_asyncObject = nullptr;
-    shared->FinishLoading();
+    shared->FinishLoading(prepared);
 }
+
+#if defined(WOWDECOMP_ARCH_64)
+// MODIFIED: performance. The model file's prepare callback, on the reader thread that read it: M2Init validates every
+// array against the file size and turns the file offsets into pointers, a walk over every track of every bone, texture
+// transform, particle and ribbon, which the main thread did in LoadSucceededCallback. It only touches the buffer (the
+// owner may be destroyed meanwhile; a Cancel keeps the buffer until the cleanup callback)
+void CM2Shared::PrepareLoad(CAsyncObject* object) {
+    uint8_t* base = static_cast<uint8_t*>(object->m_buffer);
+    object->m_prepared = M2Init(base, object->m_size, *reinterpret_cast<M2Data*>(base)) ? 1 : -1;
+}
+#endif
 
 // INLINED
 CM2SequenceLoad::CM2SequenceLoad() {
@@ -1818,6 +1842,10 @@ int32_t CM2Shared::Load(SFileImpl* file, int32_t flags, CAaBox* boundingBox) {
     this->m_asyncObject->m_userPostUnloadCallback = reinterpret_cast<void*>(&CM2Shared::LoadFailedCallback);
     this->m_asyncObject->m_isRead = 0;
     this->m_asyncObject->m_isProcessed = 0;
+    ASYNC_SET_KIND(this->m_asyncObject, ASYNC_KIND_MODEL);
+#if defined(WOWDECOMP_ARCH_64)
+    this->m_asyncObject->m_prepareCallback = &CM2Shared::PrepareLoad;
+#endif
     AsyncFileReadObject(this->m_asyncObject, 0);
 
     return 1;
@@ -2067,6 +2095,7 @@ CM2SequenceLoad* CM2Shared::LoadLowPrioritySequence(uint16_t sequenceIndex) {
     load->m_asyncObject->m_userArg = load;
     load->m_asyncObject->m_userPostloadCallback = reinterpret_cast<void*>(&CM2Shared::LowPrioritySequenceLoadedCallback);
     load->m_asyncObject->m_userPostUnloadCallback = reinterpret_cast<void*>(&CM2Shared::LowPrioritySequenceFailedCallback);
+    ASYNC_SET_KIND(load->m_asyncObject, ASYNC_KIND_ANIM);
     load->m_asyncObject->m_isRead = 0;
     load->m_asyncObject->m_isProcessed = 0;
     load->m_asyncObject->m_priority = 125;
@@ -2083,6 +2112,10 @@ void CM2Shared::Release() {
     }
 
     if (this->m_cache && this->m_previous) {
+#if defined(WOWDECOMP_ARCH_64)
+        // MODIFIED: performance; joins the free list (CM2Cache::GarbageCollect)
+        g_m2CacheFreeBytes += this->m_fileSize;
+#endif
         this->m_freeTime = OsGetAsyncTimeMs();
         this->m_freePrev = this->m_cache->m_freeListTail;
         this->m_freeNext = nullptr;

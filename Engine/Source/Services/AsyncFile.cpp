@@ -1,4 +1,6 @@
 #include <cstddef>
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include "Engine/Source/Gx/Gx.h"
 #include "Engine/Source/Services/AsyncFile.h"
@@ -157,6 +159,152 @@ void AsyncFile::LeaveQueueLock() {
     s_queueLocked = 0;
 }
 
+// Not stock: the disk queue's default reader count, clamp(cores / 2, 2, 4).
+static uint32_t AsyncFileReadAutoDiskThreads() {
+    Blizzard::Hardware::GetProcessorFeatures();
+    uint32_t count = System_Hardware::s_processorFeatures.m_processorCount / 2;
+    return count < 2 ? 2 : count > 4 ? 4 : count;
+}
+
+#if defined(WOWDECOMP_ARCH_64)
+// MODIFIED: performance (Badgermilk0 feature/async-assets). The disk queue's reader pool is sized live by
+// asyncReadThreads (AsyncFileReadSetDiskThreads). After a read the thread runs the object's prepare callback, work that
+// used to run in the post-load callback on the main thread. The poll event spends at most s_postloadBudget ms of a frame
+// on post-load callbacks (stock 100 ms), and an object the main thread waits on is processed before the others.
+static const uint32_t ASYNC_MAX_DISK_THREADS = 8;
+
+static const char* s_diskThreadNames[ASYNC_MAX_DISK_THREADS] = {
+    "Disk Queue", "Disk Queue 2", "Disk Queue 3", "Disk Queue 4", "Disk Queue 5", "Disk Queue 6", "Disk Queue 7", "Disk Queue 8"
+};
+
+static uint32_t s_diskThreadCount;
+// asyncReadThreads is set (InitializeGlobal) before the engine context creates the queues; kept for
+// AsyncFileReadInitialize. 0 = auto
+static uint32_t s_diskThreadsWanted = 0;
+static std::atomic<uint32_t> s_diskThreadsActive { 1 };
+static uint32_t s_postloadBudget = 8;
+
+// load statistics; the reader threads' parts are atomic
+static AsyncLoadStats s_stats;
+static uint64_t s_postTicks[ASYNC_KIND_COUNT];
+static uint64_t s_waitTicks;
+static std::atomic<uint64_t> s_readBytes;
+static std::atomic<uint64_t> s_prepareTicks;
+
+struct AsyncLoadWindow {
+    uint64_t m_start;
+    uint64_t m_readBytes;
+    uint64_t m_prepareTicks;
+    double m_postPeak;
+    double m_waitPeak;
+    uint32_t m_waits;
+    uint32_t m_loads;
+};
+
+static AsyncLoadWindow s_window;
+static double s_lastPostPeak;
+static double s_lastWaitPeak;
+
+// nanoseconds on the steady clock (QueryPerformanceCounter)
+static uint64_t AsyncNow() {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+static const double ASYNC_MS_PER_TICK = 1.0e-6;
+
+// once per poll event (once per frame): smooths the frame's post-load and wait time, rolls the 5 s window
+static void AsyncLoadStatsFold() {
+    const double k = 0.02;
+    double frameMs = 0.0;
+
+    for (uint32_t i = 0; i < ASYNC_KIND_COUNT; i++) {
+        double ms = static_cast<double>(s_postTicks[i]) * ASYNC_MS_PER_TICK;
+        s_stats.m_postMs[i] += (ms - s_stats.m_postMs[i]) * k;
+        frameMs += ms;
+        s_postTicks[i] = 0;
+    }
+
+    double waitMs = static_cast<double>(s_waitTicks) * ASYNC_MS_PER_TICK;
+    s_stats.m_waitMs += (waitMs - s_stats.m_waitMs) * k;
+    s_waitTicks = 0;
+
+    if (frameMs > s_window.m_postPeak) {
+        s_window.m_postPeak = frameMs;
+    }
+
+    uint64_t now = AsyncNow();
+
+    if (!s_window.m_start) {
+        s_window.m_start = now;
+        s_window.m_readBytes = s_readBytes.load();
+        s_window.m_prepareTicks = s_prepareTicks.load();
+    }
+
+    double elapsedMs = static_cast<double>(now - s_window.m_start) * ASYNC_MS_PER_TICK;
+
+    if (elapsedMs >= 5000.0) {
+        uint64_t bytes = s_readBytes.load();
+        uint64_t prepare = s_prepareTicks.load();
+        double seconds = elapsedMs / 1000.0;
+        s_stats.m_readMBps = static_cast<double>(bytes - s_window.m_readBytes) / (1024.0 * 1024.0) / seconds;
+        s_stats.m_prepareMs = static_cast<double>(prepare - s_window.m_prepareTicks) * ASYNC_MS_PER_TICK / seconds;
+        s_stats.m_waits = s_window.m_waits;
+        s_stats.m_loads = s_window.m_loads;
+        s_lastPostPeak = s_window.m_postPeak;
+        s_lastWaitPeak = s_window.m_waitPeak;
+
+        s_window = AsyncLoadWindow();
+        s_window.m_start = now;
+        s_window.m_readBytes = bytes;
+        s_window.m_prepareTicks = prepare;
+    }
+
+    s_stats.m_postPeak = s_window.m_postPeak > s_lastPostPeak ? s_window.m_postPeak : s_lastPostPeak;
+    s_stats.m_waitPeak = s_window.m_waitPeak > s_lastWaitPeak ? s_window.m_waitPeak : s_lastWaitPeak;
+}
+
+const AsyncLoadStats& AsyncFileReadGetStats() {
+    s_stats.m_queued = 0;
+    s_stats.m_reading = 0;
+    s_stats.m_posted = 0;
+    s_stats.m_threads = s_diskThreadsActive.load();
+
+    g_queueLock.Enter();
+
+    for (CAsyncQueue* queue = s_asyncQueueList.Head(); !s_asyncQueueList.IsEnd(queue); queue = s_asyncQueueList.RawNext(queue)) {
+        for (CAsyncObject* object = queue->m_readList.Head(); !queue->m_readList.IsEnd(object); object = queue->m_readList.RawNext(object)) {
+            s_stats.m_queued++;
+        }
+
+        for (CAsyncObject* object = queue->m_staleList.Head(); !queue->m_staleList.IsEnd(object); object = queue->m_staleList.RawNext(object)) {
+            s_stats.m_queued++;
+        }
+    }
+
+    for (CAsyncThread* thread = s_asyncThreadList.Head(); !s_asyncThreadList.IsEnd(thread); thread = s_asyncThreadList.RawNext(thread)) {
+        if (thread->m_currentObject) {
+            s_stats.m_reading++;
+        }
+    }
+
+    for (CAsyncObject* object = s_asyncFileReadPostList.Head(); !s_asyncFileReadPostList.IsEnd(object); object = s_asyncFileReadPostList.RawNext(object)) {
+        s_stats.m_posted++;
+    }
+
+    for (CAsyncObject* object = s_asyncFileReadDeferList.Head(); !s_asyncFileReadDeferList.IsEnd(object); object = s_asyncFileReadDeferList.RawNext(object)) {
+        s_stats.m_posted++;
+    }
+
+    g_queueLock.Leave();
+
+    return s_stats;
+}
+
+void AsyncFileReadSetPostloadBudget(uint32_t ms) {
+    s_postloadBudget = ms;
+}
+#endif
+
 // VERIFY: ca9687a9 manual
 // OFFSET: 0x004B9AB0
 void AsyncFileReadUnloadPostList() {
@@ -179,8 +327,10 @@ void AsyncFileReadUnloadPostList() {
 // VERIFY: acd49bbd manual
 // OFFSET: 0x004B9B20
 // Not stock: the stock poll body, with a texture-creation cap when `capped` (the per-frame EVENT_ID_POLL path only;
-// AsyncFileReadWait / WaitAll (loading screens) poll uncapped so they always drain).
-static void AsyncFileReadPoll(bool capped) {
+// AsyncFileReadWait / WaitAll (loading screens) poll uncapped so they always drain). Runs post-load callbacks for up to
+// `timeout` ms (at least one). x64: the object the main thread waits on goes first, and with `stopAfterWait` the pass
+// ends once it has run (Badgermilk0 feature/async-assets).
+static void AsyncFileReadPoll(bool capped, uint32_t timeout, int32_t stopAfterWait) {
     uint32_t start = OsGetAsyncTimeMs();
     int32_t texLimit = capped ? g_asyncTexUploadLimit : 0;
     int32_t texCount = 0;
@@ -199,6 +349,15 @@ static void AsyncFileReadPoll(bool capped) {
 
         CAsyncObject* object = s_asyncFileReadPostList.Head();
 
+#if defined(WOWDECOMP_ARCH_64)
+        // m_isRead is set as the reader links the object to the post list and m_isProcessed as it leaves it
+        CAsyncObject* waitObject = s_asyncWaitObject;
+
+        if (waitObject && waitObject->m_isRead && !waitObject->m_isProcessed) {
+            object = waitObject;
+        }
+#endif
+
         if (!object) {
             g_queueLock.Leave();
             break;
@@ -212,11 +371,17 @@ static void AsyncFileReadPoll(bool capped) {
 
         object->m_link.Unlink();
 
-        if (object == s_asyncWaitObject) {
+        int32_t wasWaitObject = object == s_asyncWaitObject;
+
+        if (wasWaitObject) {
             s_asyncWaitObject = nullptr;
         }
 
         object->m_isProcessed = 1;
+#if defined(WOWDECOMP_ARCH_64)
+        uint32_t kind = object->m_kind < ASYNC_KIND_COUNT ? object->m_kind : ASYNC_KIND_OTHER;
+        uint64_t callbackStart = AsyncNow();
+#endif
 
         // Not stock (worldLoadSort): loads issued by this postload (skins, textures, WMO groups) inherit its position.
         bool hasPos = object->m_hasLoadPos;
@@ -231,9 +396,18 @@ static void AsyncFileReadPoll(bool capped) {
             reinterpret_cast<void (*)(void*)>(object->m_userPostloadCallback)(object->m_userArg);
         }
 
+#if defined(WOWDECOMP_ARCH_64)
+        s_postTicks[kind] += AsyncNow() - callbackStart;
+        s_window.m_loads++;
+#endif
+
         s_progressCount--;
 
-        if (OsGetAsyncTimeMs() - start > s_handlerTimeout) {
+        if (wasWaitObject && stopAfterWait) {
+            break;
+        }
+
+        if (OsGetAsyncTimeMs() - start > timeout) {
             break;
         }
     }
@@ -244,9 +418,20 @@ static void AsyncFileReadPoll(bool capped) {
 }
 
 int32_t AsyncFileReadPollHandler(const void* data, void* param) {
-    AsyncFileReadPoll(true);
+    AsyncFileReadPoll(true, s_handlerTimeout, 0);
     return 1;
 }
+
+#if defined(WOWDECOMP_ARCH_64)
+// MODIFIED: performance; the EVENT_ID_POLL handler: AsyncFileReadPollHandler within the frame budget
+// (asyncPostloadBudget). Loading screens and the map's own load loops call AsyncFileReadPollHandler directly and keep
+// the full asyncHandlerTimeout
+static int32_t AsyncFileReadPollEvent(const void* data, void* param) {
+    AsyncLoadStatsFold();
+    AsyncFileReadPoll(true, s_postloadBudget ? s_postloadBudget : s_handlerTimeout, 0);
+    return 1;
+}
+#endif
 
 // VERIFY: 132a0c31 manual
 // OFFSET: 0x004B9C60
@@ -313,6 +498,10 @@ int32_t AsyncFile::Cancel(CAsyncObject* object, void (*callback)(CAsyncObject*))
         object->m_userArg = object;
         object->m_userPostUnloadCallback = reinterpret_cast<void*>(callback ? callback : DefaultAsyncObjectCleanupCallback);
         object->m_userPostloadCallback = object->m_userPostUnloadCallback;
+#if defined(WOWDECOMP_ARCH_64)
+        // MODIFIED: a reader thread that has not started the prepare callback yet skips it
+        object->m_prepareCallback = nullptr;
+#endif
         g_queueLock.Leave();
 
         return 0;
@@ -375,6 +564,8 @@ void AsyncFileReadWait(CAsyncObject* object) {
 
     if (object->m_isProcessed) {
         g_queueLock.Leave();
+        // MODIFIED: port fix; this return left s_waiting raised, so the next wait failed with the fatal error above
+        s_waiting--;
         return;
     }
 
@@ -399,12 +590,22 @@ void AsyncFileReadWait(CAsyncObject* object) {
         s_ingameStartCallback();
     }
 
+#if defined(WOWDECOMP_ARCH_64)
+    uint64_t waitStart = AsyncNow();
+#endif
+
     do {
         if (s_ingameProgressCallback) {
             s_ingameProgressCallback(0.0f, 0);
         }
 
-        AsyncFileReadPoll(false);
+#if defined(WOWDECOMP_ARCH_64)
+        // MODIFIED: performance. The waited-on object runs as soon as it is read, and the wait returns right after it;
+        // other read objects get the frame budget per pass instead of asyncHandlerTimeout (100 ms) before each check
+        AsyncFileReadPoll(false, s_postloadBudget ? s_postloadBudget : s_handlerTimeout, 1);
+#else
+        AsyncFileReadPoll(false, s_handlerTimeout, 0);
+#endif
 
         if (!s_asyncWaitObject) {
             break;
@@ -412,6 +613,17 @@ void AsyncFileReadWait(CAsyncObject* object) {
 
         OsSleep(1);
     } while (true);
+
+#if defined(WOWDECOMP_ARCH_64)
+    uint64_t waitTicks = AsyncNow() - waitStart;
+    double waitMs = static_cast<double>(waitTicks) * ASYNC_MS_PER_TICK;
+    s_waitTicks += waitTicks;
+    s_window.m_waits++;
+
+    if (waitMs > s_window.m_waitPeak) {
+        s_window.m_waitPeak = waitMs;
+    }
+#endif
 
     s_waiting--;
 }
@@ -448,6 +660,11 @@ CAsyncObject* AsyncFileReadAllocObject() {
     object->m_loadX = g_asyncLoadOrigin[0];
     object->m_loadY = g_asyncLoadOrigin[1];
     object->m_linkFrame = 0;
+#if defined(WOWDECOMP_ARCH_64)
+    object->m_prepareCallback = nullptr;
+    object->m_prepared = 0;
+    object->m_kind = ASYNC_KIND_OTHER;
+#endif
 
     return object;
 }
@@ -505,6 +722,15 @@ uint32_t STORMAPI AsyncFileReadThread(void* param) {
     while (AsyncFileRead::s_shutdownEvent.Wait(0)) {
         uint32_t count = 0;
 
+#if defined(WOWDECOMP_ARCH_64)
+        // MODIFIED: performance; a disk thread past the active count (asyncReadThreads lowered) idles. It never waits on
+        // the wake event, so it never swallows a wake meant for an active reader
+        if (queue == s_asyncQueues[0] && thread->m_index >= s_diskThreadsActive.load(std::memory_order_relaxed)) {
+            OsSleep(5);
+            continue;
+        }
+#endif
+
         while (true) {
             g_queueLock.Enter();
 
@@ -546,12 +772,19 @@ uint32_t STORMAPI AsyncFileReadThread(void* param) {
             thread->m_currentObject = object;
             g_queueLock.Leave();
 
+#if defined(WOWDECOMP_ARCH_64)
+            int32_t readOk = 0;
+#endif
+
             for (int32_t retries = 10; retries; ) {
                 if (SFile::IsStreamingMode() && object->m_file->m_type) {
                     SFile::MakeFileLocal(object->m_file, (object->m_priority > 127) + 1, true);
                 }
 
                 if (SFileReadFile(object->m_file, object->m_buffer, object->m_size, nullptr, nullptr, 0)) {
+#if defined(WOWDECOMP_ARCH_64)
+                    readOk = 1;
+#endif
                     break;
                 }
 
@@ -563,6 +796,24 @@ uint32_t STORMAPI AsyncFileReadThread(void* param) {
                     DebugLog("AsyncFileReadThread() failed reading %s: %s", name, error);
                 }
             }
+
+#if defined(WOWDECOMP_ARCH_64)
+            // MODIFIED: performance; the prepare callback runs here, off the main thread (see CAsyncObject). A Cancel
+            // during the read clears it; one during the callback only swaps the post-load callback for a cleanup
+            if (readOk) {
+                s_readBytes.fetch_add(object->m_size, std::memory_order_relaxed);
+
+                g_queueLock.Enter();
+                void (*prepare)(CAsyncObject*) = object->m_prepareCallback;
+                g_queueLock.Leave();
+
+                if (prepare) {
+                    uint64_t prepareStart = AsyncNow();
+                    prepare(object);
+                    s_prepareTicks.fetch_add(AsyncNow() - prepareStart, std::memory_order_relaxed);
+                }
+            }
+#endif
 
             g_queueLock.Enter();
             s_asyncFileReadPostList.LinkToTail(object);
@@ -599,6 +850,9 @@ void AsyncFileReadCreateThread(CAsyncQueue* queue, const char* name) {
     CAsyncThread* thread = s_asyncThreadList.NewNode(2, 0, 0);
     thread->m_queue = queue;
     thread->m_currentObject = nullptr;
+#if defined(WOWDECOMP_ARCH_64)
+    thread->m_index = 0;
+#endif
     SThread::Create(AsyncFileReadThread, thread, thread->m_thread, const_cast<char*>(name), 0);
 }
 
@@ -616,7 +870,12 @@ void AsyncFileReadInitialize(uint32_t threadSleep, uint32_t handlerTimeout) {
         s_handlerTimeout = 20;
     }
 
+#if defined(WOWDECOMP_ARCH_64)
+    // MODIFIED: performance; the frame's post-load pass keeps to s_postloadBudget (AsyncFileReadPollEvent)
+    EventRegisterEx(EVENT_ID_POLL, AsyncFileReadPollEvent, nullptr, EVENT_PRIORITY_NORMAL);
+#else
     EventRegisterEx(EVENT_ID_POLL, AsyncFileReadPollHandler, nullptr, EVENT_PRIORITY_NORMAL);
+#endif
 
     if (SFile::IsStreamingMode()) {
         EventRegisterEx(EVENT_ID_IDLE, NetQueuePromoteLocalFiles, nullptr, EVENT_PRIORITY_BELOW_NORMAL);
@@ -632,14 +891,19 @@ void AsyncFileReadInitialize(uint32_t threadSleep, uint32_t handlerTimeout) {
 
     int32_t queues = SFile::IsStreamingMode() ? 3 : 1;
 
-    // Not stock: the disk queue gets clamp(cores / 2, 2, 4) readers instead of one. Archive reads are positional
-    // (ReadFile + OVERLAPPED offset) and SFile locks per handle, so readers on different requests do not serialise.
-    Blizzard::Hardware::GetProcessorFeatures();
-    uint32_t diskThreads = System_Hardware::s_processorFeatures.m_processorCount / 2;
-    diskThreads = diskThreads < 2 ? 2 : diskThreads > 4 ? 4 : diskThreads;
+    // Not stock: the disk queue gets clamp(cores / 2, 2, 4) readers instead of one (x64: asyncReadThreads,
+    // AsyncFileReadSetDiskThreads). Archive reads are positional (ReadFile + OVERLAPPED offset) and SFile locks per
+    // handle, so readers on different requests do not serialise.
+    uint32_t diskThreads = AsyncFileReadAutoDiskThreads();
 
     for (int32_t i = 0; i < queues; i++) {
         s_asyncQueues[i] = AsyncFileReadCreateQueue();
+
+#if defined(WOWDECOMP_ARCH_64)
+        if (i == 0) {
+            continue;
+        }
+#endif
 
         for (uint32_t t = 0; t < (i == 0 ? diskThreads : 1); t++) {
             AsyncFileReadCreateThread(s_asyncQueues[i], s_asyncQueueNames[i]);
@@ -650,8 +914,43 @@ void AsyncFileReadInitialize(uint32_t threadSleep, uint32_t handlerTimeout) {
         s_asyncQueues[2]->m_frameLimited = 1;
     }
 
+#if defined(WOWDECOMP_ARCH_64)
+    s_diskThreadCount = 0;
+    AsyncFileReadSetDiskThreads(s_diskThreadsWanted);
+#endif
+
     s_queueLocked = 0;
 }
+
+#if defined(WOWDECOMP_ARCH_64)
+// MODIFIED: performance; see s_diskThreadNames. 0 = auto (clamp(cores / 2, 2, 4)). Threads are created up to the
+// largest count asked for and never destroyed before AsyncFileReadDestroy; lowering the count idles the surplus ones
+void AsyncFileReadSetDiskThreads(uint32_t count) {
+    s_diskThreadsWanted = count;
+
+    if (!s_asyncQueues[0]) {
+        return;
+    }
+
+    if (!count) {
+        count = AsyncFileReadAutoDiskThreads();
+    } else if (count > ASYNC_MAX_DISK_THREADS) {
+        count = ASYNC_MAX_DISK_THREADS;
+    }
+
+    while (s_diskThreadCount < count) {
+        CAsyncThread* thread = s_asyncThreadList.NewNode(2, 0, 0);
+        thread->m_queue = s_asyncQueues[0];
+        thread->m_currentObject = nullptr;
+        thread->m_index = s_diskThreadCount;
+        SThread::Create(AsyncFileReadThread, thread, thread->m_thread, const_cast<char*>(s_diskThreadNames[s_diskThreadCount]), 0);
+        s_diskThreadCount++;
+    }
+
+    s_diskThreadsActive = count;
+    s_asyncQueues[0]->m_wakeEvent.Set();
+}
+#endif
 
 // VERIFY: 35423985 auto
 // OFFSET: 0x004BAB50
@@ -749,7 +1048,12 @@ void AsyncFileReadDestroy() {
         EventUnregisterEx(EVENT_ID_IDLE, NetQueuePromoteLocalFiles, nullptr, 2);
     }
 
+#if defined(WOWDECOMP_ARCH_64)
+    EventUnregisterEx(EVENT_ID_POLL, AsyncFileReadPollEvent, nullptr, 0xFFFFFFFF);
+    s_diskThreadCount = 0;
+#else
     EventUnregisterEx(EVENT_ID_POLL, AsyncFileReadPollHandler, nullptr, 0xFFFFFFFF);
+#endif
 }
 
 // VERIFY: e7566958 auto
@@ -794,7 +1098,7 @@ void AsyncFileReadWaitAll() {
     s_progressCount = total;
 
     while (AsyncFileReadIsReading()) {
-        AsyncFileReadPoll(false);
+        AsyncFileReadPoll(false, s_handlerTimeout, 0);
 
         if (s_asyncProgressCallback) {
             float progress = 1.0f;

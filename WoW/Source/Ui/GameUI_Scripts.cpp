@@ -28,6 +28,8 @@
 #include "Engine/Source/Os/Time.h"
 #include "Engine/Source/Os/TimeManager.h"
 #include "Engine/Source/Scrn/Scrn.h"
+#include "Engine/Source/Services/AsyncFile.h"
+#include "Engine/Source/Services/Texture.h"
 #include "Engine/Source/ShaderEffect/ShadowCache.h"
 #include "Engine/Source/Storm/H/storm.h"
 #include "Engine/Source/Storm/Source/MD5.h"
@@ -2556,6 +2558,40 @@ static int32_t Script_GetFramerate(lua_State* L) {
     lua_pushnumber(L, World::GetFramerate());
     return 1;
 }
+
+#if defined(WOWDECOMP_ARCH_64)
+// Not stock (Badgermilk0 feature/async-assets): main-thread ms per frame in post-load callbacks by kind (texture,
+// model, skin, anim, adt, wmo, wmo group, other), the worst frame's post-load ms, ms per frame and the longest blocked
+// in waits, waits and loads per 5 s, reader-thread prepare ms per second, MB read per second, files queued, being read
+// and read but not yet processed, reader threads, then textures waiting for the load budget and texture MB in flight
+static int32_t Script_GetLoadTimings(lua_State* L) {
+    const AsyncLoadStats& stats = AsyncFileReadGetStats();
+
+    for (uint32_t i = 0; i < ASYNC_KIND_COUNT; i++) {
+        lua_pushnumber(L, stats.m_postMs[i]);
+    }
+
+    lua_pushnumber(L, stats.m_postPeak);
+    lua_pushnumber(L, stats.m_waitMs);
+    lua_pushnumber(L, stats.m_waitPeak);
+    lua_pushnumber(L, stats.m_waits);
+    lua_pushnumber(L, stats.m_loads);
+    lua_pushnumber(L, stats.m_prepareMs);
+    lua_pushnumber(L, stats.m_readMBps);
+    lua_pushnumber(L, stats.m_queued);
+    lua_pushnumber(L, stats.m_reading);
+    lua_pushnumber(L, stats.m_posted);
+    lua_pushnumber(L, stats.m_threads);
+
+    uint32_t texturesPending;
+    uint32_t textureBytes;
+    TextureGetLoadStats(texturesPending, textureBytes);
+    lua_pushnumber(L, texturesPending);
+    lua_pushnumber(L, static_cast<double>(textureBytes) / (1024.0 * 1024.0));
+
+    return ASYNC_KIND_COUNT + 13;
+}
+#endif
 
 // VERIFY: ee32b2a0 auto
 // OFFSET: 0x005165E0
@@ -6196,6 +6232,9 @@ static FrameScript_Method s_ScriptFunctions[] = {
     { "SetConsoleKey", &Script_SetConsoleKey },
     { "Screenshot", &Script_Screenshot },
     { "GetFramerate", &Script_GetFramerate },
+#if defined(WOWDECOMP_ARCH_64)
+    { "GetLoadTimings", &Script_GetLoadTimings },
+#endif
     { "TogglePerformanceDisplay", &Script_TogglePerformanceDisplay },
     { "TogglePerformancePause", &Script_TogglePerformancePause },
     { "TogglePerformanceValues", &Script_TogglePerformanceValues },

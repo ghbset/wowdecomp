@@ -58,6 +58,10 @@ class CMapObj : public CMapObjIndex, public TSHashObject<CMapObj, HASHKEY_NONE> 
     bool QueryLighting(uint32_t groupNum, const C3Vector& point, uint16_t face, CImVector* color, uint8_t* flag);
     bool QueryLighting(uint32_t groupNum, const C3Segment& seg, CImVector* color, uint8_t* flag);
     static TSList<CMapObj, TSGetExplicitLink<CMapObj> > s_asyncLoadQueue;
+#if defined(WOWDECOMP_ARCH_64)
+    // MODIFIED: performance; seconds an unreferenced WMO is kept (wmoCacheTime; stock 10)
+    static float s_flushTime;
+#endif
     static TSList<CMapObjGroup, TSGetExplicitLink<CMapObjGroup> > s_loadedGroups;
     static TSHashTable<CMapObj, HASHKEY_NONE> mapObjHash;
     static RENDER_CALLBACK gRenderCallback;

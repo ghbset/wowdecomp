@@ -75,6 +75,9 @@ class CM2Shared {
 
     static void LoadFailedCallback(void* param);
     static void LoadSucceededCallback(void* param);
+#if defined(WOWDECOMP_ARCH_64)
+    static void PrepareLoad(CAsyncObject* object);
+#endif
     static void LowPrioritySequenceFailedCallback(void* param);
     static void LowPrioritySequenceLoadedCallback(void* param);
     static void SkinProfileLoadedCallback(void* param);
@@ -89,7 +92,8 @@ class CM2Shared {
     void ConvertTextureCombosToValues();
     void ConvertTextureValuesToCombos();
     void DestroyBuffers();
-    int32_t FinishLoading();
+    // MODIFIED: prepared is the model file's CAsyncObject::m_prepared (PrepareLoad); 0 relocates here as stock
+    int32_t FinishLoading(int32_t prepared = 0);
     int32_t FinishLoadingLowPrioritySequence(uint32_t sequenceIndex, uint8_t* buffer, uint32_t size);
     int32_t FinishLoadingLowPrioritySequence(uint32_t sequenceIndex, CAsyncObject* object);
     int32_t FinishLoadingSkinProfile(uint32_t size);
