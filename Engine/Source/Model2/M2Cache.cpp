@@ -218,6 +218,16 @@ int32_t CM2Cache::Initialize(uint32_t flags) {
     return 1;
 }
 
+#if defined(WOWDECOMP_ARCH_64)
+// MODIFIED: performance. A model no longer in use (a doodad left behind, a spell effect, a mount) waits on the free
+// list and is reused as is if wanted again; stock deleted it after 10 s, so a spell cast every 15 s or a ride back
+// across a zone border read and parsed its models again. They are now kept M2CacheTime seconds (120), the oldest freed
+// first once the free list holds more than M2CacheSize MB of model files
+uint32_t g_m2CacheKeepMs = 120000;
+uint64_t g_m2CacheMaxBytes = 256ull << 20;
+uint64_t g_m2CacheFreeBytes;
+#endif
+
 // VERIFY: 7d576eb4 manual
 // OFFSET: 0x0081C290
 void CM2Cache::GarbageCollect(int32_t force) {
@@ -226,9 +236,17 @@ void CM2Cache::GarbageCollect(int32_t force) {
     while (this->m_freeList) {
         CM2Shared* shared = this->m_freeList;
 
+#if defined(WOWDECOMP_ARCH_64)
+        if (!force && static_cast<int32_t>(now - shared->m_freeTime) < static_cast<int32_t>(g_m2CacheKeepMs) && g_m2CacheFreeBytes <= g_m2CacheMaxBytes) {
+            break;
+        }
+
+        g_m2CacheFreeBytes -= g_m2CacheFreeBytes < shared->m_fileSize ? g_m2CacheFreeBytes : shared->m_fileSize;
+#else
         if (!force && static_cast<int32_t>(now - shared->m_freeTime) < 10000) {
             break;
         }
+#endif
 
         this->m_freeList = shared->m_freeNext;
 
@@ -283,6 +301,10 @@ void CM2Cache::Destroy() {
         shared->m_freeNext = nullptr;
         delete shared;
     }
+
+#if defined(WOWDECOMP_ARCH_64)
+    g_m2CacheFreeBytes = 0;
+#endif
 
     this->ClearSharedHash();
     CParticleEmitter2::Destroy();

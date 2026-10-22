@@ -25,6 +25,7 @@
 #include "Engine/Source/Gxu/GxuFontMsdf.h"
 #include "WoW/Source/ConsoleDevice/ConsoleDevice.h"
 #include "WoW/Source/Hardware.h"
+#include "WoW/Source/WorldClient/MapObj.h"
 #include "WoW/Source/WowSysMessageOutput.h"
 
 // STATIC: 0x00AB6004
@@ -722,6 +723,55 @@ void AsyncFileReadRegisterCVars() {
 
     s_cvAsyncThreadSleep = CVar::Register("asyncThreadSleep", "Engine option: Async read thread sleep", 1, "0", AsyncFileReadThreadSleepCallback, CATEGORY_DEBUG, false, nullptr, false);
     s_cvAsyncHandlerTimeout = CVar::Register("asyncHandlerTimeout", "Engine option: Async read main thread timeout", 1, "100", AsyncFileReadHandlerTimeoutCallback, CATEGORY_DEBUG, false, nullptr, false);
+
+#if defined(WOWDECOMP_ARCH_64)
+    // Not stock (Badgermilk0 feature/async-assets): asset streaming limits. These register before Config.wtf is read,
+    // so a saved value arrives later through the callback; each default is applied here once (and the engine globals
+    // start at the same defaults). AsyncFileReadSetDiskThreads keeps the count until AsyncFileReadInitialize below.
+    CVar* var = CVar::Register("asyncReadThreads", "Disk reader threads (0 = auto: half the cores, 2 to 4; 1 = stock; up to 8)", 1, "0", [](CVar*, const char*, const char* value, void*) -> bool {
+        int32_t count = SStrToInt(value);
+        AsyncFileReadSetDiskThreads(count < 0 ? 0 : static_cast<uint32_t>(count));
+        return true;
+    }, CATEGORY_DEBUG, false, nullptr, false);
+    AsyncFileReadSetDiskThreads(var->m_intValue < 0 ? 0 : static_cast<uint32_t>(var->m_intValue));
+
+    var = CVar::Register("asyncPostloadBudget", "Main-thread ms per frame for loaded files (0 = asyncHandlerTimeout, stock)", 1, "8", [](CVar*, const char*, const char* value, void*) -> bool {
+        int32_t ms = SStrToInt(value);
+        AsyncFileReadSetPostloadBudget(ms < 0 ? 0 : ms > 100 ? 100 : static_cast<uint32_t>(ms));
+        return true;
+    }, CATEGORY_DEBUG, false, nullptr, false);
+    AsyncFileReadSetPostloadBudget(var->m_intValue < 0 ? 0 : var->m_intValue > 100 ? 100 : static_cast<uint32_t>(var->m_intValue));
+
+    var = CVar::Register("textureLoadBudget", "MB of texture files read ahead of their upload (4 = stock)", 1, "64", [](CVar*, const char*, const char* value, void*) -> bool {
+        int32_t mb = SStrToInt(value);
+        TextureSetLoadBudget(static_cast<uint32_t>(mb < 4 ? 4 : mb > 1024 ? 1024 : mb) << 20);
+        return true;
+    }, CATEGORY_DEBUG, false, nullptr, false);
+    TextureSetLoadBudget(static_cast<uint32_t>(var->m_intValue < 4 ? 4 : var->m_intValue > 1024 ? 1024 : var->m_intValue) << 20);
+
+    var = CVar::Register("M2CacheTime", "Seconds an unused model is kept for reuse (10 = stock)", 1, "120", [](CVar*, const char*, const char* value, void*) -> bool {
+        int32_t seconds = SStrToInt(value);
+        g_m2CacheKeepMs = static_cast<uint32_t>(seconds < 10 ? 10 : seconds > 3600 ? 3600 : seconds) * 1000;
+        return true;
+    }, CATEGORY_DEBUG, false, nullptr, false);
+    g_m2CacheKeepMs = static_cast<uint32_t>(var->m_intValue < 10 ? 10 : var->m_intValue > 3600 ? 3600 : var->m_intValue) * 1000;
+
+    // 0: no size cap, the time alone (stock)
+    var = CVar::Register("M2CacheSize", "MB of unused model files kept for reuse (0 = no cap, stock)", 1, "256", [](CVar*, const char*, const char* value, void*) -> bool {
+        int32_t mb = SStrToInt(value);
+        g_m2CacheMaxBytes = mb > 0 ? static_cast<uint64_t>(mb > 4096 ? 4096 : mb) << 20 : UINT64_MAX;
+        return true;
+    }, CATEGORY_DEBUG, false, nullptr, false);
+    g_m2CacheMaxBytes = var->m_intValue > 0 ? static_cast<uint64_t>(var->m_intValue > 4096 ? 4096 : var->m_intValue) << 20 : UINT64_MAX;
+
+    var = CVar::Register("wmoCacheTime", "Seconds an unused WMO is kept for reuse (10 = stock)", 1, "120", [](CVar*, const char*, const char* value, void*) -> bool {
+        int32_t seconds = SStrToInt(value);
+        CMapObj::s_flushTime = static_cast<float>(seconds < 10 ? 10 : seconds > 3600 ? 3600 : seconds);
+        return true;
+    }, CATEGORY_DEBUG, false, nullptr, false);
+    CMapObj::s_flushTime = static_cast<float>(var->m_intValue < 10 ? 10 : var->m_intValue > 3600 ? 3600 : var->m_intValue);
+#endif
+
     AsyncFileReadInitialize(s_cvAsyncThreadSleep->m_intValue, s_cvAsyncHandlerTimeout->m_intValue);
 }
 

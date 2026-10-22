@@ -60,6 +60,14 @@ class CM2Cache {
 
 extern CM2ModelHeap* g_modelPool;
 
+#if defined(WOWDECOMP_ARCH_64)
+// MODIFIED: performance; how long and how many bytes of unused models CM2Cache::GarbageCollect keeps
+extern uint32_t g_m2CacheKeepMs;
+extern uint64_t g_m2CacheMaxBytes;
+// file bytes of the models on the free list
+extern uint64_t g_m2CacheFreeBytes;
+#endif
+
 CM2Scene* M2CreateScene();
 void M2Destroy();
 uint32_t M2GetCacheFlags();

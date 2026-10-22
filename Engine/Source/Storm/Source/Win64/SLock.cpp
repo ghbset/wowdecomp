@@ -281,6 +281,21 @@ int32_t SEvent::Reset() {
 int32_t SThread::Create(uint32_t (STORMAPI* threadProc)(void*), void* param, SThread& thread, char* threadName, uint32_t stackSize) {
     uint32_t threadId;
     thread.m_opaqueData = SCreateThread(threadProc, param, &threadId, nullptr, nullptr, stackSize);
+
+    // MODIFIED: diagnostics; the name the caller gives ("Disk Queue 2", ...) shows in debuggers and profilers.
+    // SetThreadDescription needs Windows 10 1607, so it is looked up rather than linked
+    if (thread.m_opaqueData && threadName && threadName[0]) {
+        typedef HRESULT (WINAPI* SetThreadDescriptionFunc)(HANDLE, PCWSTR);
+        static SetThreadDescriptionFunc s_setThreadDescription = reinterpret_cast<SetThreadDescriptionFunc>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "SetThreadDescription"));
+
+        if (s_setThreadDescription) {
+            wchar_t name[64];
+            MultiByteToWideChar(CP_UTF8, 0, threadName, -1, name, 64);
+            name[63] = L'\0';
+            s_setThreadDescription(thread.m_opaqueData, name);
+        }
+    }
+
     return thread.m_opaqueData != nullptr;
 }
 

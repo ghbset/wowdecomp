@@ -175,6 +175,11 @@ TEXFILETYPE TexturePickAlternateFilename(const char* fileName, TEXFILETYPE type,
 EGxTexFormat TexturePixelFormatToGxTexFormat(PIXEL_FORMAT format);
 void TextureReportLoadError(const char* type, const char* fileName, CStatus* status);
 void TextureSetCacheSize(int32_t size);
+#if defined(WOWDECOMP_ARCH_64)
+// MODIFIED: performance; texture file bytes allowed in flight (stock 4 MB, the floor), and the current queue for stats
+void TextureSetLoadBudget(uint32_t bytes);
+void TextureGetLoadStats(uint32_t& pending, uint32_t& bytesInFlight);
+#endif
 void TextureSetFilterMode(EGxTexFilter filter);
 void TextureSetMaxAnisotropy(uint32_t maxAnisotropy);
 void TextureSetTextureSubstitutions(const char* from, const char* to);
