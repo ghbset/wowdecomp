@@ -194,6 +194,57 @@ for _, page in ipairs(PAGES) do
 	end
 end
 
+-- Badgermilk0 ports (perfcore, streaming, gpuskin, shadows), lighting post passes and the sky: placed before Debug.
+-- ssao / ssaoDistance (WorldLighting.cpp) are left out: CVar names are case-insensitive, so they are the same CVars as
+-- the Legion SSAO / SSAODistance already on the Post Processing page.
+table.insert(PAGES, #PAGES, { name = "Performance", parent = "Advanced", title = "Performance & Streaming",
+	{ "gxMaxFrameLatency", "drop", "Frames queued ahead", "How many frames the graphics card may queue while the next one is prepared. Fewer feels more responsive, more runs smoother. All renderers.",
+	  { { "0", "0 (wait for each frame)" }, { "1", "1" }, { "2", "2" }, { "3", "3" } } },
+	{ "textureCacheSize", "slider", "Texture cache (MB)", "Memory kept for textures no longer on screen, so they come back without reloading. All renderers.", 32, 1024, 32 },
+	{ "SoundMemoryCache", "slider", "Sound cache (MB)", "Memory kept for sounds already played, so they are not read from disk again. All renderers.", 4, 256, 4, restart = true },
+	{ "groundEffectBuffers", "slider", "Grass buffers", "Grass batches kept ready per pool. More avoids rebuilding grass when you turn or move fast. All renderers.", 32, 1024, 32 },
+	{ "groundEffectJobs", "check", "Threaded grass", "Builds grass on several processor cores. All renderers." },
+	{ "asyncReadThreads", "slider", "Disk reader threads", "How many threads read game files from disk. 0 picks a count from your processor. All renderers.", 0, 8, 1, restart = true },
+	{ "asyncPostloadBudget", "slider", "Loading time per frame (ms)", "How long each frame may spend setting up files that finished loading. Higher loads faster, lower hitches less. All renderers.", 0, 50, 1 },
+	{ "textureLoadBudget", "slider", "Texture read-ahead (MB)", "How much texture data is read ahead of being needed. All renderers.", 4, 512, 4 },
+	{ "M2CacheTime", "slider", "Keep unused models (seconds)", "How long a model no longer in view is kept for reuse. All renderers.", 10, 600, 10 },
+	{ "M2CacheSize", "slider", "Unused model memory (MB)", "Memory kept for models no longer in view. 0 = no cap. All renderers.", 0, 1024, 32 },
+	{ "wmoCacheTime", "slider", "Keep unused buildings (seconds)", "How long a building no longer in view is kept for reuse. All renderers.", 10, 600, 10 },
+	{ "portraitLive", "check", "Animated portraits", "Unit portraits are moving 3D models instead of still pictures. All renderers." },
+	{ "portraitResolution", "drop", "Portrait resolution", "Size the unit portraits are drawn at. All renderers.",
+	  { { "64", "64 (stock)" }, { "128", "128" }, { "256", "256" }, { "512", "512" } } },
+	{ "minimapIndoorResolution", "drop", "Indoor minimap resolution", "Size the indoor minimap is drawn at. All renderers.",
+	  { { "256", "256 (stock)" }, { "512", "512" }, { "1024", "1024" }, { "2048", "2048" } } },
+})
+-- Shadow map options (Badgermilk0 port, ShadowQuery.cpp): on the Shadows page.
+for _, page in ipairs(PAGES) do
+	if page.name == "Shadows" then
+		table.insert(page, { "shadowMapSize", "drop", "Shadow map size", "Sharpness of the sun shadows. Larger costs graphics memory. All renderers.",
+		  { { "0", "Stock" }, { "1024", "1024" }, { "2048", "2048" }, { "4096", "4096" }, { "8192", "8192" } } })
+		table.insert(page, { "shadowSoftness", "slider", "Shadow softness", "How soft shadow edges are. 1 is stock. All renderers.", 0.25, 4, 0.25 })
+		table.insert(page, { "shadowCascadeReuse", "check", "Reuse far shadows", "At the highest shadow quality, far shadows are redrawn every few frames instead of every frame. All renderers." })
+	end
+end
+-- World lighting post passes (WorldLighting.cpp).
+table.insert(PAGES, #PAGES, { name = "Lighting", parent = "Advanced", title = "HDR & Bloom",
+	{ "hdr", "check", "HDR", "Draws the world in high dynamic range and tone maps it. D3D11/Vulkan only." },
+	{ "hdrExposure", "slider", "Exposure", "Overall brightness of the world with HDR on. D3D11/Vulkan only.", 0.25, 4, 0.05 },
+	{ "hdrTonemap", "drop", "Tone mapping", "How bright light is fitted to the screen with HDR on. D3D11/Vulkan only.",
+	  { { "0", "Clamp (stock)" }, { "1", "Neutral" }, { "2", "ACES (filmic)" } } },
+	{ "bloom", "slider", "Bloom", "Bright light glows onto what is around it. 0 turns it off. D3D11/Vulkan only.", 0, 2, 0.05 },
+	{ "bloomThreshold", "slider", "Bloom threshold", "How bright something must be before it glows. D3D11/Vulkan only.", 0.05, 2, 0.05 },
+	{ "fogScattering", "slider", "Sun glow in distance fog", "Tints the distance fog toward the sun's colour around the sun. 0 turns it off. D3D11/Vulkan only.", 0, 2, 0.05 },
+})
+-- Sky and clouds (SkyClouds.cpp, DayNight.cpp).
+table.insert(PAGES, #PAGES, { name = "Sky", parent = "Advanced", title = "Sky & Clouds",
+	{ "skyClouds", "check", "Volumetric clouds", "Clouds with depth replace the flat stock cloud layer; with the sun crossing the sky it also uses the modern sky colours. All renderers." },
+	{ "skyCloudCover", "slider", "Cloud cover", "How cloudy fair weather is where the zone has no clouds of its own. All renderers.", 0, 1, 0.05 },
+	{ "skyCloudSpeed", "slider", "Cloud drift speed", "How fast the clouds drift and change shape. All renderers.", 0, 4, 0.1 },
+	{ "skyCloudsReflect", "check", "Clouds in water", "Water reflects the volumetric clouds instead of the stock cloud layer. All renderers." },
+	{ "gfxSunArcSkybox", "drop", "Zone sky models", "While the sun crosses the sky, which of the zone's sky models are kept. All renderers.",
+	  { { "0", "None" }, { "1", "All (stock)" }, { "2", "Only auroras and overlays" } } },
+})
+
 local function Num(v)
 	return tonumber(v) or 0
 end
