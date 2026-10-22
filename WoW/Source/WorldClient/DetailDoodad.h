@@ -17,6 +17,7 @@ class CGxShader;
 class CDetailDoodadData;
 class CDetailDoodadInst;
 class CTexture;
+class CGxVertexPNCT;
 
 class CDetailDoodad {
     public:
@@ -41,6 +42,8 @@ class CDetailDoodad {
     static float s_grassWindStrength;
     static int32_t s_grassParting;
     static float s_grassConstants[8][4];
+    // GRASSJOBS: not in 12340 (after Cassteriidoadw/wowlogin335 7ca5204a). CVar groundEffectJobs; see PrefillBatches.
+    static int32_t s_fillJobs;
 
     static CDetailDoodadInst* AllocInst();
     static void CreateAlphaRampTexture(const void*& texels);
@@ -51,6 +54,7 @@ class CDetailDoodad {
     static void Initialize();
     static int32_t InitializeRenderState();
     static void InitializeShaderConstants();
+    static void PrefillBatches();
     static int32_t LoadModel(uint32_t id);
     static void SetupVertexShader(const C44Matrix& world, uint32_t index);
     static void UpdateAlphaRampTexture(EGxTexCommand command, uint32_t width, uint32_t height, uint32_t face, uint32_t level, void* userArg, uint32_t& texelStrideInBytes, const void*& texels);
@@ -109,7 +113,9 @@ class CDetailDoodadInstBatch {
     ~CDetailDoodadInstBatch();
     void Draw();
     void FillIndices();
+    void FillIndices(uint16_t* indices);
     void FillVertices();
+    void FillVertices(CGxVertexPNCT* vertex);
     void Free();
     void FreeBuffers();
 };

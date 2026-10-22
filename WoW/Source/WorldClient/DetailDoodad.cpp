@@ -5,6 +5,7 @@
 #include "Engine/Source/Gx/CGxBuf.h"
 #include "Engine/Source/Gx/CGxMatrixStack.h"
 #include "Engine/Source/Gx/CGxPool.h"
+#include "Engine/Source/Model2/M2Cache.h"
 #include "Engine/Source/Model2/M2Data.h"
 #include "Engine/Source/Model2/M2Light.h"
 #include "Engine/Source/Model2/M2Model.h"
@@ -20,6 +21,8 @@
 #include "Engine/Source/Tempest/C33Matrix.h"
 #include "Engine/Source/Tempest/CImVector.h"
 #include <cstring>
+#include <atomic>
+#include <vector>
 #include "WoW/Source/DB/DBClient/DBClient.h"
 #include "WoW/Source/WorldClient/CDetailDoodadData.h"
 #include "WoW/Source/ObjectMgrClient/ObjectMgrClient.h"
@@ -31,6 +34,7 @@
 #include "WoW/Source/WorldClient/MapChunk.h"
 #include "WoW/Source/WorldClient/MapLight.h"
 #include "WoW/Source/WorldClient/MapObjGroup.h"
+#include "WoW/Source/WorldClient/SortTable.h"
 #include "WoW/Source/WorldClient/Types.h"
 #include "WoW/Source/WorldClient/World.h"
 
@@ -88,6 +92,7 @@ CDetailDoodad::SShaderConstants CDetailDoodad::s_shaderConstants;
 int32_t CDetailDoodad::s_grassWind = 1;
 float CDetailDoodad::s_grassWindStrength = 1.0f;
 int32_t CDetailDoodad::s_grassParting = 1;
+int32_t CDetailDoodad::s_fillJobs = 1;
 float CDetailDoodad::s_grassConstants[8][4];
 
 // VERIFY: 1a974b50 auto
@@ -266,7 +271,14 @@ void CDetailDoodad::UpdateAlphaRampTexture(EGxTexCommand command, uint32_t width
 // VERIFY: c5224796 manual
 // OFFSET: 0x007B12B0
 void CDetailDoodadInstBatch::FillIndices() {
-    uint16_t* indices = reinterpret_cast<uint16_t*>(g_theGxDevicePtr->BufLock(this->m_indexBuf));
+    CGxBuf* buf = this->m_indexBuf;
+    this->FillIndices(reinterpret_cast<uint16_t*>(g_theGxDevicePtr->BufLock(buf)));
+    g_theGxDevicePtr->BufUnlock(buf, 0);
+    buf->m_hasData = 1;
+}
+
+// GRASSJOBS: the body of FillIndices, writing to any memory (a locked buffer, or PrefillBatches' scratch on a worker)
+void CDetailDoodadInstBatch::FillIndices(uint16_t* indices) {
     uint32_t index = 0;
     uint32_t base = 0;
 
@@ -285,10 +297,6 @@ void CDetailDoodadInstBatch::FillIndices() {
 
         base += skin->m_vertices.m_count;
     }
-
-    CGxBuf* buf = this->m_indexBuf;
-    g_theGxDevicePtr->BufUnlock(buf, 0);
-    buf->m_hasData = 1;
 }
 
 // VERIFY: 039ae168 manual
@@ -406,8 +414,13 @@ void CDetailDoodadData::ModelLoadedCallback(CM2Model* model, void* arg) {
 // OFFSET: 0x007B1B50
 void CDetailDoodadInstBatch::FillVertices() {
     CGxBuf* buf = this->m_vertexBuf;
-    CGxVertexPNCT* vertex = reinterpret_cast<CGxVertexPNCT*>(g_theGxDevicePtr->BufLock(buf));
+    this->FillVertices(reinterpret_cast<CGxVertexPNCT*>(g_theGxDevicePtr->BufLock(buf)));
+    g_theGxDevicePtr->BufUnlock(buf, 0);
+    buf->m_hasData = 1;
+}
 
+// GRASSJOBS: the body of FillVertices, writing to any memory (a locked buffer, or PrefillBatches' scratch on a worker)
+void CDetailDoodadInstBatch::FillVertices(CGxVertexPNCT* vertex) {
     C3Vector axis(0.0f, 0.0f, 1.0f);
     C33Matrix basis(1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f);
     uint8_t built = 0;
@@ -504,10 +517,141 @@ void CDetailDoodadInstBatch::FillVertices() {
             }
         }
     }
+}
 
-    buf = this->m_vertexBuf;
-    g_theGxDevicePtr->BufUnlock(buf, 0);
-    buf->m_hasData = 1;
+// GRASSJOBS: not in 12340 (after Cassteriidoadw/wowlogin335 7ca5204a, adapted). Each grass batch that needs its
+// buffers rebuilt this frame is filled (the sin/cos vertex walk) on the Model2 worker pool into scratch memory, then
+// copied into its buffer here. The fork locked every buffer at once and let the workers write into the mappings;
+// the Vulkan device tracks at most 4 locks per target and D3D9/D3D11 share one emergency block per target, so the
+// locks stay one at a time on this thread. Models are waited for here, before the workers start. Batches on the stream
+// pool (grass pool exhausted) are left to Draw as stock: a stream lock is only good until the next one.
+static struct {
+    struct Fill {
+        CDetailDoodadInstBatch* batch;
+        uint32_t vertexAt;
+        uint32_t indexAt;
+        int32_t vertices;
+        int32_t indices;
+    };
+
+    std::vector<Fill> fills;
+    std::vector<CGxVertexPNCT> vertices;
+    std::vector<uint16_t> indices;
+    std::atomic<uint32_t> next;
+} s_prefill;
+
+static void PrefillThread(void*) {
+    for (;;) {
+        uint32_t i = s_prefill.next.fetch_add(1);
+
+        if (i >= s_prefill.fills.size()) {
+            return;
+        }
+
+        auto& fill = s_prefill.fills[i];
+
+        if (fill.vertices) {
+            fill.batch->FillVertices(&s_prefill.vertices[fill.vertexAt]);
+        }
+
+        if (fill.indices) {
+            fill.batch->FillIndices(&s_prefill.indices[fill.indexAt]);
+        }
+    }
+}
+
+void CDetailDoodad::PrefillBatches() {
+    CM2Cache* cache = World::s_m2Scene ? World::s_m2Scene->m_cache : nullptr;
+
+    if (!CDetailDoodad::s_fillJobs || !cache || !(cache->m_flags & 4) || !cache->m_threadCount) {
+        return;
+    }
+
+    s_prefill.fills.clear();
+    uint32_t vertexTotal = 0;
+    uint32_t indexTotal = 0;
+
+    for (CDetailDoodadInst* inst = CWorldScene::sortTable.m_detailDoodadInstList.Head(); inst; inst = CWorldScene::sortTable.m_detailDoodadInstList.Next(inst)) {
+        for (uint32_t b = 0; b < 4; b++) {
+            CDetailDoodadInstBatch& batch = inst->m_batches[b];
+
+            // the same tests, in the same order, as Draw
+            if (!batch.m_texture || !TextureGetGxTex(batch.m_texture, 0, nullptr)) {
+                continue;
+            }
+
+            if (!batch.m_vertexBuf || batch.m_vertexBuf->m_pool->m_usage == GxPoolUsage_Stream) {
+                AcquireBuffers(batch.m_vertexCount, &batch.m_vertexBuf, batch.m_indexCount, &batch.m_indexBuf);
+            }
+
+            if (batch.m_vertexBuf->m_pool->m_usage == GxPoolUsage_Stream) {
+                continue;
+            }
+
+            int32_t vertices = !batch.m_vertexBuf->m_hasData || !batch.m_vertexBuf->m_valid;
+            int32_t indices = !batch.m_indexBuf->m_hasData || !batch.m_indexBuf->m_valid;
+
+            if (!vertices && !indices) {
+                continue;
+            }
+
+            // a model that is still not loaded after the wait is left to Draw (its fill would wait again, on a worker)
+            int32_t loaded = 1;
+
+            for (uint32_t i = 0; i < batch.m_adds.Count(); i++) {
+                CM2Model* model = CDetailDoodad::s_doodadList[batch.m_adds[i].m_doodadId]->m_model;
+
+                if (!(model->m_fFlags & 1)) {
+                    model->WaitForLoad(nullptr);
+                    loaded &= (model->m_fFlags & 1) != 0;
+                }
+            }
+
+            if (!loaded) {
+                continue;
+            }
+
+            s_prefill.fills.push_back({ &batch, vertexTotal, indexTotal, vertices, indices });
+            vertexTotal += vertices ? batch.m_vertexCount : 0;
+            indexTotal += indices ? batch.m_indexCount : 0;
+        }
+    }
+
+    // one batch is no work to share; Draw fills it as stock
+    if (s_prefill.fills.size() < 2) {
+        return;
+    }
+
+    if (s_prefill.vertices.size() < vertexTotal) {
+        s_prefill.vertices.resize(vertexTotal);
+    }
+
+    if (s_prefill.indices.size() < indexTotal) {
+        s_prefill.indices.resize(indexTotal);
+    }
+
+    s_prefill.next = 0;
+    cache->RunThreads(&PrefillThread, nullptr, static_cast<uint32_t>(s_prefill.fills.size() - 1));
+
+    for (auto& fill : s_prefill.fills) {
+        CDetailDoodadInstBatch& batch = *fill.batch;
+
+        if (fill.vertices) {
+            uint32_t size = batch.m_vertexCount * sizeof(CGxVertexPNCT);
+            char* dst = g_theGxDevicePtr->BufLock(batch.m_vertexBuf);
+            memcpy(dst, &s_prefill.vertices[fill.vertexAt], size < batch.m_vertexBuf->m_size ? size : batch.m_vertexBuf->m_size);
+            g_theGxDevicePtr->BufUnlock(batch.m_vertexBuf, 0);
+            batch.m_vertexBuf->m_hasData = 1;
+        }
+
+        if (fill.indices) {
+            uint32_t size = batch.m_indexCount * sizeof(uint16_t);
+            char* dst = g_theGxDevicePtr->BufLock(batch.m_indexBuf);
+            memcpy(dst, &s_prefill.indices[fill.indexAt], size < batch.m_indexBuf->m_size ? size : batch.m_indexBuf->m_size);
+            g_theGxDevicePtr->BufUnlock(batch.m_indexBuf, 0);
+            batch.m_indexBuf->m_hasData = 1;
+        }
+    }
 }
 
 // VERIFY: a2c3ec0e manual
