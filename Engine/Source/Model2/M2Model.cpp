@@ -2386,6 +2386,13 @@ void CM2Model::FindKey(M2ModelBoneSeq* sequence, const M2TrackBase& track, uint3
                 uint32_t mid = (high + key) >> 1;
 
                 if (time < keys[mid]) {
+                    // FORK FIX (RosemyneH 7a79a863, search part only): the exe (0x8284D0) does the same and wraps high
+                    // to 0xFFFFFFFF when time is before the first key; the next probe keys[0x7FFFFFFF] lands on keys[-1]
+                    // in 32-bit address arithmetic but 8 GB past the track on x64. key is 0 here, which is the answer.
+                    if (!mid) {
+                        break;
+                    }
+
                     high = mid - 1;
                 } else {
                     key = mid + 1;
