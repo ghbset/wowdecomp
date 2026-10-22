@@ -33,6 +33,7 @@
 #include "Engine/Source/Gx/CGxMatrixStack.h"
 #include "Engine/Source/ShaderEffect/ShadowCache.h"
 #include "Engine/Source/Tempest/C44Matrix.h"
+#include "WoW/Source/Ui/WorldLighting.h"   // LIGHTING
 
 // VERIFY: 78b69e1a manual
 // OFFSET: 0x007D5610
@@ -212,6 +213,7 @@ void CWorldScene::Render(const C3Vector& cameraPos, float time) {
     FrameProfileSwitch(FRAMEPROFILE_WORLD_OTHER);
     CShaderEffect::UpdateProjMatrix();
     CWorldScene::ApplyFogState();
+    WorldLightingSetupView(cameraPos);   // LIGHTING: not in 12340 (the view the post passes use)
     CataWater::RenderReflection();   // CATAREFL: not in 12340 (Cata p = 1 planar reflection, before the lists are consumed)
     FrameProfileSwitch(FRAMEPROFILE_TERRAIN);
     CWorldScene::RenderChunks();

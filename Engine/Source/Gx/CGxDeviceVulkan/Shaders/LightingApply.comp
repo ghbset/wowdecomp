@@ -1,0 +1,109 @@
+// LIGHTING: the world viewport of the scene with the occlusion multiplied in (Lighting.hlsl AoCompositePs, gxPass.x)
+// and the height fog / scattering blended over it (FogPs, gxPass.y), in one pass: gxColor the blurred AO image,
+// gxColor2 the scene. The scene's alpha (FFX glow's mask) is kept. Written B, G, R, A into an RGBA8 image that is
+// then copied byte for byte into the B8G8R8A8 scene.
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "Lighting.glsl"
+
+layout(set = 0, binding = 3, rgba8) uniform writeonly image2D gxOut;
+
+// the occlusion at this pixel, or (debug 1, 4, 5) the colour that replaces the scene's: w 1 = replace
+vec4 AoComposite(vec2 pos, float d) {
+    float w = GxClipW(GxViewPos(pos, d));
+
+    if (gxTone.z > 3.5) {
+        vec2 h4 = texelFetch(gxColor, ivec2((pos - gxViewportPx.xy) * 0.5), 0).xy;
+        return vec4(GxIsGeometry(d) ? 1.0 : 0.0, gxTone.z > 4.5 ? d : clamp(w / 200.0, 0.0, 1.0), h4.x, 1.0);
+    }
+
+    if (!GxIsGeometry(d)) {
+        return vec4(1.0, 1.0, 1.0, gxTone.z > 0.5 && gxTone.z < 1.5 ? 1.0 : 0.0);
+    }
+
+    vec2 h = (pos - gxViewportPx.xy - 0.5) * 0.5;
+    ivec2 base = ivec2(floor(h));
+    vec2 f = h - vec2(base);
+    ivec2 last = ivec2(1.0 / gxSource.xy + 0.5) - 1;
+    float sum = 0.0;
+    float total = 0.0;
+
+    for (int y = 0; y < 2; y++) {
+        for (int x = 0; x < 2; x++) {
+            vec2 s = texelFetch(gxColor, clamp(base + ivec2(x, y), ivec2(0), last), 0).xy;
+            float bilinear = (x != 0 ? f.x : 1.0 - f.x) * (y != 0 ? f.y : 1.0 - f.y);
+            float weight = bilinear * (s.y > 0.0 ? exp(-abs(s.y - w) / (0.05 * w + 0.1)) : 0.0) + bilinear * 0.0001;
+            sum += s.x * weight;
+            total += weight;
+        }
+    }
+
+    float ao = sum / max(total, 0.00001);
+    return vec4(ao, ao, ao, gxTone.z > 0.5 && gxTone.z < 1.5 ? 1.0 : 0.0);
+}
+
+// FogPs: rgb the fog's colour, a its opacity (0: nothing)
+vec4 Fog(vec2 pos, float d) {
+    if (!GxIsGeometry(d)) {
+        return vec4(0.0);
+    }
+
+    vec3 p = GxViewPos(pos, d);
+    vec3 pw = (vec4(p, 1.0) * gxInvView).xyz;
+    vec3 ray = pw - gxCamera.xyz;
+    float dist = length(ray);
+    ray /= max(dist, 0.0001);
+
+    float visible = 1.0;
+
+    if (gxFogParams.w > 0.0) {
+        visible = min(pow(max((gxFogParams.y - p.z) / max(gxFogParams.y - gxFogParams.x, 0.001), 0.0), gxFogParams.z), 1.0);
+    }
+
+    float sun = pow(clamp(dot(ray, gxSunDir.xyz), 0.0, 1.0), 8.0) * gxFogColor.a;
+    float a1 = (1.0 - visible) * sun;
+    vec3 c1 = gxSunColor.rgb;
+    float a2 = 0.0;
+    vec3 c2 = mix(gxFogColor.rgb, gxSunColor.rgb, sun * 0.5);
+
+    if (gxHeightFog.x > 0.0) {
+        float k = gxHeightFog.y;
+        float kd = k * (pw.z - gxCamera.z);
+        float integral = gxHeightFog.x * exp(clamp(-k * (gxCamera.z - gxHeightFog.z), -40.0, 20.0)) * dist * (abs(kd) > 0.0001 ? (1.0 - exp(clamp(-kd, -40.0, 40.0))) / kd : 1.0);
+        a2 = min(1.0 - exp(-max(integral, 0.0)), gxHeightFog.w);
+    }
+
+    float a = 1.0 - (1.0 - a1) * (1.0 - a2);
+
+    if (a <= 0.0001) {
+        return vec4(0.0);
+    }
+
+    return vec4((c1 * (a1 * (1.0 - a2)) + c2 * a2) / a, a);
+}
+
+void main() {
+    ivec2 id = ivec2(gl_GlobalInvocationID.xy);
+
+    if (any(greaterThanEqual(id, ivec2(gxViewportPx.zw)))) {
+        return;
+    }
+
+    ivec2 px = id + ivec2(gxViewportPx.xy);
+    vec2 pos = vec2(px) + 0.5;
+    float d = GxDepthAt(px);
+    vec4 s = texelFetch(gxColor2, px, 0);
+    vec3 c = s.rgb;
+
+    if (gxPass.x > 0.5) {
+        vec4 ao = AoComposite(pos, d);
+        c = ao.w > 0.5 ? ao.rgb : c * ao.rgb;
+    }
+
+    if (gxPass.y > 0.5) {
+        vec4 fog = Fog(pos, d);
+        c = mix(c, fog.rgb, fog.a);
+    }
+
+    imageStore(gxOut, px, vec4(c, s.a).bgra);
+}

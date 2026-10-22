@@ -78,6 +78,7 @@ namespace gxvk::vk::texture::detail
         VkFormatFeatureFlags needed = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
         if (s.transferBits) needed |= VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
         if (extraUsage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) needed |= VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
+        if (extraUsage & VK_IMAGE_USAGE_STORAGE_BIT) needed |= VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;   // LIGHTING
 
         if ((fp.optimalTilingFeatures & needed) != needed)
         {

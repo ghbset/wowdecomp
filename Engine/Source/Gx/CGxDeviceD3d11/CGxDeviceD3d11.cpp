@@ -12,6 +12,7 @@
 #include "Engine/Source/ConsoleBase/ConsoleVar.h"
 #include "Engine/Source/ConsoleBase/Types.h"
 #include "Engine/Source/Gx/CGxDeviceD3d11/FfShaders.h"
+#include "Engine/Source/Gx/CGxDeviceD3d11/D3d11Lighting.h"
 #include "Engine/Source/Gx/Blit.h"
 #include "Engine/Source/Gx/CGxBuf.h"
 #include "Engine/Source/Gx/CGxPool.h"
@@ -886,12 +887,15 @@ int32_t CGxDeviceD3d11::ICreateD3dDevice(const CGxFormat& format) {
 
     g_theGxDevicePtr->ShaderCreate(CGxDevice::s_uiVertexShader, GxSh_Vertex, "Shaders\\Vertex", "UI", 2);
     g_theGxDevicePtr->ShaderCreate(&CGxDevice::s_uiPixelShader, GxSh_Pixel, "Shaders\\Pixel", "UI", 1);
+    D3d11LightingCreate(this);   // LIGHTING: g_gxLighting (GxLighting.h)
 
     return 1;
 }
 
 void CGxDeviceD3d11::IDestroyD3d() {
     D3d11Log("CGxDeviceD3d11::IDestroyD3d(): begin (device %p, swap chain %p)", this->m_d3dDevice, this->m_swapChain);
+
+    D3d11LightingDestroy();   // LIGHTING: its targets go back first (a swapped HDR scene included)
 
     // 4.3.4 order: ClearState + Flush first, so nothing the releases below drop is still bound or queued.
     if (this->m_d3dContext) {
@@ -1148,6 +1152,8 @@ int32_t CGxDeviceD3d11::ICreateBackBuffer() {
 }
 
 void CGxDeviceD3d11::IReleaseBackBuffer() {
+    D3d11LightingReleaseTargets();   // LIGHTING: a swapped HDR scene gives the back buffer back first
+
     if (this->m_d3dContext) {
         this->m_d3dContext->OMSetRenderTargets(0, nullptr, nullptr);
     }
