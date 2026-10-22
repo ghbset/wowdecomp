@@ -225,4 +225,8 @@ namespace gxvk::vk::pipelines
         uint64_t regsFull       = 0;   ///< draws refused because the frame's uniform ring was exhausted
     };
     void GetStats(Stats& out);
+
+    /// LIGHTING: a pipeline of another module was bound on the command buffer between draws; the next
+    /// Record() binds everything again.
+    void Unbind();
 }
