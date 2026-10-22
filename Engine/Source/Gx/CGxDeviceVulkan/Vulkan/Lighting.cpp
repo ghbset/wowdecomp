@@ -7,6 +7,7 @@
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Loader.hpp"
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Log.hpp"
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Memory.hpp"
+#include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Pipelines.hpp"
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Texture.hpp"
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Texture/Internal.hpp"
 #include "Engine/Source/Gx/CGxMatrixStack.h"
@@ -14,6 +15,7 @@
 #include "Engine/Source/Tempest/C44Matrix.h"
 
 #include "Engine/Source/Gx/CGxDeviceVulkan/Shaders/LightingSpirv.inc"
+#include "Engine/Source/Gx/CGxDeviceVulkan/Shaders/PresentSpirv.inc"
 
 #include <cmath>
 #include <cstring>
@@ -25,6 +27,7 @@ namespace
     namespace frame   = gxvk::vk::frame;
     namespace loader  = gxvk::vk::loader;
     namespace memory  = gxvk::vk::memory;
+    namespace pipelines = gxvk::vk::pipelines;
     namespace texture = gxvk::vk::texture;
 
     using gxvk::log::Write;
@@ -61,6 +64,7 @@ namespace
     constexpr uint32_t kMaxSets     = 32;     ///< dispatches one frame slot may record (a frame uses up to 17)
     constexpr VkDeviceSize kUboStride = 512;  ///< >= sizeof(PostConstants), a multiple of any minUniformBufferOffsetAlignment (<= 256)
     constexpr uint32_t kGroup       = 8;      ///< Lighting.glsl local_size_x / _y
+    constexpr uint32_t kCopyPasses  = 4;      ///< scene render passes (MSAA, with or without the normal target) one generation may hand out
 
     static_assert(sizeof(PostConstants) <= kUboStride, "PostConstants outgrew its slot");
 
@@ -95,7 +99,7 @@ namespace
         bool m_worldActive = false;
         bool m_viewSet = false;
         bool m_failed = false;
-        bool m_loggedMsaa = false;
+        bool m_loggedCopy = false;
         VkViewport m_viewport = {};
         float m_viewInv[16] = {};
         float m_proj[16] = {};
@@ -110,6 +114,14 @@ namespace
         VkSampler m_nearest = VK_NULL_HANDLE;
         Slot m_slots[frame::kFramesInFlight];
 
+        // MSAA: the copy back into the multisampled scene (Shaders/LightingCopy.frag), one pipeline per scene
+        // pass, all dropped with the pass generation (the frame made the device idle before it changed)
+        VkShaderModule m_copyVert = VK_NULL_HANDLE;
+        VkShaderModule m_copyFrag = VK_NULL_HANDLE;
+        VkRenderPass m_copyPass[kCopyPasses] = {};
+        VkPipeline m_copyPipeline[kCopyPasses] = {};
+        uint32_t m_copyGen = 0;
+
         texture::Image m_depth;               ///< the scene depth copy
         texture::Image m_out;                 ///< RGBA8 at the scene's extent, B, G, R, A: what is copied into the scene
         texture::Image m_ao[2];               ///< RGBA16F at half the world viewport (rg16f would need shaderStorageImageExtendedFormats)
@@ -117,10 +129,13 @@ namespace
         uint64_t m_lastUsed = 0;
 
         bool ICreate();
-        bool IGate(const char* what);
+        bool IGate();
         bool IEnsure(texture::Image& img, uint32_t width, uint32_t height, VkFormat format, bool depth);
         void IConstants(PostConstants& c, uint32_t targetWidth, uint32_t targetHeight, const float* source) const;
+        VkDescriptorSet ISet(const PostConstants& c, VkImageView depth, Input color, Input color2, VkImageView out);
         bool IDispatch(VkCommandBuffer cmd, Prog prog, const PostConstants& c, VkImageView depth, Input color, Input color2, texture::Image& out, uint32_t width, uint32_t height);
+        VkPipeline ICopyPipeline();
+        bool IIntoScene(VkCommandBuffer cmd, const PostConstants& c, const VkRect2D& vp);
         VkRect2D IViewportRect() const;
         void IToGeneral(VkCommandBuffer cmd, texture::Image& img);
         void IBarrier(VkCommandBuffer cmd);
@@ -157,7 +172,7 @@ namespace
             bindings[i].binding         = i;
             bindings[i].descriptorType  = i < 3 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : (i == 3 ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
             bindings[i].descriptorCount = 1;
-            bindings[i].stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT;
+            bindings[i].stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;   // fragment: LightingCopy.frag
         }
         VkDescriptorSetLayoutCreateInfo setInfo = {};
         setInfo.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -204,6 +219,18 @@ namespace
             d.DestroyShaderModule(this->m_vkDevice, module, nullptr);
         }
 
+        if (r == VK_SUCCESS)
+        {
+            VkShaderModuleCreateInfo moduleInfo = {};
+            moduleInfo.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+            moduleInfo.codeSize = sizeof kPresentVert;
+            moduleInfo.pCode    = kPresentVert;
+            r = d.CreateShaderModule(this->m_vkDevice, &moduleInfo, nullptr, &this->m_copyVert);
+            moduleInfo.codeSize = sizeof kLightingCopyFrag;
+            moduleInfo.pCode    = kLightingCopyFrag;
+            if (r == VK_SUCCESS) r = d.CreateShaderModule(this->m_vkDevice, &moduleInfo, nullptr, &this->m_copyFrag);
+        }
+
         for (uint32_t i = 0; r == VK_SUCCESS && i < 2; i++)
         {
             VkSamplerCreateInfo info = {};
@@ -248,21 +275,10 @@ namespace
         return true;
     }
 
-    // The scene must be the target, unpinned by a query, single-sampled.
-    bool VulkanLighting::IGate(const char* what)
+    // The scene must be the target, unpinned by a query.
+    bool VulkanLighting::IGate()
     {
         if (frame::Target() || frame::QueryActive() || !frame::Scene() || frame::Failed()) return false;
-
-        if (frame::PassSamples() > 1)
-        {
-            if (!this->m_loggedMsaa)
-            {
-                this->m_loggedMsaa = true;
-                Write(Warn, "vulkan: lighting: %s skipped: the scene is multisampled (each pass resolves over an outside write); set gxMultisample 1 (logged once)", what);
-            }
-            return false;
-        }
-
         return this->ICreate();
     }
 
@@ -383,7 +399,7 @@ namespace
                                          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
     }
 
-    bool VulkanLighting::IDispatch(VkCommandBuffer cmd, Prog prog, const PostConstants& c, VkImageView depth, Input color, Input color2, texture::Image& out, uint32_t width, uint32_t height)
+    VkDescriptorSet VulkanLighting::ISet(const PostConstants& c, VkImageView depth, Input color, Input color2, VkImageView out)
     {
         Slot& slot = this->m_slots[frame::Slot()];
         const uint64_t serial = frame::Serial();
@@ -397,7 +413,7 @@ namespace
             slot.used = 0;
         }
 
-        if (slot.used == kMaxSets) return false;
+        if (slot.used == kMaxSets) return VK_NULL_HANDLE;
 
         VkDescriptorSetAllocateInfo alloc = {};
         alloc.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
@@ -405,7 +421,7 @@ namespace
         alloc.descriptorSetCount = 1;
         alloc.pSetLayouts        = &this->m_setLayout;
         VkDescriptorSet set = VK_NULL_HANDLE;
-        if (d.AllocateDescriptorSets(this->m_vkDevice, &alloc, &set) != VK_SUCCESS) return false;
+        if (d.AllocateDescriptorSets(this->m_vkDevice, &alloc, &set) != VK_SUCCESS) return VK_NULL_HANDLE;
 
         const VkDeviceSize offset = slot.used++ * kUboStride;
         memcpy(static_cast<uint8_t*>(slot.ubo.block.mapped) + offset, &c, sizeof(c));
@@ -415,7 +431,7 @@ namespace
         images[0] = { this->m_nearest, depth, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
         images[1] = { this->m_linear, color.view, color.layout };
         images[2] = { this->m_linear, color2.view, color2.layout };
-        images[3] = { VK_NULL_HANDLE, out.view, VK_IMAGE_LAYOUT_GENERAL };
+        images[3] = { VK_NULL_HANDLE, out, VK_IMAGE_LAYOUT_GENERAL };
         VkDescriptorBufferInfo ubo = { slot.ubo.handle, offset, sizeof(PostConstants) };
 
         // only what the pass reads: a binding no code of the pipeline names needs no descriptor
@@ -436,10 +452,149 @@ namespace
         }
 
         d.UpdateDescriptorSets(this->m_vkDevice, count, writes, 0, nullptr);
+        return set;
+    }
+
+    bool VulkanLighting::IDispatch(VkCommandBuffer cmd, Prog prog, const PostConstants& c, VkImageView depth, Input color, Input color2, texture::Image& out, uint32_t width, uint32_t height)
+    {
+        const VkDescriptorSet set = this->ISet(c, depth, color, color2, out.view);
+        if (set == VK_NULL_HANDLE) return false;
+
+        const loader::Device& d = *this->m_dapi;
         this->IBarrier(cmd);
         d.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, this->m_pipelines[prog]);
         d.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, this->m_layout, 0, 1, &set, 0, nullptr);
         d.CmdDispatch(cmd, (width + kGroup - 1) / kGroup, (height + kGroup - 1) / kGroup, 1);
+        return true;
+    }
+
+    // The pipeline that draws m_out into the current (scene) pass, built on first use against that pass.
+    VkPipeline VulkanLighting::ICopyPipeline()
+    {
+        const loader::Device& d = *this->m_dapi;
+        const VkRenderPass pass = frame::RenderPass();
+        if (pass == VK_NULL_HANDLE) return VK_NULL_HANDLE;
+
+        if (this->m_copyGen != frame::PassGeneration())
+        {
+            // the passes these were built against are gone, and the device was idle when they went
+            for (uint32_t i = 0; i < kCopyPasses; i++)
+            {
+                if (this->m_copyPipeline[i] != VK_NULL_HANDLE) d.DestroyPipeline(this->m_vkDevice, this->m_copyPipeline[i], nullptr);
+                this->m_copyPipeline[i] = VK_NULL_HANDLE;
+                this->m_copyPass[i] = VK_NULL_HANDLE;
+            }
+            this->m_copyGen = frame::PassGeneration();
+        }
+
+        uint32_t i = 0;
+        for (; i < kCopyPasses && this->m_copyPass[i] != VK_NULL_HANDLE; i++)
+            if (this->m_copyPass[i] == pass) return this->m_copyPipeline[i];
+        if (i == kCopyPasses) return VK_NULL_HANDLE;
+
+        VkPipelineShaderStageCreateInfo stages[2] = {};
+        stages[0].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[0].stage  = VK_SHADER_STAGE_VERTEX_BIT;
+        stages[0].module = this->m_copyVert;
+        stages[0].pName  = "main";
+        stages[1].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[1].stage  = VK_SHADER_STAGE_FRAGMENT_BIT;
+        stages[1].module = this->m_copyFrag;
+        stages[1].pName  = "main";
+
+        VkPipelineVertexInputStateCreateInfo vertexInput = {};
+        vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+        VkPipelineInputAssemblyStateCreateInfo assembly = {};
+        assembly.sType    = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+        assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        VkPipelineViewportStateCreateInfo viewport = {};
+        viewport.sType         = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+        viewport.viewportCount = 1;
+        viewport.scissorCount  = 1;
+        VkPipelineRasterizationStateCreateInfo raster = {};
+        raster.sType       = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+        raster.polygonMode = VK_POLYGON_MODE_FILL;
+        raster.cullMode    = VK_CULL_MODE_NONE;
+        raster.lineWidth   = 1.0f;
+        VkPipelineMultisampleStateCreateInfo multisample = {};
+        multisample.sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+        multisample.rasterizationSamples = static_cast<VkSampleCountFlagBits>(frame::PassSamples());
+        VkPipelineDepthStencilStateCreateInfo depth = {};   // no test, no write
+        depth.sType          = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+        depth.maxDepthBounds = 1.0f;
+        // the scene colour whole (as the single-sample copy writes it); GBUFFER's normal target untouched
+        VkPipelineColorBlendAttachmentState attachments[2] = {};
+        attachments[0].colorWriteMask = 0xFu;
+        VkPipelineColorBlendStateCreateInfo blending = {};
+        blending.sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+        blending.attachmentCount = frame::PassHasNormal() ? 2u : 1u;
+        blending.pAttachments    = attachments;
+        const VkDynamicState dynamics[2] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+        VkPipelineDynamicStateCreateInfo dynamic = {};
+        dynamic.sType             = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+        dynamic.dynamicStateCount = 2;
+        dynamic.pDynamicStates    = dynamics;
+
+        VkGraphicsPipelineCreateInfo info = {};
+        info.sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+        info.stageCount          = 2;
+        info.pStages             = stages;
+        info.pVertexInputState   = &vertexInput;
+        info.pInputAssemblyState = &assembly;
+        info.pViewportState      = &viewport;
+        info.pRasterizationState = &raster;
+        info.pMultisampleState   = &multisample;
+        info.pDepthStencilState  = &depth;
+        info.pColorBlendState    = &blending;
+        info.pDynamicState       = &dynamic;
+        info.layout              = this->m_layout;
+        info.renderPass          = pass;
+
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        const VkResult r = d.CreateGraphicsPipelines(this->m_vkDevice, VK_NULL_HANDLE, 1, &info, nullptr, &pipeline);
+        if (r != VK_SUCCESS)
+        {
+            if (!this->m_loggedCopy) Write(Error, "vulkan: lighting: the MSAA copy pipeline could not be made: %s (logged once)", gxvk::vk::ResultName(r));
+            this->m_loggedCopy = true;
+            return VK_NULL_HANDLE;
+        }
+
+        this->m_copyPass[i] = pass;
+        this->m_copyPipeline[i] = pipeline;
+        return pipeline;
+    }
+
+    // m_out (just written by `cmd`'s last dispatch) into the world viewport of the scene. Single-sampled: a
+    // copy. MSAA: every pass instance resolves the multisampled colour over the scene, so the copy would be
+    // lost at the next resume; m_out is drawn into the multisampled colour instead, in the scene's pass, and
+    // reaches the scene with that pass's resolve (the draws after it keep their MSAA).
+    bool VulkanLighting::IIntoScene(VkCommandBuffer cmd, const PostConstants& c, const VkRect2D& vp)
+    {
+        if (frame::PassSamples() <= 1) return frame::CopyIntoScene(this->m_out, vp);
+
+        const VkPipeline pipeline = this->ICopyPipeline();
+        const VkDescriptorSet set = pipeline != VK_NULL_HANDLE ? this->ISet(c, VK_NULL_HANDLE, { this->m_out.view, VK_IMAGE_LAYOUT_GENERAL }, {}, VK_NULL_HANDLE) : VK_NULL_HANDLE;
+        if (set == VK_NULL_HANDLE) return false;
+
+        // the dispatch's write before the fragment reads, outside the pass
+        const loader::Device& d = *this->m_dapi;
+        VkMemoryBarrier barrier = {};
+        barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        d.CmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+
+        VkCommandBuffer pass = frame::Pass();
+        if (!pass) return false;
+
+        const VkExtent2D scene = frame::Scene()->extent;
+        const VkViewport viewport = { 0.0f, 0.0f, static_cast<float>(scene.width), static_cast<float>(scene.height), 0.0f, 1.0f };
+        d.CmdBindPipeline(pass, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+        d.CmdBindDescriptorSets(pass, VK_PIPELINE_BIND_POINT_GRAPHICS, this->m_layout, 0, 1, &set, 0, nullptr);
+        d.CmdSetViewport(pass, 0, 1, &viewport);
+        d.CmdSetScissor(pass, 0, 1, &vp);
+        d.CmdDraw(pass, 3, 1, 0, 0);
+        pipelines::Unbind();   // the draw path's binding cache no longer says what is bound
         return true;
     }
 
@@ -479,7 +634,7 @@ namespace
         const bool ssao = (p.m_features & GxLighting_Ssao) && p.m_ssaoIntensity > 0.0f;
         const bool fog = (p.m_features & (GxLighting_HeightFog | GxLighting_Scattering)) != 0;
 
-        if (!this->m_worldActive || !this->m_viewSet || (!ssao && !fog) || !this->IGate("SSAO / fog")) return;
+        if (!this->m_worldActive || !this->m_viewSet || (!ssao && !fog) || !this->IGate()) return;
 
         const texture::Image* scene = frame::Scene();
         const uint32_t width = scene->extent.width;
@@ -529,7 +684,7 @@ namespace
         const Input aoIn = ssao ? Input{ this->m_ao[0].view, VK_IMAGE_LAYOUT_GENERAL } : sceneIn;
         ok = ok && this->IDispatch(cmd, Prog_Apply, c, this->m_depth.view, aoIn, sceneIn, this->m_out, vp.extent.width, vp.extent.height);
 
-        if (!ok || !frame::CopyIntoScene(this->m_out, vp))
+        if (!ok || !this->IIntoScene(cmd, c, vp))
             Write(Warn, "vulkan: lighting: the SSAO / fog passes could not be recorded this frame");
     }
 
@@ -539,7 +694,7 @@ namespace
         this->m_worldActive = false;
 
         const GxLightingParams& p = this->m_params;
-        if (!(p.m_features & GxLighting_Hdr) || !this->IGate("hdr / bloom")) return;
+        if (!(p.m_features & GxLighting_Hdr) || !this->IGate()) return;
 
         const texture::Image* scene = frame::Scene();
         const uint32_t width = scene->extent.width;
@@ -602,7 +757,7 @@ namespace
         const Input bloomIn = levels && ok ? Input{ this->m_bloom[0].view, VK_IMAGE_LAYOUT_GENERAL } : sceneIn;
         ok = this->IDispatch(cmd, Prog_Tonemap, c, VK_NULL_HANDLE, sceneIn, bloomIn, this->m_out, vp.extent.width, vp.extent.height);
 
-        if (!ok || !frame::CopyIntoScene(this->m_out, vp))
+        if (!ok || !this->IIntoScene(cmd, c, vp))
             Write(Warn, "vulkan: lighting: the tonemap could not be recorded this frame");
     }
 
@@ -624,6 +779,10 @@ namespace
             }
             for (VkPipeline& pipeline : this->m_pipelines)
                 if (pipeline != VK_NULL_HANDLE) d.DestroyPipeline(this->m_vkDevice, pipeline, nullptr);
+            for (VkPipeline& pipeline : this->m_copyPipeline)
+                if (pipeline != VK_NULL_HANDLE) d.DestroyPipeline(this->m_vkDevice, pipeline, nullptr);
+            if (this->m_copyVert != VK_NULL_HANDLE) d.DestroyShaderModule(this->m_vkDevice, this->m_copyVert, nullptr);
+            if (this->m_copyFrag != VK_NULL_HANDLE) d.DestroyShaderModule(this->m_vkDevice, this->m_copyFrag, nullptr);
             if (this->m_linear != VK_NULL_HANDLE) d.DestroySampler(this->m_vkDevice, this->m_linear, nullptr);
             if (this->m_nearest != VK_NULL_HANDLE) d.DestroySampler(this->m_vkDevice, this->m_nearest, nullptr);
             if (this->m_layout != VK_NULL_HANDLE) d.DestroyPipelineLayout(this->m_vkDevice, this->m_layout, nullptr);

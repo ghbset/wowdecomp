@@ -5,13 +5,15 @@
 //   OpaqueDone  the scene depth copied (frame::CopyDepthFromScene), SSAO at half resolution, two blurs, then
 //               one pass that multiplies the occlusion into the world viewport of the scene and blends the
 //               height fog / scattering over it, written into an RGBA8 image as B, G, R, A and copied into the
-//               B8G8R8A8 scene (frame::CopyIntoScene)
+//               B8G8R8A8 scene (frame::CopyIntoScene; MSAA: drawn into the pass)
 //   EndWorld    (GxLighting_Hdr) Vulkan has no float scene -- the scene is 8-bit and every draw pipeline is
 //               built against it -- so "hdr" is exposure + bloom + the tonemap over the 8-bit scene
 //
-// Single-sampled scenes only: with MSAA every pass instance resolves into the scene, over anything written
-// outside it, so nothing runs (logged once). Everything is made on first use; with every feature off nothing
-// is made and nothing recorded.
+// MSAA: every pass instance resolves the multisampled colour into the scene, over anything copied into it
+// outside the pass, so there the result is drawn into the multisampled colour instead, inside the scene's
+// pass (Shaders/LightingCopy.frag), and reaches the scene with that pass's resolve. The passes read the
+// resolved scene and the resolved (sample 0) depth. Everything is made on first use; with every feature off
+// nothing is made and nothing recorded.
 #pragma once
 
 class CGxDeviceVulkan;
