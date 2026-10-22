@@ -119,10 +119,14 @@ int32_t CGxDeviceVulkan::IWindowVisible() {
 void CGxDeviceVulkan::ISetWindowFocus(int32_t focus) {
     this->m_windowFocus = focus;
 
+    // FORK FIX (Badgermilk0 815ca4df idea): the clip is system-wide. The exclusive-mode window D3D9 used left it on
+    // alt-tab without harm; a fullscreen window that stays on the desktop must hand it back with the focus.
     if (focus && !this->m_format.m_window && this->m_hwnd) {
         RECT rect;
         GetWindowRect(this->m_hwnd, &rect);
         ClipCursor(&rect);
+    } else if (!focus && !this->m_format.m_window) {
+        ClipCursor(nullptr);
     }
 }
 
@@ -154,7 +158,7 @@ int32_t CGxDeviceVulkan::DeviceWM(EGxWM wm, uintptr_t param1, uintptr_t param2) 
 
         case GxWM_Destroy:
         case GxWM_KillFocus:
-            this->m_windowFocus = 0;
+            this->ISetWindowFocus(0);
             break;
 
         case GxWM_SetFocus:
