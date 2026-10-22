@@ -34,6 +34,7 @@ struct Config {
     float groundFog = 0.6f;         // vfogGroundFog
     float farFog = 0.0f;            // vfogFarFog (distance layer; replaces stock linear fog)
     bool transparentFog = true;     // vfogTransparent: early composite + fitted fog for later batches
+    bool lateGlow = true;           // vfogLateGlow: additive pass-1 elements drawn after the late composite
     bool fadeEarly = true;          // vfogFadeEarly: fading M2s drawn before the early composite (wxl-vfog 0.6)
     bool msaaSplit = true;          // vfogMsaaSplit: coa's per-sample fog on MSAA silhouettes (stencil + oDepth)
     bool fadeStencil = true;        // vfogFadeStencil: their alpha cross-fade (wxl-vfog 0.6.3: depth behind + stencil alpha)
@@ -227,5 +228,6 @@ bool LiquidDepthWrite();                    // force liquid depth writes while A
 float GlowAmount(float client);             // coa ForeverGlow: the glow amount the FFX glow gets (UpdateScreenEffectParams)
 bool WaterHidesClientRipples();              // CMap::CreateWaterRipple: the modern water's ripples replace the client's sprites
 bool BatchFog(const float modelPos[3], float& start, float& end, float& density, float color[3]);
+float CameraInteriorBlend();                // DNInfo m_interiorFogBlend, 0 unless the camera is in an interior group
 
 }  // namespace VolumetricFog

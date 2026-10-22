@@ -12,6 +12,7 @@
 #include "Engine/Source/Gx/CGxDevice/CGxDevice.h"
 #include "Engine/Source/Gx/Gx.h"
 #include "Engine/Source/Model2/CM2SceneRender.h"
+#include "Engine/Source/Model2/M2Cache.h"
 #include "Engine/Source/Model2/M2Data.h"
 #include "Engine/Source/Model2/M2Light.h"
 #include "Engine/Source/Model2/M2Model.h"
@@ -27,6 +28,7 @@
 #include "WoW/Source/WorldClient/MapObj.h"
 #include "WoW/Source/WorldClient/MapObjDef.h"
 #include "WoW/Source/WorldClient/MapObjGroup.h"
+#include "WoW/Source/WorldClient/SoftParticles.h"
 #include "WoW/Source/WorldClient/VolumetricFogDriver.h"
 #include "WoW/Source/WorldClient/VolumetricFogModel.h"
 #include "WoW/Source/WorldClient/VolumetricFogWater.h"
@@ -79,6 +81,7 @@ struct CVars {
     CVar* dither;
     CVar* hdrTargets;
     CVar* fadeEarly;
+    CVar* lateGlow;
     CVar* fadeStencil;
     CVar* msaaSplit;
     // coa settings that had no CVar (vfog13)
@@ -143,6 +146,8 @@ bool s_opaqueValid = false;
 bool s_maskPending = false;      // shadowMask: OnOpaqueDone captured this frame's inputs for OnSolidDone
 bool s_ssaoPending = false;      // SSAO: the same, for its pass in OnSolidDone
 bool s_armed = false;          // the composite is on the frame: later batches take the fitted fog
+bool s_lateGlow = false;       // vfogLateGlow: the glow taken out of pass 1 is drawing after the late composite
+std::vector<uint32_t> s_glow;  // its pass-1 element indices, this frame
 GradeFrame s_grade = {};
 uint32_t s_frame = 0;
 bool s_late = false;         // the composite runs once after the world this frame (coa's TransparentFog=0 path)
@@ -171,6 +176,7 @@ Config ReadConfig() {
     cfg.localLights = CVarInt(s_cvars.localLights, 1) != 0;
     cfg.transparentFog = CVarInt(s_cvars.transparent, 0) != 0;
     cfg.fadeEarly = CVarInt(s_cvars.fadeEarly, 1) != 0;
+    cfg.lateGlow = CVarInt(s_cvars.lateGlow, 1) != 0;
     cfg.fadeStencil = CVarInt(s_cvars.fadeStencil, 1) != 0;
     cfg.msaaSplit = CVarInt(s_cvars.msaaSplit, 1) != 0;
     cfg.startOffset = std::max(CVarFloat(s_cvars.startOffset, cfg.startOffset), 0.0f);
@@ -724,6 +730,7 @@ void RegisterCVars() {
     s_cvars.localLights = CVar::Register("vfogLocalLights", "Volumetric fog lit by nearby point lights", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.transparent = CVar::Register("vfogTransparent", "Volumetric fog: 1 = composite before transparents and fit the fog onto them, 0 = one composite after the whole world", 1, "0", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.fadeEarly = CVar::Register("vfogFadeEarly", "Volumetric fog: 1 = M2s fading at their draw distance are drawn before the early composite, so it fogs them at their own depth (default), 0 = stock pass 1 with the fitted fog", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+    s_cvars.lateGlow = CVar::Register("vfogLateGlow", "Volumetric fog with vfogTransparent 0: 1 = additive particles, ribbons and glow batches drawn after the late composite with the fitted fog, so flames are not fogged by what is behind them (default), 0 = drawn under it", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.fadeStencil = CVar::Register("vfogFadeStencil", "Volumetric fog: 1 = fading M2s drawn early cross-fade by their alpha between the fog behind them and their own (wxl-vfog 0.6.3, needs a stencil), 0 = they take their own fog at any alpha", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.msaaSplit = CVar::Register("vfogMsaaSplit", "Volumetric fog with MSAA: 1 = the near and far samples of an edge pixel each fogged at their own depth (coa sample split), 0 = the fog of one sample", 1, "1", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvars.startOffset = CVar::Register("vfogStartOffset", "Volumetric fog start distance (yards)", 1, "10", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
@@ -1037,6 +1044,87 @@ void DrawFadingEarly() {
     g_theGxDevicePtr->RsPop();
 }
 
+// vfogLateGlow (AUDIT-2026-10-23 bug 2): with vfogTransparent 0 the one composite runs after the world, and a flame,
+// which writes no depth, takes the fog of whatever is behind it. The additive pass-1 elements (the test of
+// CM2Scene::SortAdditiveParticleElements) are taken out here and drawn after that composite with the fitted fog
+// (black for additive), so they still fade with distance but are never painted over. Alpha-blended transparents
+// stay under the composite (the Thorn Hill doodads vfogTransparent 0 is for are untouched).
+// ponytail: a flame now shows through blended smoke in front of it, and spell visuals / GxuCat_1 are not covered;
+// defer their additive entries the same way if that matters.
+bool AdditiveElement(const CM2Scene* scene, const M2Element& e) {
+    const M2Data* data = e.m_model && e.m_model->m_shared ? e.m_model->m_shared->m_data : nullptr;
+    if (!data) {
+        return false;
+    }
+    uint32_t material;
+    switch (e.m_type) {
+        case 0:
+        case 1:
+        case 2:
+            if (!e.m_batch) {
+                return false;
+            }
+            material = e.m_batch->m_materialIndex;
+            break;
+        case 3:
+            material = data->m_ribbons[e.m_index].m_materialIndices[0];
+            break;
+        case 4: {
+            const uint32_t blend = (scene->m_cache->m_flags & 0x100) ? M2BLEND_ADD : ParticleBlendToM2Blend(e.m_emitter->m_params.m_materialBlend);
+            return s_blendModes[1][blend] == 3 || s_blendModes[1][blend] == 10;
+        }
+        default:
+            return false;
+    }
+    if (material >= data->m_materials.m_count) {
+        return false;
+    }
+    const uint32_t gx = s_blendModes[1][data->m_materials[material].m_blendMode];
+    return gx == 3 || gx == 10;
+}
+
+void TakeGlow() {
+    s_glow.clear();
+    CM2Scene* scene = World::s_m2Scene;
+    if (!s_cfg.lateGlow || s_cfg.transparentFog || !s_opaqueValid || !scene || !(scene->m_passMask & (1 << M2PASS_1))) {
+        return;
+    }
+    TSGrowableArray<uint32_t>& list = scene->m_passElements[M2PASS_1];
+    uint32_t kept = 0;
+    for (uint32_t i = 0; i < list.m_count; ++i) {
+        const uint32_t index = list.m_data[i];
+        if (AdditiveElement(scene, scene->m_elements.m_data[index])) {
+            s_glow.push_back(index);
+        } else {
+            list.m_data[kept++] = index;
+        }
+    }
+    list.m_count = kept;   // compacted in place; the list is rebuilt next frame
+}
+
+void DrawGlowLate(bool fogged) {
+    CM2Scene* scene = World::s_m2Scene;
+    if (s_glow.empty() || !scene) {
+        s_glow.clear();
+        return;
+    }
+    if (fogged) {
+        s_fit = FitStockFog(s_params, s_in, s_cfg);
+        s_fitStamp++;
+        s_armed = true;
+        s_lateGlow = true;
+    }
+    g_theGxDevicePtr->RsPush();
+    GxRsSet(GxRs_Multisample, 1);   // as the world pass had it (CGWorldFrame::OnWorldRender)
+    SoftParticles::BeginPass();
+    CM2SceneRender render(scene);
+    render.Draw(M2PASS_1, scene->m_elements.m_data, s_glow.data(), static_cast<uint32_t>(s_glow.size()));
+    SoftParticles::EndPass();
+    g_theGxDevicePtr->RsPop();
+    s_lateGlow = false;
+    s_glow.clear();
+}
+
 }  // namespace
 
 bool Composite() {
@@ -1051,6 +1139,9 @@ void OnLiquidDone() {
     // vfogTransparent 0 is coa's TransparentFog=0: one composite after the whole world (OnWorldDone), so
     // transparents take the fog of the scene behind them.
     if (!s_active || s_late) {
+        if (s_active) {
+            TakeGlow();   // vfogLateGlow: above water only (this hook), drawn after the late composite
+        }
         return;
     }
 
@@ -1097,7 +1188,7 @@ void OnWorldDone() {
     }
     s_underValid = false;
     if (s_active && s_late) {
-        Composite();
+        DrawGlowLate(Composite());
     }
     // coa RenderGodRaysOverTheWorld: after the whole world, before FFX glow. Only a RenderFog this frame arms it.
     RenderGodRays();
@@ -1139,7 +1230,7 @@ float GlowAmount(float client) {
 }
 
 bool BatchFog(const float modelPos[3], float& start, float& end, float& density, float color[3]) {
-    if (!s_armed || !s_cfg.transparentFog) {
+    if (!s_armed || !(s_cfg.transparentFog || s_lateGlow)) {
         return false;
     }
     const StockFogFit& fit = FitFor(modelPos);
@@ -1167,6 +1258,10 @@ bool BatchFog(const float modelPos[3], float& start, float& end, float& density,
         color[c] += (fit.color[c] - color[c]) * ours;
     }
     return true;
+}
+
+float CameraInteriorBlend() {
+    return CameraInInteriorGroup() ? Clamp01(DayNight::g_dnInfo.m_interiorFogBlend) : 0.0f;
 }
 
 }  // namespace VolumetricFog
