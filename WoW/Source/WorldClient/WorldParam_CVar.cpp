@@ -772,6 +772,12 @@ void CWorldParam::Initialize() {
         CDetailDoodad::s_grassParting = SStrToInt(value) != 0;
         return true;
     }, CATEGORY_GRAPHICS, false, nullptr, false);
+    // GRASSJOBS: not in 12340. Grass batches rebuilt this frame are filled on the Model2 worker pool (needs
+    // M2UseThreads); 0 = stock, each filled as it is drawn.
+    CVar::Register("groundEffectJobs", "Fill rebuilt grass batches on the model worker threads", 1, "1", [](CVar*, const char*, const char* value, void*) -> bool {
+        CDetailDoodad::s_fillJobs = SStrToInt(value) != 0;
+        return true;
+    }, CATEGORY_GRAPHICS, false, nullptr, false);
     // BACKLOG #10: not in 12340. Cata 4.3.4 ProcMagma lava and slime (MaterialMagma.cpp); 0 = the stock flipbook.
     CVar::Register("liquidProcMagma", "Cataclysm procedural lava and slime", 1, "1", [](CVar*, const char*, const char* value, void*) -> bool {
         Liquid::s_procMagma = SStrToInt(value) != 0;

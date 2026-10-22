@@ -3607,6 +3607,7 @@ void CWorldScene::RenderDetailDoodads() {
     g_theGxDevicePtr->XformPush(GxXform_World);
     g_theGxDevicePtr->XformPush(GxXform_Tex1);
 
+    CDetailDoodad::PrefillBatches(); // GRASSJOBS: not in 12340
     int32_t shaders = CDetailDoodad::InitializeRenderState();
     C44Matrix world;
 

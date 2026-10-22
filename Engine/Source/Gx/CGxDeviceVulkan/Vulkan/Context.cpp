@@ -53,8 +53,16 @@ namespace gxvk::vk::context
         // The surface before the physical-device choice, because present support on THIS surface is
         // one of the three requirements that choice is made on.
         if (!CreateSurface(win.hwnd))        { Teardown(); return Attempt::Declined; }
-        if (!SelectPhysicalDevice())         { Teardown(); return Attempt::Declined; }
-        if (!CreateDevice())                 { Teardown(); return Attempt::Declined; }
+        // GPUFALLBACK: not stock. An adapter that enumerates but refuses vkCreateDevice (seen on a 4090
+        // beside an Intel iGPU) is struck off and the next best one tried, instead of declining Vulkan.
+        std::vector<VkPhysicalDevice> failed;
+        for (;;)
+        {
+            if (!SelectPhysicalDevice(failed)) { Teardown(); return Attempt::Declined; }
+            if (CreateDevice()) break;
+            Write(Warn, "vulkan: vkCreateDevice failed on '%s'; trying the next adapter", g.props.deviceName);
+            failed.push_back(g.physical);
+        }
         g.afterDevice = footprint::Take();
         LogFootprint("vkCreateDevice", g.afterDevice);
 

@@ -9,6 +9,7 @@
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Log.hpp"
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Window.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <vector>
 
@@ -168,7 +169,7 @@ namespace gxvk::vk::context::detail
     unsigned TypeRank(VkPhysicalDeviceType t);
     const char* WhyBetter(const Candidate& a, const Candidate& b);
     void Examine(Candidate& c);
-    bool SelectPhysicalDevice();
+    bool SelectPhysicalDevice(const std::vector<VkPhysicalDevice>& failed);
 
     // Logical.cpp
     bool CreateDevice();

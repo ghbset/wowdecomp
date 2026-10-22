@@ -127,9 +127,11 @@ namespace gxvk::vk::context::detail
     /**
      * Enumerates the adapters, logs every one, and picks the best by the rules in WhyBetter.
      *
+     * @param failed : adapters vkCreateDevice already failed on, rejected (GPUFALLBACK, after
+     *                Cassteriidoadw/wowlogin335 af9c98c8)
      * @return bool ok : false when nothing usable was found
      */
-    bool SelectPhysicalDevice()
+    bool SelectPhysicalDevice(const std::vector<VkPhysicalDevice>& failed)
     {
         uint32_t count = 0;
         VkResult r = g.iapi.EnumeratePhysicalDevices(g.instance, &count, nullptr);
@@ -167,6 +169,8 @@ namespace gxvk::vk::context::detail
             c.handle = handles[i];
             c.index  = i;
             Examine(c);
+            if (!c.reject && std::find(failed.begin(), failed.end(), c.handle) != failed.end())
+                c.reject = "vkCreateDevice failed on it";
 
             char apiText[32];
             char driverText[32];
