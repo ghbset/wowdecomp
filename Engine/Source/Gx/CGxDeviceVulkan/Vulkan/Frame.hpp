@@ -115,6 +115,17 @@ namespace gxvk::vk::frame
      */
     bool CopyDepthFromScene(texture::Image& dst);
 
+    /**
+     * LIGHTING (Vulkan/Lighting.cpp): copies `rect` of `src` -- a 32-bit colour image of the scene's
+     * extent holding B, G, R, A bytes, last written by a compute shader and resting in GENERAL -- into
+     * the same rectangle of the scene, outside the pass (the next Pass() resumes it, contents kept).
+     * The scene ends back in SHADER_READ_ONLY_OPTIMAL, `src` in GENERAL. Refused while a query pins
+     * the pass, and on a multisampled scene (the next pass's resolve would overwrite the copy).
+     *
+     * @return bool ok
+     */
+    bool CopyIntoScene(texture::Image& src, const VkRect2D& rect);
+
     /// GBUFFER (CGxDevice::DeviceNormalBuffer): blits the scene's normal target (MSAA: its resolve)
     /// into `dst` (a colour texture of the scene's extent), outside the pass; `dst` ends in
     /// SHADER_READ_ONLY_OPTIMAL. False when the scene has no normal target or none was cleared this frame.

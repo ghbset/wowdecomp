@@ -1,0 +1,39 @@
+// LIGHTING: a depth-aware Gaussian along gxSource.zw (Lighting.hlsl BlurPs), gxColor the AO image
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "Lighting.glsl"
+
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D gxOut;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 last = ivec2(gxTarget.xy) - 1;
+
+    if (any(greaterThan(p, last))) {
+        return;
+    }
+
+    vec2 c = texelFetch(gxColor, p, 0).xy;
+
+    if (c.y <= 0.0) {
+        imageStore(gxOut, p, vec4(1.0, 0.0, 0.0, 0.0));
+        return;
+    }
+
+    float sum = c.x;
+    float total = 1.0;
+    ivec2 dir = ivec2(gxSource.zw);
+
+    for (int k = -4; k <= 4; k++) {
+        if (k == 0) {
+            continue;
+        }
+
+        vec2 s = texelFetch(gxColor, clamp(p + dir * k, ivec2(0), last), 0).xy;
+        float weight = exp(-float(k * k) / 8.0) * (s.y > 0.0 ? clamp(1.0 - abs(s.y - c.y) / (0.04 * c.y + 0.1), 0.0, 1.0) : 0.0);
+        sum += s.x * weight;
+        total += weight;
+    }
+
+    imageStore(gxOut, p, vec4(sum / total, c.y, 0.0, 0.0));
+}

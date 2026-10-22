@@ -1,6 +1,6 @@
 """Compiles the GLSL under this folder to SPIR-V and writes the .inc files of uint32_t arrays the
 backend embeds: Spirv.inc (the draw programs, Vulkan/Pipelines/Programs.cpp) and PresentSpirv.inc
-(the present pass, Vulkan/Present.cpp).
+(the present pass, Vulkan/Present.cpp), ParticleSpirv.inc and LightingSpirv.inc (compute).
 
 The .inc files are committed: a build needs no glslang. Run this after editing a shader:
 
@@ -36,6 +36,14 @@ OUTPUTS = [
     # GPUPARTICLES: the particle quad expansion (Vulkan/ParticleQuads.cpp)
     ("ParticleSpirv.inc", [
         ("ParticleQuads.comp", "kParticleQuadsComp"),
+    ]),
+    # LIGHTING: the modern-lighting post passes (Vulkan/Lighting.cpp)
+    ("LightingSpirv.inc", [
+        ("LightingAo.comp", "kLightingAoComp"),
+        ("LightingBlur.comp", "kLightingBlurComp"),
+        ("LightingApply.comp", "kLightingApplyComp"),
+        ("LightingBloom.comp", "kLightingBloomComp"),
+        ("LightingTonemap.comp", "kLightingTonemapComp"),
     ]),
 ]
 

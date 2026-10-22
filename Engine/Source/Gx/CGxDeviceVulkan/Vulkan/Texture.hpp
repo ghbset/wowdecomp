@@ -78,6 +78,10 @@ namespace gxvk::vk::texture
      */
     bool CreateTarget(uint32_t width, uint32_t height, uint32_t levels, bool cube, VkFormat format, Image& out);
 
+    /// LIGHTING: CreateMipped (one level) plus STORAGE usage (the format's STORAGE_IMAGE feature
+    /// checked first), for a compute pass's output.
+    bool CreateStorage(uint32_t width, uint32_t height, VkFormat format, Image& out);
+
     /**
      * VFOG: a sampled copy target for a depth buffer (CGxDevice::DeviceCopySceneDepth): one level,
      * TRANSFER_DST | TRANSFER_SRC | SAMPLED, the depth format's own, its view the DEPTH aspect only

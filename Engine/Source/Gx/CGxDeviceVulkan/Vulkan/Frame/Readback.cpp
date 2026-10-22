@@ -163,6 +163,38 @@ namespace gxvk::vk::frame
         return true;
     }
 
+    bool CopyIntoScene(texture::Image& src, const VkRect2D& rect)
+    {
+        if (!s.open || s.queryActive || s.sceneSamples > 1 || src.handle == VK_NULL_HANDLE || rect.extent.width == 0 || rect.extent.height == 0) return false;
+        VkCommandBuffer cmd = OutsideAfterClears();
+        if (!cmd || s.scene.handle == VK_NULL_HANDLE || s.scene.layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) return false;
+
+        constexpr VkPipelineStageFlags kCompute = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+        Transition(cmd, src, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   kCompute, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+        Transition(cmd, s.scene, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                   VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | kReaders | kCompute, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                   VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+
+        // R8G8B8A8 into B8G8R8A8: size-compatible, the bytes as they are (the shader wrote them B, G, R, A)
+        VkImageCopy copy = {};
+        copy.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        copy.srcSubresource.layerCount = 1;
+        copy.srcOffset                 = VkOffset3D{ rect.offset.x, rect.offset.y, 0 };
+        copy.dstSubresource            = copy.srcSubresource;
+        copy.dstOffset                 = copy.srcOffset;
+        copy.extent                    = VkExtent3D{ rect.extent.width, rect.extent.height, 1 };
+        s.dapi->CmdCopyImage(cmd, src.handle, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, s.scene.handle, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+
+        Transition(cmd, s.scene, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                   VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                   kReaders | kCompute | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                   VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT);
+        Transition(cmd, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
+                   VK_PIPELINE_STAGE_TRANSFER_BIT, 0, kCompute, VK_ACCESS_SHADER_WRITE_BIT);
+        return true;
+    }
+
     bool CopyNormalFromScene(texture::Image& dst)
     {
         // See CopyFromScene: a query pins the pass. normalCleared: a scene pass of this frame zeroed it.

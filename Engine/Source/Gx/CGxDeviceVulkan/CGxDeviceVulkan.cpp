@@ -12,6 +12,7 @@
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Frame.hpp"
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Manifest.hpp"
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Memory.hpp"
+#include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Lighting.hpp"
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/ParticleQuads.hpp"
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Pipelines.hpp"
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Present.hpp"
@@ -262,6 +263,7 @@ void CGxDeviceVulkan::ICreateDrawPath() {
     // GPUPARTICLES: optional; without it the particle quads stay on the CPU
     if (this->m_drawPath) {
         particles::Init();
+        gxvk::vk::lighting::Init(this);   // LIGHTING: g_gxLighting (GxLighting.h)
     }
 
     if (!this->m_drawPath) {
@@ -314,6 +316,7 @@ void CGxDeviceVulkan::IDestroyVulkan() {
     this->IReleaseTextures();
     frame::Destroy();
     particles::Shutdown();   // GPUPARTICLES: quad records
+    gxvk::vk::lighting::Shutdown();   // LIGHTING: its images, before texture::Shutdown()
     pipelines::Shutdown();
     present::Shutdown();
     queries::Shutdown();

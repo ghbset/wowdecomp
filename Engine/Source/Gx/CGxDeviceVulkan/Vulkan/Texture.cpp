@@ -95,6 +95,11 @@ namespace gxvk::vk::texture
         return CreateImage(width, height, levels, cube, format, out, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
     }
 
+    bool CreateStorage(uint32_t width, uint32_t height, VkFormat format, Image& out)
+    {
+        return CreateImage(width, height, 1, false, format, out, VK_IMAGE_USAGE_STORAGE_BIT);
+    }
+
     bool CreateDepthCopy(uint32_t width, uint32_t height, VkFormat format, Image& out)
     {
         if (!IsDepth(format)) return false;
