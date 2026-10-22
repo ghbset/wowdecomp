@@ -2540,13 +2540,14 @@ int32_t CGChat::OnChannelNotify(void* param, NETMESSAGE msgId, uint32_t time, CD
             type = CHAT_MSG_CHANNEL_NOTICE;
             ChatChannel* channel = zoneChannelID ? CGChat::GetChannelByChatChannelID(zoneChannelID) : GetChannelByName(channelName);
 
-            if (channel) {
-                if (channel->m_unkA0 || !suspended) {
-                    SStrCopy(text, "YOU_LEFT", sizeof(text));
-                    reset = 1;
-                } else {
-                    SStrCopy(text, "SUSPENDED", sizeof(text));
-                }
+            // FORK FIX (DustinHendrickson 764ed1ad): stock bug, the exe (0x50E319) leaves text empty when the client no
+            // longer tracks the channel (left already while changing zones); FrameXML's CHANNEL_NOTICE handler then
+            // formats CHAT__NOTICE (nil) and raises a Lua error. Treat it as left.
+            if (!channel || channel->m_unkA0 || !suspended) {
+                SStrCopy(text, "YOU_LEFT", sizeof(text));
+                reset = 1;
+            } else {
+                SStrCopy(text, "SUSPENDED", sizeof(text));
             }
 
             CGChat::LeftChannel(zoneChannelID, channelName);
@@ -2825,7 +2826,10 @@ int32_t CGChat::OnChannelNotify(void* param, NETMESSAGE msgId, uint32_t time, CD
         }
     }
 
-    CGChat::AddChatMessage(text, type, senderName, 0, displayName, nullptr, nullptr, guid, 0, targetGuid, 0, false, nullptr);
+    // FORK FIX (DustinHendrickson 764ed1ad): an empty notice name is a nil-format Lua error in FrameXML
+    if (text[0]) {
+        CGChat::AddChatMessage(text, type, senderName, 0, displayName, nullptr, nullptr, guid, 0, targetGuid, 0, false, nullptr);
+    }
 
     if (reset) {
         CGChat::ResetChannel(zoneChannelID, channelName);
