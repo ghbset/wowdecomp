@@ -144,6 +144,7 @@
 #include "WoW/Source/UIUtil/InputControl.h"
 #include "WoW/Source/UIUtil/PortraitButton.h"
 #include "WoW/Source/UIUtil/Tooltip.h"
+#include "WoW/Source/UIUtil/ActionCam.h"
 #include "WoW/Source/WorldClient/World.h"
 #include "WoW/Source/WowSvcs/WowSvcsClient/AccountData.h"
 #include "WoW/Source/WowSvcs/WowSvcsClient/ClientServices.h"
@@ -3715,6 +3716,7 @@ void CGGameUI::EnterWorld() {
     }
 
     CGGameUI::s_inWorld = 1;
+    ActionCam::Reset();   // not stock: ActionCam springs start from rest
     CGChat::Pause();
     CGPlayer_C* player = static_cast<CGPlayer_C*>(ClntObjMgrObjectPtr(ClntObjMgrGetActivePlayer(), TYPE_PLAYER, __FILE__, __LINE__));
     CM2Model* model = player ? player->GetObjectModel() : nullptr;
