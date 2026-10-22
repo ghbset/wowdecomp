@@ -33,8 +33,10 @@ namespace gxvk::vk::texture::detail
     using Image = gxvk::vk::texture::Image;
 
     /// The most images tracked at once: a fixed table, so a full table is a logged refusal rather
-    /// than silent growth. A zone holds a few thousand. Heap-allocated at Init().
-    constexpr uint32_t kMaxImages = 16384;
+    /// than silent growth. A zone holds a few thousand, but the engine's texture cache keeps far more
+    /// alive: 16384 filled after ~12 minutes of teleports (2.8 GiB, ~175 KiB each) and every new
+    /// texture drew white. 65536 is ~4 MiB of table. Heap-allocated at Init().
+    constexpr uint32_t kMaxImages = 65536;
 
     /// The index over the table, twice its size (a load factor of at most one half keeps linear
     /// probing short), a power of two for the mask.
