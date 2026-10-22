@@ -265,4 +265,9 @@ void OsSetFastSleep(bool on) {
     g_osFastSleep = on;
 }
 
+// CUSTOM: OsWaitUntilClocks (the precise frame cap) skips its wait under fast load, as OsSleep does
+bool OsFastSleepActive() {
+    return g_osFastSleep && GetTickCount() - g_osFastSleepSince < 60000;
+}
+
 #endif

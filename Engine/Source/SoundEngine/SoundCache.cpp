@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <malloc.h>
 #include <typeinfo>
+#include <vector>
 #include "Engine/Source/SoundEngine/SoundCache.h"
 #include "Engine/Source/BlizzardCore/SFile2-Core.h"
 #include "Engine/Source/BlizzardCore/Source/System/Using/Using.h"
@@ -99,7 +100,8 @@ CacheChunkRecycler::~CacheChunkRecycler() {
 SoundCache::SoundCache() : m_using("Blizzard::Mopaq") {
     Blizzard::Using::StartUsing(this->m_using);
     this->m_bytes = 0;
-    this->m_maxBytes = 4 * 1024 * 1024;
+    // CUSTOM (Badgermilk0 port); the SoundMemoryCache default (stock 4 MB)
+    this->m_maxBytes = 32 * 1024 * 1024;
     this->m_lastUpdate = 0;
     this->m_startTime = 0;
 }
@@ -124,7 +126,8 @@ void SoundCache::Initialize() {
     this->m_lastUpdate = now;
     this->m_startTime = now;
 
-    CVar* cvar = CVar::Register("SoundMemoryCache", "sound cache memory size (MB)", 2, "4", nullptr, 7, false, nullptr, false);
+    // CUSTOM (Badgermilk0 port); 32 MB by default (stock 4): sounds played again are served from memory, not re-read
+    CVar* cvar = CVar::Register("SoundMemoryCache", "sound cache memory size (MB)", 2, "32", nullptr, 7, false, nullptr, false);
 
     if (cvar) {
         this->m_maxBytes = cvar->m_intValue << 20;
@@ -134,7 +137,9 @@ void SoundCache::Initialize() {
 // VERIFY: 66b8671f manual
 // OFFSET: 0x008775C0
 void SoundCache::Purge(uint32_t bytes) {
-    CacheChunkRef* refs = static_cast<CacheChunkRef*>(alloca(sizeof(CacheChunkRef) * (this->m_maxBytes >> 10)));
+    // CUSTOM (Badgermilk0 port). The stock list lived on the stack, sized by the cache budget (one entry per KB), which
+    // bounded the budget by the stack and overflowed whenever more chunks than that were loaded; it grows on the heap now
+    std::vector<CacheChunkRef> refList;
     uint32_t count = 0;
 
     struct CacheData* data = this->m_table.m_fulllist.Head();
@@ -151,8 +156,10 @@ void SoundCache::Purge(uint32_t bytes) {
                     hasData = true;
 
                     if (!chunk->m_refCount) {
-                        refs[count].m_cacheData = data;
-                        refs[count].m_index = i;
+                        CacheChunkRef ref;
+                        ref.m_cacheData = data;
+                        ref.m_index = i;
+                        refList.push_back(ref);
                         count++;
                     }
                 }
@@ -166,6 +173,7 @@ void SoundCache::Purge(uint32_t bytes) {
         data = next;
     }
 
+    CacheChunkRef* refs = refList.data();
     SortChunkRefs(refs, count);
 
     for (uint32_t i = 0; i < count; i++) {

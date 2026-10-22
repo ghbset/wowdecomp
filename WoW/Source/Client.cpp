@@ -1084,7 +1084,12 @@ int32_t InitializeEngineCallback(const void* data, void* param) {
 
     s_cvTextureFilteringMode = CVar::Register("textureFilteringMode", "Texture filtering mode", 1, "1", CWorldParam::TextureFilteringCallback, CATEGORY_GRAPHICS, false, nullptr, false);
     s_cvarUIFaster = CVar::Register("UIFaster", "UI acceleration option", 0, "3", UIFasterCallback, CATEGORY_GRAPHICS, false, nullptr, false);
+    // CUSTOM (Badgermilk0 port): 256 (MB) by default on x64, stock 32 (TextureSetCacheSize caps it by RAM)
+#if defined(WOWDECOMP_ARCH_64)
+    s_cvTextureCacheSize = CVar::Register("textureCacheSize", "Texture cache size in bytes", 1, "256", TextureCacheSizeCallback, CATEGORY_GRAPHICS, false, nullptr, false);
+#else
     s_cvTextureCacheSize = CVar::Register("textureCacheSize", "Texture cache size in bytes", 1, "32", TextureCacheSizeCallback, CATEGORY_GRAPHICS, false, nullptr, false);
+#endif
     CVar::Register("gxMsdfFonts", "MSDF (distance field) fonts: 1 on, 0 stock bitmap glyphs", 1, "1", FontMsdfCallback, CATEGORY_GRAPHICS, false, nullptr, false);
     TextureSetCacheSize(s_cvTextureCacheSize->m_intValue << 20);
 

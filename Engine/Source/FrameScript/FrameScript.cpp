@@ -1145,7 +1145,13 @@ int32_t FrameScript_Initialize(int32_t profile) {
     lua_newtable(s_context);
     s_recursiveTableHash = luaL_ref(s_context, LUA_REGISTRYINDEX);
 
+#if defined(WOWDECOMP_ARCH_64)
+    // CUSTOM (Badgermilk0 port): Lua's own default pause (a new cycle once the heap doubles) instead of 110, which kept
+    // the collector running almost all the time to hold the Lua heap down in a 32-bit address space
+    lua_gc(s_context, LUA_GCSETPAUSE, 200);
+#else
     lua_gc(s_context, LUA_GCSETPAUSE, 110);
+#endif
 
     luaopen_base(s_context);
     lua_pop(s_context, 2);

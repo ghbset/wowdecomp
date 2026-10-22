@@ -34,5 +34,12 @@ void OsTimeManagerDestroy();
 void OsSleep(uint32_t milliseconds);
 // BACKLOG F5: set by the loading screen while CVar fastLoad is on; OsSleep then returns at once (60 s cap).
 void OsSetFastSleep(bool on);
+bool OsFastSleepActive();
+
+// CUSTOM (Badgermilk0 port, OsWait.cpp): a 1 ms system timer period for the process, and a precise wait until an
+// OsGetAsyncTimeClocks value
+void OsTimerResolutionBegin();
+void OsTimerResolutionEnd();
+void OsWaitUntilClocks(uint64_t deadline);
 
 #endif
