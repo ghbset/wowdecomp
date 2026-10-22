@@ -15,6 +15,7 @@
 #include "WoW/Source/Ui/WorldFrame.h"
 #include "WoW/Source/WorldClient/CPortalView.h"
 #include "WoW/Source/WorldClient/DayNight__DNInfo.h"
+#include "WoW/Source/WorldClient/VolumetricFog.h"
 #include "WoW/Source/WorldClient/Map.h"
 #include "WoW/Source/WorldClient/MapLight.h"
 #include "WoW/Source/WorldClient/World.h"
@@ -198,7 +199,13 @@ static bool SunShadowDir(C3Vector& out) {
     EShadowMode mode = CShadowCache::GetShadowMode();
     bool cached = mode > SHADOW_MEDIUM && mode < SHADOW_VERY_HIGH;
 
-    if (!s_cvSunShadows || !s_cvSunShadows->m_intValue) {
+    // Camera in a WMO interior: the stock steep light, so a low sun does not throw unit shadows across the interior
+    // dynamic map onto the walls (Ratchet inn, AUDIT-2026-10-23 bug 1). Hysteresis so a doorway does not flap.
+    static bool s_indoors;
+    float blend = VolumetricFog::CameraInteriorBlend();
+    s_indoors = s_indoors ? blend > 0.4f : blend >= 0.6f;
+
+    if (!s_cvSunShadows || !s_cvSunShadows->m_intValue || s_indoors) {
         if (s_haveLatch && cached) {
             CShadowCache::s_bandRedraw |= 7u;   // back to the stock light: the cached maps are for the old one
         }
