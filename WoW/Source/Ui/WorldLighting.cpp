@@ -39,6 +39,7 @@ struct LightingCVars {
     CVar* fogScattering;
     CVar* debug;
     // the shader half
+    CVar* master;
     CVar* perPixel;
     CVar* dynamic;
     CVar* dynamicIntensity;
@@ -95,6 +96,11 @@ uint32_t Features() {
 
     if (Positive(s_cv.fogScattering) > 0.0f) {
         features |= GxLighting_Scattering;
+    }
+
+    // shaderLighting 0: every light* feature off, whatever its own CVar says
+    if (s_cv.master->m_intValue <= 0) {
+        return features;
     }
 
     if (s_cv.perPixel->m_intValue > 0) {
@@ -469,6 +475,7 @@ void WorldLightingRegisterCVars() {
     s_cv.fogScattering = Reg("fogScattering", "Fog tinted toward the sun's colour around the sun, 0 = off", "0");
     s_cv.debug = Reg("lightingDebug", "1 shows the SSAO term alone; 2 lit surfaces by kind, 3 dynamic light alone; 4, 5 the SSAO inputs", "0");
     // the shader half (lit shader pack in custom.MPQ; D3D11 and Vulkan)
+    s_cv.master = Reg("shaderLighting", "Master switch for the light* shader lighting, 0 = all off (D3D11/Vulkan)", "0");
     s_cv.perPixel = Reg("lightPerPixel", "M2, WMO and terrain lit per pixel with their stock formulas (D3D11/Vulkan)", "0");
     s_cv.dynamic = Reg("lightDynamic", "Point lights of models and WMOs light the world per pixel (D3D11/Vulkan)", "0");
     s_cv.dynamicIntensity = Reg("lightDynamicIntensity", "Dynamic light intensity (0-8)", "1");
