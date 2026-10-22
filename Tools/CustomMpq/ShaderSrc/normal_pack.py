@@ -65,7 +65,7 @@ def main(argv):
             for k, (ra, rb, rc, code) in enumerate(perms):
                 if code:
                     code = normals.rewrite_record(name, prof[:2], code)
-                    st, why, dx = xlate.compile_one(code, None, xlate.pcf_slots(rel, k))[:3]
+                    st, why, dx = xlate.compile_one(code, None, xlate.pcf_slots(rel, k), rel)[:3]   # rel: lit families (modern lighting)
                     if st != 'ok':
                         sys.exit('%s:%d: xlate failed: %s %s' % (rel, k, st, why))
                 else:

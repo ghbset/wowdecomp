@@ -96,7 +96,7 @@ def main(argv):
                 sm4.append((ra, rb, rc, code))
                 continue
             p = patch(code)
-            st, why, dx = xlate.compile_one(p, None, xlate.pcf_slots(rel, k))[:3]
+            st, why, dx = xlate.compile_one(p, None, xlate.pcf_slots(rel, k), rel)[:3]   # rel: lit families (modern lighting)
             if st != 'ok':
                 sys.exit('%s:%d: xlate failed: %s %s' % (fam, k, st, why))
             sm3.append((ra, rb, rc, p))
