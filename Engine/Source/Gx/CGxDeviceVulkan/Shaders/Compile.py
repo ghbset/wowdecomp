@@ -44,6 +44,7 @@ OUTPUTS = [
         ("LightingApply.comp", "kLightingApplyComp"),
         ("LightingBloom.comp", "kLightingBloomComp"),
         ("LightingTonemap.comp", "kLightingTonemapComp"),
+        ("LightingCopy.frag", "kLightingCopyFrag"),
     ]),
     # FSR: the world upscaler's input and output passes (Vulkan/Upscale.cpp)
     ("UpscaleSpirv.inc", [

@@ -23,6 +23,15 @@
 // recorded, the pass resumed at the next draw. The glyph cache updated while text is drawn is the
 // case the inline path exists for.
 //
+// TEXEVICT (not in 12340: D3D9's managed pool paged textures out for the client): the image table
+// and VRAM are bounded, the engine's texture caches are not -- a long session of teleports filled
+// 16384 images and every new texture drew white. ITexEvict, once a second from ScenePresent, drops
+// the least recently named images not named for kColdSeconds when the table passes 90 % or the
+// device-local heap passes 88 % of the driver's budget: the recycle bin first (TextureCacheShrink,
+// unreferenced by definition), then LRU over m_textures, each by ITexForceRecreation's own path, so
+// the next bind makes and refills the image through the texture's callback. A create that fails
+// leaves the texture white for kRetryFrames, then the next bind tries again.
+//
 // GENERATED MIPS (CGxTexFlags::m_generateMipMaps, D3D9's AUTOGENMIPMAP): such a texture gets its
 // full chain; the protocol's single level is uploaded as level 0 and the rest derived by a blit
 // chain recorded under the same rule. A format that cannot be blitted keeps one level.
@@ -36,6 +45,12 @@
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/TexFormat.hpp"
 #include "Engine/Source/Gx/CGxDeviceVulkan/Vulkan/Texture.hpp"
 #include "Engine/Source/Gx/CGxTex.h"
+#include "Engine/Source/ConsoleBase/ConsoleVar.h"
+#include "Engine/Source/ConsoleBase/Types.h"
+#include "Engine/Source/Os/TimeManager.h"
+#include "Engine/Source/Services/Texture.h"
+#include <algorithm>
+#include <vector>
 
 namespace {
     namespace context   = gxvk::vk::context;
@@ -46,6 +61,7 @@ namespace {
 
     using gxvk::log::Write;
     using gxvk::log::Debug;
+    using gxvk::log::Info;
     using gxvk::log::Warn;
 
     constexpr uint32_t kCubeFaces  = 6;
@@ -54,6 +70,13 @@ namespace {
     // Regions of one protocol run staged so far, all in one source buffer: 6 faces x 16 levels fit;
     // a fuller run is recorded and restarted.
     constexpr uint32_t kBatchMax = 128;
+
+    // TEXEVICT: frames a failed create waits before a bind tries again (~1-2 s): not every bind of
+    // every frame, and an eviction pass runs in between.
+    constexpr uint64_t kRetryFrames = 120;
+
+    /// TEXEVICT: a create failed since the last ITexEvict pass: that pass evicts even below the marks.
+    bool g_createFailed = false;
 
     struct TexRec {
         texture::Image image;                ///< VK_NULL_HANDLE when the texture cannot have one
@@ -66,6 +89,7 @@ namespace {
         uint32_t       dataFormat   = 0;     ///< EGxTexFormat the callback delivers (the storage format for a render target)
         bool           decode       = false; ///< the callback's texels are decoded to RGBA8 before the upload
         bool           renderTarget = false;
+        uint64_t       retryAt      = 0;     ///< TEXEVICT: the image could not be made; the serial from which a bind tries again
     };
 
     struct Region {
@@ -102,6 +126,12 @@ namespace {
         uint64_t renamed;         ///< refills of an image this frame already sampled: a fresh copy filled ahead of the frame
         uint64_t deferred;        ///< inline refills left pending while an occlusion query pinned the pass
         uint64_t reformatted;     ///< records remade for a recycled CGxTex whose data format or mip range changed
+        uint64_t createFailed;    ///< TEXEVICT: images that could not be made (table full, no memory), retried later
+        uint64_t retried;         ///< TEXEVICT: binds that tried a failed create again
+        uint64_t evicted;         ///< TEXEVICT: cold images dropped by ITexEvict's LRU
+        uint64_t evictedBytes;
+        uint64_t binned;          ///< TEXEVICT: recycle-bin CGxTexes destroyed by ITexEvict
+        uint64_t evictPasses;     ///< TEXEVICT: passes that found pressure (or ran the test)
     };
     Stats g_stats;
 
@@ -166,6 +196,23 @@ namespace {
         frame::RetireImage(r->image, LastRef(*r));
         delete r;
         slot = nullptr;
+    }
+
+    /// ITexForceRecreation's step for one texture: the image retired by the last frame that named it,
+    /// the texture marked for creation and a whole update, its callback told the texels were dropped
+    /// (GxTex_3). The next bind makes it again.
+    void DropForRecreation(CGxDevice* device, CGxTex* texId) {
+        DropRec(RecOf(texId));
+        texId->m_needsCreation = 1;
+
+        CiRect whole;
+        device->TexMarkForUpdate(texId, whole, 0);
+
+        if (texId->m_userFunc) {
+            uint32_t texelStrideInBytes;
+            const void* texels;
+            texId->m_userFunc(GxTex_3, texId->m_width, texId->m_height, 0, 0, texId->m_userArg, texelStrideInBytes, texels);
+        }
     }
 
     /// Whether the device can sample a format from an optimally tiled image.
@@ -431,7 +478,8 @@ void CGxDeviceVulkan::ITexMarkAsUpdated(CGxTex* texId) {
 // Mirrors CGxDeviceD3d::ITexCreate (0x006A2C00): the image for the size and level range
 // ITexWHDStartEnd gives, in the data format the callback delivers. The record exists whether or not
 // an image could be made, so the engine's TexIsReadyNow holds and a texture without an image draws
-// untextured rather than being retried every bind.
+// untextured rather than being retried every bind. TEXEVICT: a create that FAILED (the table full,
+// no memory) is tried again by a bind kRetryFrames later (ITexResolve), and tells ITexEvict.
 void CGxDeviceVulkan::ITexCreate(CGxTex* texId) {
     TexRec*& slot = RecOf(texId);
     DropRec(slot);
@@ -516,7 +564,10 @@ void CGxDeviceVulkan::ITexCreate(CGxTex* texId) {
 
     if (!made) {
         r->image = texture::Image();
+        r->retryAt = frame::Serial() + kRetryFrames;
+        g_createFailed = true;
         g_stats.noImage++;
+        g_stats.createFailed++;
         return;
     }
 
@@ -643,18 +694,7 @@ void CGxDeviceVulkan::ITexForceRecreation(int32_t all) {
             continue;
         }
 
-        DropRec(RecOf(texId));
-        texId->m_needsCreation = 1;
-
-        CiRect whole;
-        this->TexMarkForUpdate(texId, whole, 0);
-
-        if (texId->m_userFunc) {
-            uint32_t texelStrideInBytes;
-            const void* texels;
-            texId->m_userFunc(GxTex_3, texId->m_width, texId->m_height, 0, 0, texId->m_userArg, texelStrideInBytes, texels);
-        }
-
+        DropForRecreation(this, texId);
         g_stats.recreated++;
     }
 
@@ -684,6 +724,14 @@ void CGxDeviceVulkan::TexDestroy(CGxTex* texId) {
 int32_t CGxDeviceVulkan::ITexResolve(CGxTex* texId, uint32_t stage, pipelines::Draw& draw) {
     if (!texId || stage >= pipelines::kTextureStages) {
         return 0;
+    }
+
+    // TEXEVICT: a failed create's wait is over: made and refilled whole by the protocol below.
+    if (TexRec* failed = RecOf(texId); failed && failed->retryAt && frame::Serial() >= failed->retryAt) {
+        texId->m_needsCreation = 1;
+        CiRect whole;
+        this->TexMarkForUpdate(texId, whole, 0);
+        g_stats.retried++;
     }
 
     this->ITexMarkAsUpdated(texId);
@@ -912,4 +960,183 @@ void CGxDeviceVulkan::IReleaseTextures() {
           static_cast<unsigned long long>(g_stats.deferred), static_cast<unsigned long long>(g_stats.reformatted),
           static_cast<unsigned long long>(t.created),
           static_cast<unsigned long long>(t.destroyed), t.livePeak, static_cast<unsigned long long>(t.bytes >> 20));
+}
+
+// TEXEVICT: not in 12340 (D3D9's managed pool paged textures out for the client). See the header
+// comment: once a second, under pressure, the recycle bin and then the least recently named images
+// go, each through ITexForceRecreation's path; every ~10 s a log line tells a leak (live images keep
+// climbing) from a working set (they plateau).
+namespace {
+    constexpr uint32_t kPassMs      = 1000;
+    constexpr uint32_t kLogMs       = 10000;
+    constexpr uint32_t kColdSeconds = 5;      ///< an image named in the last 5 s is never evicted
+    constexpr uint32_t kRing        = 8;      ///< > kColdSeconds: the serial at each of the last passes
+    constexpr uint32_t kBinBatch    = 1024;   ///< recycle-bin CGxTexes destroyed per pass under memory pressure
+
+    uint32_t g_lastPassMs        = 0;
+    uint32_t g_lastLogMs         = 0;
+    uint32_t g_lastLogLive       = 0;
+    uint64_t g_serialAt[kRing]   = {};        ///< frame::Serial() at the last kRing passes, one a second
+    uint32_t g_ringPos           = 0;
+
+    // gxVkEvictTest 1: every pass evicts every evictable image not named for a second, pressure or
+    // not, so a tester sees evicted textures refill (walk off and back, close and reopen the map).
+    CVar* EvictTestCVar() {
+        static CVar* cvar;
+
+        if (!cvar) {
+            cvar = CVar::Register("gxVkEvictTest", "Vulkan: 1 evicts every texture not drawn for a second (tests that evicted textures refill)", 1, "0", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
+        }
+
+        return cvar;
+    }
+
+    /// Whether a texture's image may be evicted: a filled image whose callback can produce the whole
+    /// texture again at any later bind. Not a render target (its texels are drawn, not supplied; the
+    /// device's scene-depth copy and normal buffer are one or have no callback), not a binned or
+    /// draw-filled texture (GxTexNullUserFunc supplies nothing), not an atlas page (ResolveMipLevel
+    /// supplies texels only inside CTextureAtlas::Reload's pump; outside it a 4-byte dummy).
+    // ponytail: DayNight's DNClouds pair (WoW-side callback, not nameable here) refills from its
+    // half-built back buffer and looks wrong until the next cloud cycle; a no-evict flag on
+    // CGxTexFlags if that shows.
+    bool Evictable(const CGxTex* texId, const TexRec* r) {
+        return r && r->image.handle != VK_NULL_HANDLE && !r->renderTarget && !texId->m_flags.m_renderTarget
+            && texId->m_userFunc && texId->m_userFunc != GxTexNullUserFunc && texId->m_userFunc != ResolveMipLevel;
+    }
+
+    /// The device-local heap the images live in (the largest), its driver usage and budget. False
+    /// without VK_EXT_memory_budget.
+    bool DeviceLocalBudget(VkDeviceSize& usage, VkDeviceSize& budget) {
+        VkPhysicalDeviceMemoryProperties props = {};
+        VkDeviceSize budgets[VK_MAX_MEMORY_HEAPS];
+        VkDeviceSize usages[VK_MAX_MEMORY_HEAPS];
+        usage = budget = 0;
+
+        if (!context::MemoryHeaps(props, budgets, usages)) {
+            return false;
+        }
+
+        VkDeviceSize largest = 0;
+
+        for (uint32_t h = 0; h < props.memoryHeapCount; h++) {
+            if ((props.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) && props.memoryHeaps[h].size > largest) {
+                largest = props.memoryHeaps[h].size;
+                usage = usages[h];
+                budget = budgets[h];
+            }
+        }
+
+        return budget != 0;
+    }
+}
+
+void CGxDeviceVulkan::ITexEvict() {
+    const uint32_t now = OsGetAsyncTimeMs();
+
+    if (now - g_lastPassMs < kPassMs) {
+        return;
+    }
+
+    g_lastPassMs = now;
+    g_serialAt[g_ringPos % kRing] = frame::Serial();
+    g_ringPos++;
+
+    const CVar* testCVar = EvictTestCVar();
+    const bool test = testCVar && testCVar->m_intValue != 0;
+
+    texture::Stats t;
+    texture::GetStats(t);
+    VkDeviceSize usage = 0;
+    VkDeviceSize budget = 0;
+    const bool haveBudget = DeviceLocalBudget(usage, budget);
+
+    // The marks: the table past 90 % (evicted down to 80 %), the heap past 88 % of the budget
+    // (evicted down to 80 %), or a create that failed since the last pass.
+    const bool tablePressure = t.capacity && t.live > t.capacity / 10 * 9;
+    const bool memPressure = haveBudget && usage > budget / 100 * 88;
+    const bool failed = g_createFailed;
+    g_createFailed = false;
+
+    if (tablePressure || memPressure || failed || test) {
+        g_stats.evictPasses++;
+
+        uint32_t wantImages = tablePressure ? t.live - t.capacity / 10 * 8 : (failed ? 256u : 0u);
+        uint64_t wantBytes = memPressure ? usage - budget / 100 * 80 : 0;
+
+        // 1. The recycle bin: nothing references a binned CGxTex. A memory-pressure pass takes a
+        // batch of it whatever the count; the bin refills from later frees at no cost.
+        if (!test) {
+            const int32_t binned = TextureCacheShrink(static_cast<int32_t>(memPressure && wantImages < kBinBatch ? kBinBatch : wantImages));
+            g_stats.binned += binned;
+            wantImages = wantImages > static_cast<uint32_t>(binned) ? wantImages - binned : 0u;
+        }
+
+        // 2. LRU: the evictable images not named since the pass kColdSeconds ago (1 s for the test),
+        // oldest first. The ring starts at 0, so nothing is cold in a session's first seconds.
+        const uint32_t back = test ? 1u : kColdSeconds;
+        const uint64_t cold = g_ringPos > back ? g_serialAt[(g_ringPos - 1 - back) % kRing] : 0;
+
+        if (cold && (wantImages || wantBytes || test)) {
+            struct Candidate {
+                uint64_t last;
+                CGxTex*  tex;
+            };
+            // ponytail: a full walk of m_textures (<= 64K) per pressured pass, once a second; a
+            // recency-ordered list if the walk shows in a profile.
+            std::vector<Candidate> candidates;
+
+            for (CGxTex* texId = this->m_textures.Head(); texId; texId = this->m_textures.Next(texId)) {
+                const TexRec* r = RecOf(texId);
+
+                if (Evictable(texId, r) && LastRef(*r) < cold) {
+                    candidates.push_back(Candidate { LastRef(*r), texId });
+                }
+            }
+
+            std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) { return a.last < b.last; });
+
+            uint32_t images = 0;
+            uint64_t bytes = 0;
+
+            for (const Candidate& c : candidates) {
+                if (!test && images >= wantImages && bytes >= wantBytes) {
+                    break;
+                }
+
+                bytes += RecOf(c.tex)->image.block.size;
+                images++;
+                DropForRecreation(this, c.tex);
+            }
+
+            g_stats.evicted += images;
+            g_stats.evictedBytes += bytes;
+
+            if (images && !test) {
+                Write(Info, "vulkan: texevict: %u cold image(s), %llu MiB evicted (%u live of %u, device-local %llu / %llu MiB%s)",
+                      images, static_cast<unsigned long long>(bytes >> 20), t.live, t.capacity,
+                      static_cast<unsigned long long>(usage >> 20), static_cast<unsigned long long>(budget >> 20), failed ? ", a create failed" : "");
+            }
+        }
+    }
+
+    if (now - g_lastLogMs >= kLogMs) {
+        g_lastLogMs = now;
+        texture::GetStats(t);
+        int32_t binBytes = 0;
+        int32_t binCount = 0;
+        TextureCacheStats(binBytes, binCount);
+
+        // Info when the live count moved by more than an eighth since the last line, else debug.
+        const uint32_t moved = t.live > g_lastLogLive ? t.live - g_lastLogLive : g_lastLogLive - t.live;
+        const bool notable = moved > g_lastLogLive / 8;
+        g_lastLogLive = t.live;
+
+        Write(notable ? Info : Debug, "vulkan: textures: %u live image(s) (peak %u, table %u); recycle bin %d (%d KiB); device-local %llu / %llu MiB; evicted %llu (%llu MiB) in %llu pass(es), %llu binned, %llu failed create(s), %llu retried%s",
+              t.live, t.livePeak, t.capacity, binCount, binBytes / 1024,
+              static_cast<unsigned long long>(usage >> 20), static_cast<unsigned long long>(budget >> 20),
+              static_cast<unsigned long long>(g_stats.evicted), static_cast<unsigned long long>(g_stats.evictedBytes >> 20),
+              static_cast<unsigned long long>(g_stats.evictPasses), static_cast<unsigned long long>(g_stats.binned),
+              static_cast<unsigned long long>(g_stats.createFailed), static_cast<unsigned long long>(g_stats.retried),
+              test ? " (gxVkEvictTest)" : "");
+    }
 }

@@ -52,6 +52,10 @@ void CGxDeviceVulkan::ScenePresent() {
             CVar* renderThread = RenderThreadCVar();
             frame::SetThreaded(renderThread && renderThread->m_intValue != 0);
 
+            // TEXEVICT: cold textures dropped under image-table or memory pressure, before the frame
+            // ends (nothing of it is evicted: this frame's draws stamped what they sampled).
+            this->ITexEvict();
+
             if (frame::Present(this->IWindowVisible() != 0)) {
                 // A resize, or a surface that went out of date: the frame has dropped what named the
                 // old swapchain; the context rebuilds it on the window.

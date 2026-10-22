@@ -152,6 +152,7 @@ class CGxDeviceVulkan : public CGxDevice {
     void ITexCreate(CGxTex* texId);
     void ITexUpload(CGxTex* texId);
     void ITexForceRecreation(int32_t all);
+    void ITexEvict();
     int32_t ITexResolve(CGxTex* texId, uint32_t stage, gxvk::vk::pipelines::Draw& draw);
     gxvk::vk::texture::Image* ITexImage(CGxTex* texId);
     void ITexTouch(CGxTex* texId);

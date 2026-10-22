@@ -1367,6 +1367,60 @@ void TextureCacheUpdate() {
     }
 }
 
+// CUSTOM (texevict): not in 12340. The Vulkan device's first step under image-table or memory
+// pressure (CGxDeviceVulkan::ITexEvict): up to `maxDestroyed` of the recycle bin's CGxTexes destroyed,
+// oldest first across every size bucket (each bucket's list is in TextureFreeGxTex order, so its head
+// is its oldest). Nothing references a binned CGxTex (its callback is GxTexNullUserFunc), so this is
+// TextureCacheUpdate's trim without its byte target. Returns how many went.
+int32_t TextureCacheShrink(int32_t maxDestroyed) {
+    int32_t destroyed = 0;
+
+    while (destroyed < maxDestroyed) {
+        TSExplicitList<CGxTexCache, offsetof(CGxTexCache, m_link)>* oldest = nullptr;
+
+        for (int32_t x = 0; x < 6; x++) {
+            for (int32_t y = 0; y < 6; y++) {
+                CGxTexCache* head = s_gxTexCache[x][y].Head();
+
+                if (head && (!oldest || head->m_time < oldest->Head()->m_time)) {
+                    oldest = &s_gxTexCache[x][y];
+                }
+            }
+        }
+
+        if (!oldest) {
+            break;
+        }
+
+        CGxTexCache* entry = oldest->Head();
+        s_gxTexCacheSize -= entry->m_size;
+        GxTexDestroy(entry->m_gxTex);
+        entry->m_gxTex = nullptr;
+        entry->m_size = 0;
+        entry->m_time = 0xFFFFFFFF;
+        entry->m_link.Unlink();
+        s_gxTexCacheFree.LinkToHead(entry);
+        destroyed++;
+    }
+
+    return destroyed;
+}
+
+// CUSTOM (texevict): not in 12340. The recycle bin's bytes (TextureCalcGxTexSize's estimate) and entries, for
+// the Vulkan device's periodic texture log line.
+void TextureCacheStats(int32_t& bytes, int32_t& count) {
+    bytes = s_gxTexCacheSize;
+    count = 0;
+
+    for (int32_t x = 0; x < 6; x++) {
+        for (int32_t y = 0; y < 6; y++) {
+            for (CGxTexCache* entry = s_gxTexCache[x][y].Head(); entry; entry = entry->m_link.Next()) {
+                count++;
+            }
+        }
+    }
+}
+
 // VERIFY: 04d8356e auto
 // OFFSET: 0x004B6C50
 void TextureIncreasePriority(CTexture* texture) {

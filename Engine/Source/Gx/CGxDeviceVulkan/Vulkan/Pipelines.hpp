@@ -226,7 +226,7 @@ namespace gxvk::vk::pipelines
     };
     void GetStats(Stats& out);
 
-    /// FSR: work recorded by someone else (the FSR 4 provider) pushed constants and bound state the cache does not
-    /// know of; the next Record() binds and pushes everything again.
-    void ForgetBound();
+    /// LIGHTING: a pipeline of another module was bound on the command buffer between draws; the next
+    /// Record() binds everything again.
+    void Unbind();
 }

@@ -343,5 +343,5 @@ namespace gxvk::vk::texture
         return true;
     }
 
-    void GetStats(Stats& out) { out = s.stats; }
+    void GetStats(Stats& out) { out = s.stats; out.capacity = kMaxImages; }
 }

@@ -686,7 +686,7 @@ namespace
 
         const ffxReturnCode_t r = s_provider.dispatch(&this->m_ctx, &di.header);
         // the provider bound its own pipelines and pushed its own constants on this command buffer
-        gxvk::vk::pipelines::ForgetBound();
+        gxvk::vk::pipelines::Unbind();
 
         if (r != FFX_API_RETURN_OK)
         {

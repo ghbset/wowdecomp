@@ -415,5 +415,5 @@ namespace gxvk::vk::pipelines
 
     void GetStats(Stats& out) { out = s.stats; }
 
-    void ForgetBound() { s.bound = Bound(); }
+    void Unbind() { s.bound = Bound(); }
 }
