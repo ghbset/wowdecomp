@@ -6,18 +6,22 @@
 namespace gxvk::vk::pipelines::detail
 {
     /// Set 1: binding 0, a dynamic uniform buffer read by both stages (the vertex module reads v[],
-    /// the pixel module p[] and misc).
+    /// the pixel module p[] and misc); binding 1, LIGHTING, the GxLighting block (GxLightingGpu), a
+    /// dynamic uniform buffer read by the lit modules (bls/lighting.py), bound for every draw.
     bool CreateRegsLayout()
     {
-        VkDescriptorSetLayoutBinding binding = {};
-        binding.binding         = 0;
-        binding.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
-        binding.descriptorCount = 1;
-        binding.stageFlags      = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        VkDescriptorSetLayoutBinding bindings[2] = {};
+        for (uint32_t i = 0; i < 2; ++i)
+        {
+            bindings[i].binding         = i;
+            bindings[i].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+            bindings[i].descriptorCount = 1;
+            bindings[i].stageFlags      = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        }
         VkDescriptorSetLayoutCreateInfo layout = {};
         layout.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        layout.bindingCount = 1;
-        layout.pBindings    = &binding;
+        layout.bindingCount = 2;
+        layout.pBindings    = bindings;
         const VkResult r = s.dapi->CreateDescriptorSetLayout(s.device, &layout, nullptr, &s.regsLayout);
         if (r != VK_SUCCESS)
         {

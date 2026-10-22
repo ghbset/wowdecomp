@@ -87,6 +87,10 @@ namespace gxvk::vk::pipelines::detail
     constexpr uint32_t     kRegsChunkBytes = 4u * 1024u * 1024u;
     constexpr uint32_t     kMaxRegsChunks  = 16;
 
+    /// LIGHTING (GxLighting.h): copies of g_gxLightingGpu one frame slot keeps, one per serial change in the
+    /// frame (SetupView and EndWorld bump it: two a world frame).
+    constexpr uint32_t     kLightCopies    = 32;
+
     /// One uniform slice of the translated interface: p[16], misc, v[rows] (Shaders: the Regs
     /// block); for a pixel record with pconst > 16, v[256] then px[pconst - 16] at
     /// kSliceBytesLarge. The set-1 descriptor's range is kSliceBytesMax; a module reads the first
@@ -160,6 +164,7 @@ namespace gxvk::vk::pipelines::detail
         VkDescriptorSet  set0     = VK_NULL_HANDLE;
         VkDescriptorSet  set1     = VK_NULL_HANDLE;
         uint32_t         offset1  = 0;
+        uint32_t         offsetLight = 0;
         bool             have1    = false;
         VkBuffer         vbs[kMaxStreams + 1]     = {};
         VkDeviceSize     offsets[kMaxStreams + 1] = {};
@@ -224,6 +229,11 @@ namespace gxvk::vk::pipelines::detail
         VkDescriptorSet lastSliceSet    = VK_NULL_HANDLE;
         uint32_t        lastSliceOffset = 0;
         uint64_t        lastVertexGen   = 0;       ///< Draw::vertexRegsGen of lastSlice's vertex rows
+        /// LIGHTING: the slot's copies of g_gxLightingGpu (set 1 binding 1, a dynamic offset per copy).
+        memory::Buffer  light;
+        uint32_t        lightUsed   = 0;           ///< copies written this frame
+        uint32_t        lightSerial = 0;           ///< g_gxLightingGpuSerial of the last copy
+        uint32_t        lightOffset = 0;           ///< its offset
     };
 
     struct State
@@ -233,7 +243,7 @@ namespace gxvk::vk::pipelines::detail
         const loader::Device* dapi   = nullptr;
         VkShaderModule        vert[kVertexPrograms]   = {};   ///< the backend's own; Translated stays null
         VkShaderModule        frag[kFragmentPrograms] = {};
-        VkDescriptorSetLayout regsLayout = VK_NULL_HANDLE;    ///< set 1: one dynamic uniform buffer, both stages
+        VkDescriptorSetLayout regsLayout = VK_NULL_HANDLE;    ///< set 1: the constant slice and the GxLighting block, dynamic uniform buffers, both stages
         VkDescriptorPool      regsPool   = VK_NULL_HANDLE;    ///< the set-1 sets, for the session
         VkPipelineCache       cache      = VK_NULL_HANDLE;
         memory::Buffer        constant;                       ///< the constant stream (kConstantBytes)
@@ -297,6 +307,6 @@ namespace gxvk::vk::pipelines::detail
     const texture::Image* White(bool cube);
 
     // Regs.cpp
-    bool RegsSlice(uint32_t slot, uint64_t serial, const Draw& draw, VkDescriptorSet& set, uint32_t& offset);
+    bool RegsSlice(uint32_t slot, uint64_t serial, const Draw& draw, VkDescriptorSet& set, uint32_t& offset, uint32_t& lightOffset);
     void DestroyRegs(SlotSets& slot);
 }
